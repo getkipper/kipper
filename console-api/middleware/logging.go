@@ -3,6 +3,8 @@ package middleware
 import (
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -17,10 +19,45 @@ func Logging(next http.Handler) http.Handler {
 		// a request log entry.
 		defer func() {
 			log.Printf("%s %s %d %s", //nolint:gosec // request method and path are safe to log
-				r.Method, r.URL.Path, wrapped.status, time.Since(start))
+				r.Method, loggedPath(r), wrapped.status, time.Since(start))
 		}()
 		next.ServeHTTP(wrapped, r)
 	})
+}
+
+// loggedPath redacts the token following each "invites" path component because
+// invite tokens are credentials. It matches "invites" case-insensitively,
+// recognizes encoded and repeated slashes, and replaces the entire escaped
+// segment containing the token. Path-based redaction also covers unmatched
+// requests and responses sent before routing.
+func loggedPath(r *http.Request) string {
+	segments := strings.Split(r.URL.EscapedPath(), "/")
+	type part struct {
+		text    string
+		segment int
+	}
+	var parts []part
+	for i, segment := range segments {
+		decoded, err := url.PathUnescape(segment)
+		if err != nil {
+			decoded = segment
+		}
+		for _, text := range strings.Split(decoded, "/") {
+			parts = append(parts, part{text, i})
+		}
+	}
+	for i, p := range parts {
+		if !strings.EqualFold(p.text, "invites") {
+			continue
+		}
+		for _, next := range parts[i+1:] {
+			if next.text != "" {
+				segments[next.segment] = "[redacted]"
+				break
+			}
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 type statusWriter struct {

@@ -2,12 +2,21 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
 )
@@ -93,4 +102,89 @@ func TestPauseTuningMissingStatefulSet(t *testing.T) {
 		t.Fatalf("expected a no-op for a missing statefulset, got %v", err)
 	}
 	resume()
+}
+
+// A dump holds the whole database, so only its owner may read it, and an
+// export never replaces a file that is already there.
+func TestTheExportFileIsPrivateAndNew(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shop.sql")
+
+	f, err := createExportFile(path)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	}
+
+	f, err = createExportFile(filepath.Join(filepath.Dir(path), "failed.sql"))
+	require.NoError(t, err)
+	assert.Equal(t, os.Stdout, f.progress())
+	f.discard()
+	_, err = os.Stat(filepath.Join(filepath.Dir(path), "failed.sql"))
+	assert.True(t, os.IsNotExist(err), "a failed export removes the file it created")
+
+	require.NoError(t, os.WriteFile(path, []byte("earlier dump"), 0o600))
+	_, err = createExportFile(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+	kept, _ := os.ReadFile(path)
+	assert.Equal(t, "earlier dump", string(kept))
+}
+
+// A dump can still be piped on, for example with --file /dev/stdout.
+func TestTheExportCanGoToADevice(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/null on Windows")
+	}
+	f, err := createExportFile(os.DevNull)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+// A regular file swapped in after the device check must not receive the dump.
+func TestTheExportRefusesARegularFileSwappedInForADevice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared.sql")
+	require.NoError(t, os.WriteFile(path, []byte("earlier contents"), 0o600))
+
+	_, err := openExportStream(path)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+	got, _ := os.ReadFile(path)
+	assert.Equal(t, "earlier contents", string(got))
+}
+
+// A stream export can write the dump to stdout, so deferred resume warnings
+// go to stderr to keep the dump usable.
+func TestAFailedTunerResumeWarnsOutsideTheDump(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "mongodb", Namespace: "blog-test"},
+	})
+	resume, err := pauseTuning(context.Background(), clientset, "blog-test", "mongodb")
+	require.NoError(t, err)
+	clientset.PrependReactor("patch", "statefulsets", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+
+	var stdout string
+	stderr := captureStderr(t, func() { stdout = captureStdout(t, resume) })
+
+	assert.Empty(t, stdout)
+	assert.Contains(t, stderr, "could not resume the resource tuner")
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	saved := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = saved
+	require.NoError(t, w.Close())
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(out)
 }

@@ -3,8 +3,12 @@ package installer
 import (
 	"bufio"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"os"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/getkipper/kipper/kip/internal/config"
 )
@@ -30,6 +34,49 @@ type BackupStorageConfig struct {
 	SecretAccessKey string
 	SSEC            bool
 	SSECKey         []byte
+}
+
+// CheckBackupEndpoint returns nil for an empty endpoint (AWS S3), an HTTPS URL,
+// or an HTTP URL with a loopback, private, or link-local unicast address,
+// localhost, a valid bare Service name, or a name ending in .svc or
+// .svc.cluster.local. Other endpoints return an error. Hostnames are checked
+// by syntax only. Backups contain cluster Secrets, so public endpoints require
+// HTTPS to protect those credentials in transit.
+func CheckBackupEndpoint(endpoint string) error {
+	if endpoint == "" {
+		return nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" {
+		return fmt.Errorf("backup storage endpoint %q is not a URL such as https://objects.example.com", endpoint)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if privateHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("backup storage endpoint %q uses plain HTTP with a host outside the allowed private address and Service name patterns, which risks exposing every Secret in each backup. "+
+			"Use its https:// URL. Plain HTTP is accepted for localhost, a private IP address, a bare Service name, or a Service name ending in .svc or .svc.cluster.local, "+
+			"such as minio.storage.svc for Service minio in namespace storage. For another host on a private network, use its private IP address", endpoint)
+	default:
+		return fmt.Errorf("backup storage endpoint %q is not a URL such as https://objects.example.com", endpoint)
+	}
+}
+
+// privateHost reports whether host is a loopback, private or link-local
+// unicast address, localhost, or a name matching cluster Service syntax. A
+// single-label name must be a valid Service name, so a number such as
+// 3405803783, which some resolvers read as an IPv4 address, does not count.
+func privateHost(host string) bool {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		addr = addr.WithZone("").Unmap()
+		return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return host == "localhost" || len(validation.IsDNS1035Label(host)) == 0 ||
+		strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
 }
 
 // AWSCredentials holds a single profile's access key and secret read
@@ -101,6 +148,17 @@ func LoadAWSCredentials(path, profile string) (*AWSCredentials, error) {
 func (c *AWSCredentials) VeleroCredentialsBlock() string {
 	return fmt.Sprintf("[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n",
 		c.AccessKeyID, c.SecretAccessKey)
+}
+
+// PlainEndpointWarning returns a warning for a plain HTTP endpoint rejected by
+// CheckBackupEndpoint, or "" for nil cfg or any other endpoint. Existing clusters
+// retain endpoints configured before that check until the operator changes them.
+func PlainEndpointWarning(cfg *BackupStorageConfig) string {
+	if cfg == nil || !strings.HasPrefix(strings.ToLower(cfg.Endpoint), "http://") || CheckBackupEndpoint(cfg.Endpoint) == nil {
+		return ""
+	}
+	return fmt.Sprintf("Backups go to %s over plain HTTP with a host outside the allowed private address and Service name patterns, so every Secret in each backup crosses the network unencrypted. "+
+		"Re-run kip install with the backup storage flags and the storage provider's https:// URL", cfg.Endpoint)
 }
 
 // BackupStorageFromRef restores external storage settings from persisted config.

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 var userInviteCmd = &cobra.Command{
@@ -40,15 +42,13 @@ func init() {
 	userCmd.AddCommand(userInviteCmd)
 }
 
+// inviteEntry matches the console API's stored invite format. Records use the
+// token hash as their key and retain the first eight token characters as Prefix.
 type inviteEntry struct {
-	Token   string `json:"token"`
+	Prefix  string `json:"prefix,omitempty"`
 	Role    string `json:"role"`
 	Expires string `json:"expires"`
-	// Email is the address the invite is for. It is what the account is created
-	// under, so the console API refuses an invite that does not carry one; the
-	// json tag matches the console API's own invite record, which is the same
-	// object read from the other side.
-	Email string `json:"email,omitempty"`
+	Email   string `json:"email,omitempty"`
 }
 
 func runUserInvite(cmd *cobra.Command, _ []string) error {
@@ -56,8 +56,8 @@ func runUserInvite(cmd *cobra.Command, _ []string) error {
 	expiresStr, _ := cmd.Flags().GetString("expires")
 	email, _ := cmd.Flags().GetString("email")
 
-	// MarkFlagRequired catches an absent flag; this catches one that is present
-	// and empty, which is the same thing to everything downstream.
+	// MarkFlagRequired checks presence, so an explicitly empty address needs
+	// the same validation here.
 	email = strings.TrimSpace(email)
 	if email == "" {
 		return fmt.Errorf("--email is required: an invite is for one person, and the account is created under that address")
@@ -80,7 +80,6 @@ func runUserInvite(cmd *cobra.Command, _ []string) error {
 	ctx := context.Background()
 	cs := k8sClient.Clientset()
 
-	// Generate token
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return fmt.Errorf("generating token: %w", err)
@@ -88,13 +87,37 @@ func runUserInvite(cmd *cobra.Command, _ []string) error {
 	token := hex.EncodeToString(tokenBytes)
 	expires := time.Now().Add(duration).Format(time.RFC3339)
 
-	// Store invite
-	entry := inviteEntry{Token: token, Role: role, Expires: expires, Email: email}
+	entry := inviteEntry{Role: role, Expires: expires, Email: email}
+	if err := storeInviteEntry(ctx, cs, token, entry); err != nil {
+		return err
+	}
 
+	url := fmt.Sprintf("https://%s/invite/%s", cluster.ConsoleHost(), token)
+
+	fmt.Printf("\n  Invite link created\n")
+	fmt.Printf("  For: %s\n", email)
+	fmt.Printf("  Role: %s\n", role)
+	fmt.Printf("  Expires: %s\n\n", expiresStr)
+	fmt.Printf("  %s\n\n", url)
+	fmt.Printf("  Send this link to %s. It can only be used once, and only\n", email)
+	fmt.Printf("  that address can accept it.\n\n")
+
+	return nil
+}
+
+// inviteKey returns the token hash used by the console API to look up invites.
+// Hashing keeps the redeemable token out of newly stored records.
+func inviteKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func storeInviteEntry(ctx context.Context, cs kubernetes.Interface, token string, entry inviteEntry) error {
+	entry.Prefix = token[:min(8, len(token))]
 	cm, err := cs.CoreV1().ConfigMaps("kipper-system").Get(ctx, "kipper-invites", metav1.GetOptions{})
 	switch {
 	case errors.IsNotFound(err):
-		invites := map[string]inviteEntry{token: entry}
+		invites := map[string]inviteEntry{inviteKey(token): entry}
 		data, _ := json.Marshal(invites)
 		_, err = cs.CoreV1().ConfigMaps("kipper-system").Create(ctx, &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -109,29 +132,23 @@ func runUserInvite(cmd *cobra.Command, _ []string) error {
 	case err != nil:
 		return fmt.Errorf("reading invites: %w", err)
 	default:
-		var invites map[string]inviteEntry
+		// Raw messages preserve other invites' fields, including the token field
+		// required to look up invites stored before hashing.
+		var invites map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(cm.Data["invites"]), &invites); err != nil {
-			invites = map[string]inviteEntry{}
+			invites = map[string]json.RawMessage{}
 		}
-		invites[token] = entry
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("storing invite: %w", err)
+		}
+		invites[inviteKey(token)] = raw
 		data, _ := json.Marshal(invites)
 		cm.Data["invites"] = string(data)
 		if _, err := cs.CoreV1().ConfigMaps("kipper-system").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("storing invite: %w", err)
 		}
 	}
-
-	// Build URL
-	url := fmt.Sprintf("https://%s/invite/%s", cluster.ConsoleHost(), token)
-
-	fmt.Printf("\n  Invite link created\n")
-	fmt.Printf("  For: %s\n", email)
-	fmt.Printf("  Role: %s\n", role)
-	fmt.Printf("  Expires: %s\n\n", expiresStr)
-	fmt.Printf("  %s\n\n", url)
-	fmt.Printf("  Send this link to %s. It can only be used once, and only\n", email)
-	fmt.Printf("  that address can accept it.\n\n")
-
 	return nil
 }
 

@@ -144,6 +144,17 @@ func main() {
 			handlers.RunLegacyDBConfigMapRetirement(ctx, clientset, handlers.CRServiceExists(crClient), 10*time.Minute)
 		})
 
+	// Move SSO client secrets written into the Dex config by earlier versions
+	// into their Secret. One console-api replica does it at a time.
+	var dexSecretsMove leader.Worker
+	go leader.Run(context.Background(), clientset, resourcebounds.ModeConfigMapNamespace, "kipper-dex-connector-secrets", podName,
+		leader.DefaultTiming, &dexSecretsMove, func(ctx context.Context) {
+			if err := handlers.MoveDexConnectorSecrets(ctx, clientset); err != nil {
+				log.Printf("moving SSO client secrets out of the Dex config: %v", err)
+			}
+			<-ctx.Done()
+		})
+
 	// Backstop cleanup of build Jobs and their ephemeral credential secrets in
 	// kipper-builds: sweeps anything older than 3h, so a hung build or a secret
 	// orphaned by a console-api restart never outlives its build.

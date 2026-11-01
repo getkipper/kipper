@@ -133,6 +133,12 @@ spec:
                 secretKeyRef:
                   name: dex-oidc-client
                   key: secret
+          # Dex expands environment variable references in connector configs
+          # using the SSO client secrets stored by the console.
+          envFrom:
+            - secretRef:
+                name: dex-connector-secrets
+                optional: true
           ports:
             - containerPort: 5556
           volumeMounts:

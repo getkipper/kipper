@@ -150,6 +150,73 @@ func runServiceImport(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// createExportFile creates a file with owner-only read and write permissions
+// because a dump contains the whole database. It rejects existing regular files
+// and opens existing devices or pipes, such as /dev/stdout, without truncation.
+func createExportFile(path string) (*exportFile, error) {
+	if info, err := os.Stat(path); err == nil && isStream(info) {
+		f, err := openExportStream(path)
+		if err != nil {
+			return nil, err
+		}
+		return &exportFile{File: f}, nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // the operator chose this path
+	if os.IsExist(err) {
+		return nil, exportFileExists(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("creating output file: %w", err)
+	}
+	return &exportFile{File: f, created: true}, nil
+}
+
+// exportFile tracks whether this export created its output file so cleanup
+// preserves existing devices and pipes.
+type exportFile struct {
+	*os.File
+	created bool
+}
+
+// progress returns stdout for a newly created file and stderr for a device or
+// pipe, such as /dev/stdout, to keep messages separate from the dump.
+func (f *exportFile) progress() io.Writer {
+	if f.created {
+		return os.Stdout
+	}
+	return os.Stderr
+}
+
+// discard closes the output of a failed export and removes it only when this
+// run created it. Close and removal errors are ignored.
+func (f *exportFile) discard() {
+	_ = f.Close()
+	if f.created {
+		_ = os.Remove(f.Name())
+	}
+}
+
+// openExportStream opens an existing device or pipe without truncating it. The
+// opened file is checked again, so a regular file swapped in after the first
+// check is refused before anything is written to it.
+func openExportStream(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // the operator chose this path
+	if err != nil {
+		return nil, fmt.Errorf("opening output file: %w", err)
+	}
+	if info, err := f.Stat(); err != nil || !isStream(info) {
+		_ = f.Close()
+		return nil, exportFileExists(path)
+	}
+	return f, nil
+}
+
+func isStream(info os.FileInfo) bool { return info.Mode()&(os.ModeDevice|os.ModeNamedPipe) != 0 }
+
+func exportFileExists(path string) error {
+	return fmt.Errorf("%s already exists. Choose another --file, or remove it first", path)
+}
+
 func runServiceExport(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	filePath, _ := cmd.Flags().GetString("file")
@@ -169,28 +236,30 @@ func runServiceExport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	out, err := os.Create(filePath)
+	out, err := createExportFile(filePath)
 	if err != nil {
-		return fmt.Errorf("creating output file: %w", err)
+		return err
 	}
 
-	fmt.Printf("\n  Exporting %s/%s to %s...\n\n", namespace, name, filePath)
+	_, _ = fmt.Fprintf(out.progress(), "\n  Exporting %s/%s to %s...\n\n", namespace, name, filePath)
 
 	resume, err := pauseTuning(cmd.Context(), target.clientset, namespace, name)
 	if err != nil {
-		_ = out.Close()
-		_ = os.Remove(filePath)
+		out.discard()
 		return fmt.Errorf("pausing the resource tuner: %w", err)
 	}
 	defer resume()
 
 	if err := target.exec(cmd.Context(), command, nil, out, os.Stderr); err != nil {
-		_ = out.Close()
-		_ = os.Remove(filePath)
+		out.discard()
 		return fmt.Errorf("export failed: %w", err)
 	}
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("writing output file: %w", err)
+	}
+	if !out.created {
+		_, _ = fmt.Fprintf(out.progress(), "\n  ✔  Exported %s/%s to %s\n", namespace, name, filePath)
+		return nil
 	}
 
 	info, err := os.Stat(filePath)
@@ -334,7 +403,7 @@ func pauseTuning(ctx context.Context, clientset kubernetes.Interface, namespace,
 		}
 		clear := fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, labels.AnnoTuningPausedUntil)
 		if _, err := clientset.AppsV1().StatefulSets(namespace).Patch(cleanupCtx, name, types.MergePatchType, []byte(clear), metav1.PatchOptions{}); err != nil {
-			fmt.Printf("  ⚠  could not resume the resource tuner (it resumes by itself at %s): %v\n", own, err)
+			fmt.Fprintf(os.Stderr, "  ⚠  could not resume the resource tuner (it resumes by itself at %s): %v\n", own, err)
 		}
 	}, nil
 }

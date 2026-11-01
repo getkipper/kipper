@@ -181,3 +181,29 @@ func emailsFromList(items []any) []string {
 	}
 	return out
 }
+
+// A connector saved by this version keeps its client secret in the source
+// cluster's dex-connector-secrets Secret, which the snapshot does not carry, so
+// importing its reference would break that login on the target.
+func TestMergeDexConfig_LeavesOutConnectorsWithASecretReference(t *testing.T) {
+	snapshot := `connectors:
+- type: github
+  id: github
+  name: GitHub
+  config:
+    clientID: abc
+    clientSecret: $KIPPER_GITHUB_CLIENT_SECRET_ABCDEFGH2345
+- type: gitlab
+  id: gitlab
+  name: GitLab
+  config:
+    clientID: def
+    clientSecret: inline-secret
+`
+	merged, report, err := MergeDexConfig([]byte(liveDexConfig), []byte(snapshot))
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"gitlab"}, report.ConnectorsAdded)
+	assert.Equal(t, []string{"github"}, report.ConnectorsSkipped)
+	assert.NotContains(t, string(merged), "KIPPER_GITHUB_CLIENT_SECRET")
+}

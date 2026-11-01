@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
+	"sigs.k8s.io/yaml"
 )
 
 func TestGenerateSecret(t *testing.T) {
@@ -122,4 +124,23 @@ func TestInstallDexReportsWhetherThePasswordWasSent(t *testing.T) {
 	sent, err = InstallDex(failingRunner{failOn: "staticPasswords"}, "dex.example.com", "console.example.com", "example.com", "hash")
 	require.Error(t, err)
 	assert.True(t, sent, "an apply that reports failure may still have committed")
+}
+
+// The console stores SSO client secrets in dex-connector-secrets, and the
+// connector config refers to them by environment variable.
+func TestDexLoadsTheConnectorSecretsIntoItsEnvironment(t *testing.T) {
+	manifest := renderDexManifest("dex.example.com", "console.example.com", "example.com", "$2a$10$hash")
+	var deploy appsv1.Deployment
+	for _, doc := range strings.Split(manifest, "\n---\n") {
+		if strings.Contains(doc, "kind: Deployment") {
+			require.NoError(t, yaml.Unmarshal([]byte(doc), &deploy))
+		}
+	}
+	require.Len(t, deploy.Spec.Template.Spec.Containers, 1)
+	envFrom := deploy.Spec.Template.Spec.Containers[0].EnvFrom
+	require.Len(t, envFrom, 1)
+	require.NotNil(t, envFrom[0].SecretRef)
+	assert.Equal(t, "dex-connector-secrets", envFrom[0].SecretRef.Name)
+	require.NotNil(t, envFrom[0].SecretRef.Optional)
+	assert.True(t, *envFrom[0].SecretRef.Optional, "Dex starts before the first connector exists")
 }

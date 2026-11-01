@@ -86,6 +86,12 @@ func runUserImport(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("\n  ✔  No new users or connectors in the snapshot. (%d entries were already present.)\n", report.AlreadyPresent)
 	}
+	if len(report.ConnectorsSkipped) > 0 {
+		fmt.Printf("  ⚠  Skipped %d connectors because their client secrets remain on the source cluster. Enable them again in the console:\n", len(report.ConnectorsSkipped))
+		for _, id := range report.ConnectorsSkipped {
+			fmt.Printf("    - %s\n", id)
+		}
+	}
 
 	// Always honor --restart-dex even when the import was a no-op.
 	// Operators reach for this flag when a previous run wrote the

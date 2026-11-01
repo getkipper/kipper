@@ -21,3 +21,19 @@ func TestSSECWithoutExternalStorageIsRefused(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--backup-storage-bucket")
 }
+
+func TestAPlainHTTPBackupEndpointOnThePublicInternetIsRefused(t *testing.T) {
+	cmd := &cobra.Command{}
+	for _, name := range []string{"backup-storage-bucket", "backup-storage-region", "backup-storage-endpoint", "backup-storage-credentials", "backup-storage-profile", "backup-storage-sse-c-key-file"} {
+		cmd.Flags().String(name, "", "")
+	}
+	cmd.Flags().Bool("backup-storage-sse-c", false, "")
+	require.NoError(t, cmd.Flags().Set("backup-storage-bucket", "backups"))
+	require.NoError(t, cmd.Flags().Set("backup-storage-region", "eu-central"))
+	require.NoError(t, cmd.Flags().Set("backup-storage-endpoint", "http://objects.example.com"))
+
+	_, err := resolveBackupStorage(cmd)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://")
+}

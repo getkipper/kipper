@@ -1,12 +1,17 @@
 package middleware
 
 import (
+	"bytes"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/assert"
 )
 
 // The Logging middleware wraps the ResponseWriter. If that wrapper doesn't
@@ -56,4 +61,47 @@ func TestAnAbortedRequestStillLeavesALogLine(t *testing.T) {
 	if !strings.Contains(out.String(), "GET /download") {
 		t.Errorf("an aborted request left no log line:\n%s", out.String())
 	}
+}
+
+// An invite token in a request path is the credential itself, and anyone who
+// can read the console-api log could redeem it.
+func TestTheLogLineLeavesOutTokensInThePath(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	r := chi.NewRouter()
+	r.Use(Logging)
+	r.Get("/api/v1/invites/{token}", func(w http.ResponseWriter, _ *http.Request) {})
+	r.Post("/api/v1/invites/{token}/accept", func(w http.ResponseWriter, _ *http.Request) {})
+	r.Get("/api/v1/projects/{name}", func(w http.ResponseWriter, _ *http.Request) {})
+
+	const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" //nolint:gosec // G101: a made-up invite token
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/api/v1/invites/"+token, nil),
+		httptest.NewRequest(http.MethodPost, "/api/v1/invites/"+token+"/accept", nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/projects/shop", nil),
+		httptest.NewRequest(http.MethodPut, "/api/v1/invites/"+token+"/info", nil),
+		httptest.NewRequest(http.MethodOptions, "/api/v1/invites/"+token+"/accept", nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/invites/"+token[:20]+"%2F"+token[20:], nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/%69nvites/"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/invite%73/"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/invites%2F"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1%2Finvites/"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/invites//"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/invites%2F/"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/invites/%2F/"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/Invites/"+token, nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/INVITES/"+token, nil),
+	} {
+		r.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	out := logged.String()
+	assert.NotContains(t, out, token)
+	assert.NotContains(t, out, token[20:], "an encoded slash must not split the token out of the redacted segment")
+	assert.Contains(t, out, "GET /api/v1/invites/[redacted] 200")
+	assert.Contains(t, out, "POST /api/v1/invites/[redacted]/accept 200")
+	assert.Contains(t, out, "GET /api/v1/projects/shop 200", "other path values stay readable")
+	assert.Contains(t, out, "PUT /api/v1/invites/[redacted]/info 404", "a path no route matches still carries the token")
 }
