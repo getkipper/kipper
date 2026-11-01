@@ -73,7 +73,7 @@ func init() {
 	installCmd.Flags().String("backup-storage-endpoint", "", "S3 endpoint URL (omit for native AWS S3, required for R2/MinIO/B2/Wasabi/Spaces)")
 	installCmd.Flags().String("backup-storage-credentials", "", "path to AWS-style credentials file (defaults to ~/.aws/credentials when --backup-storage-bucket is set)")
 	installCmd.Flags().String("backup-storage-profile", "default", "profile name within the credentials file (e.g. 'acme')")
-	installCmd.Flags().Bool("backup-storage-sse-c", false, "encrypt backup objects with SSE-C using a key kip generates on the server. Requires an external HTTPS S3-compatible store and a bucket without backups")
+	installCmd.Flags().Bool("backup-storage-sse-c", false, "require SSE-C for backup objects, with a key kip generates on the server. Without the flag, kip turns SSE-C on where the store supports it and the bucket holds no backups. Use --backup-storage-sse-c=false to turn it off")
 	installCmd.Flags().String("backup-storage-sse-c-key-file", "", "file containing the SSE-C key used to encrypt existing backups, as saved by kip backup sse-key export (mode 0600)")
 	installCmd.Flags().String("backup-repository-key-file", "", "file containing the key used to encrypt existing volume backups (mode 0600). Required only when the bucket holds backups and this cluster has no key yet")
 
@@ -331,8 +331,8 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 	anySet := bucket != "" || region != "" || endpoint != "" || credsPath != "" ||
 		cmd.Flags().Changed("backup-storage-profile")
 	if !anySet {
-		if sseC || sseKeyPath != "" {
-			return nil, fmt.Errorf("SSE-C needs external backup storage. Pass --backup-storage-bucket, --backup-storage-region and --backup-storage-endpoint")
+		if cmd.Flags().Changed("backup-storage-sse-c") || sseKeyPath != "" {
+			return nil, fmt.Errorf("the SSE-C flags need the external backup storage flags in the same run. Pass --backup-storage-bucket, --backup-storage-region and --backup-storage-endpoint")
 		}
 		return nil, nil
 	}
@@ -381,6 +381,10 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 		SecretAccessKey: creds.SecretAccessKey,
 		SSEC:            sseC,
 		SSECKey:         sseKey,
+		SSECOff:         cmd.Flags().Changed("backup-storage-sse-c") && !sseC,
+	}
+	if cfg.SSECOff && sseKey != nil {
+		return nil, fmt.Errorf("--backup-storage-sse-c=false and --backup-storage-sse-c-key-file contradict each other. The key file turns SSE-C on")
 	}
 	if sseC || sseKey != nil {
 		if err := installer.CheckSSECStorage(cfg); err != nil {

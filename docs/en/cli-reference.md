@@ -1380,7 +1380,7 @@ kip backup schedules                                                # list sched
 kip backup storage resize --size 30Gi                               # grow the in-cluster MinIO volume
 kip backup repository-key export --to ~/example-backups.key         # save the key that encrypts the backups
 kip backup drill blog-prod                                          # restore blog-prod's services and shared volumes into an isolated namespace and count their rows
-kip backup sse-key export --to ~/example-backups-sse.key            # save the SSE-C key, on clusters installed with --backup-storage-sse-c
+kip backup sse-key export --to ~/example-backups-sse.key            # save the SSE-C key, on clusters whose backups use SSE-C
 kip backup mirror add uploads --source s3://... --target s3://... ...  # copy an S3 bucket daily into a locked bucket
 kip backup mirror status uploads                                    # last run, preflight result and copy totals
 kip backup mirror remove uploads                                    # stop the mirror. Both buckets stay as they are
@@ -1392,7 +1392,7 @@ The `nano` profile blocks `kip backup drill` because running a second copy of a 
 
 `kip backup repository-key export` saves the volume backup encryption key to a new file with mode 0600. The command asks for confirmation, which you can skip with `--yes`. On Windows, the file inherits its folder's permissions. It never overwrites an existing file. Keep the key outside the cluster because a recovery install needs it to read the volume backups. See [The backup repository key](/en/installation#backup-repository-key).
 
-`kip backup sse-key export` does the same for the SSE-C key of a cluster installed with `--backup-storage-sse-c`, writing it as base64 text that `--backup-storage-sse-c-key-file` reads back. See [SSE-C](/en/installation#backup-sse-c).
+`kip backup sse-key export` does the same for the SSE-C key of a cluster whose backups use SSE-C, writing it as base64 text that `--backup-storage-sse-c-key-file` reads back. See [SSE-C](/en/installation#backup-sse-c).
 
 `kip backup storage resize` grows the in-cluster MinIO backup volume and waits up to five minutes for it to report the requested capacity. Run it again with the same size to resume waiting. The size must be at least the volume's current storage request. Manage external backup storage through its provider.
 

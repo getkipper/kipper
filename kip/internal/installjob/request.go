@@ -58,6 +58,7 @@ type Backup struct {
 	SecretAccessKey string `json:"secret_access_key"`
 	SSEC            bool   `json:"sse_c,omitempty"`
 	SSECKey         []byte `json:"sse_c_key,omitempty"`
+	SSECOff         bool   `json:"sse_c_off,omitempty"`
 }
 
 // ParseRequest decodes and validates an install request. It returns an error
@@ -123,7 +124,7 @@ func (r Request) Options() installer.Options {
 	if b := r.Backup; b != nil {
 		opts.BackupStorage = &installer.BackupStorageConfig{
 			Bucket: b.Bucket, Region: b.Region, Endpoint: b.Endpoint,
-			AccessKeyID: b.AccessKeyID, SecretAccessKey: b.SecretAccessKey, SSEC: b.SSEC, SSECKey: b.SSECKey,
+			AccessKeyID: b.AccessKeyID, SecretAccessKey: b.SecretAccessKey, SSEC: b.SSEC, SSECKey: b.SSECKey, SSECOff: b.SSECOff,
 		}
 	}
 	return opts

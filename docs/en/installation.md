@@ -50,7 +50,7 @@ kip install --host <ip> [flags]
 | `--backup-storage-endpoint` | No | — | S3 endpoint URL. Omit for native AWS S3 (Velero derives it from the region). Required for R2, self-hosted MinIO, B2, Wasabi, DigitalOcean Spaces. Plain `http://` is accepted only for a loopback, private, or link-local unicast address, `localhost`, a valid bare Service name, or a name ending in `.svc` or `.svc.cluster.local`. Hostnames are checked by syntax only |
 | `--backup-storage-credentials` | No | `~/.aws/credentials` | Path to an AWS-style INI credentials file. Read only at install time and never stored back on disk |
 | `--backup-storage-profile` | No | `default` | Profile name inside the credentials file. Lets you reuse an existing AWS CLI profile like `acme` without copying it to a separate file |
-| `--backup-storage-sse-c` | No | `false` | Encrypt backup objects with a customer-provided key (SSE-C) that kip generates on the server. Requires an external HTTPS S3-compatible store and a bucket without backups. See [SSE-C](#backup-sse-c) |
+| `--backup-storage-sse-c` | No | on where supported | Require encryption of backup objects with a customer-provided key (SSE-C) that kip generates on the server, and fail when the store or bucket cannot support it. Without the flag, kip turns SSE-C on where it can and warns where it cannot. `--backup-storage-sse-c=false` turns it off. See [SSE-C](#backup-sse-c) |
 | `--backup-storage-sse-c-key-file` | To recover from SSE-C backups | — | File containing the SSE-C key used to encrypt the bucket's backups, as saved by `kip backup sse-key export`, mode 0600 |
 | `--backup-repository-key-file` | If the bucket holds backups and the cluster has no key | — | File containing the key used to encrypt existing volume backups, mode 0600. See [The backup repository key](#backup-repository-key) |
 
@@ -248,7 +248,7 @@ The credentials file is read once at install time and never written to disk agai
 
 #### The backup repository key {#backup-repository-key}
 
-Velero encrypts volume backups with a repository key. On a new cluster, `kip install` generates a random 32-byte key on the server before Velero starts, so the key never crosses the network. Resource definitions, such as Deployments and Secrets, are not encrypted by this key. On native AWS S3, they are encrypted at rest by the bucket, and on other stores you can encrypt them with [SSE-C](#backup-sse-c).
+Velero encrypts volume backups with a repository key. On a new cluster, `kip install` generates a random 32-byte key on the server before Velero starts, so the key never crosses the network. Resource definitions, such as Deployments and Secrets, are not encrypted by this key. On native AWS S3, they are encrypted at rest by the bucket, and on other stores kip encrypts them with [SSE-C](#backup-sse-c) where the store supports it.
 
 Save the key outside the cluster right after install, for example in a password manager:
 
@@ -270,7 +270,9 @@ Outside Windows, the file must grant no permissions to other users, as SSH requi
 
 #### Customer-provided encryption keys (SSE-C) {#backup-sse-c}
 
-Some S3-compatible stores, such as Hetzner Object Storage, encrypt objects at rest only when the client sends its own key with every request (SSE-C). With `--backup-storage-sse-c`, `kip install` generates a random 32-byte key on the server, stores it in the Secret `kipper-backup-sse-key` in the `velero` namespace, and has Velero send it with every backup object it writes and reads:
+Some S3-compatible stores, such as Hetzner Object Storage, encrypt objects at rest only when the client sends its own key with every request (SSE-C). On such a store, `kip install` generates a random 32-byte key on the server, stores it in the Secret `kipper-backup-sse-key` in the `velero` namespace, and has Velero send it with every backup object it writes and reads.
+
+By default, kip enables SSE-C when you pass external storage credentials to `kip install`, the cluster has no backup location or is moving to another bucket, the endpoint uses HTTPS, the bucket holds no backups, and the store passes the test below. An ineligible endpoint or bucket leaves SSE-C off with a warning. Native AWS S3 and upgrades without credentials use the behavior described below. A required bucket listing that fails stops the install because kip must know whether the bucket already holds backups. Pass `--backup-storage-sse-c` to require SSE-C and stop the install if it cannot be enabled:
 
 ```bash
 kip install --host 203.0.113.10 --domain example.com \
@@ -279,11 +281,19 @@ kip install --host 203.0.113.10 --domain example.com \
   --backup-storage-sse-c
 ```
 
-SSE-C works only over HTTPS on an external S3-compatible store, and only for a bucket that holds no backups yet, because Velero could not read objects written without the key. Before Velero starts, kip writes a test object with the key, reads it back, and checks that a HEAD request without the key returns HTTP 400 or 403. This rejects stores that ignore SSE-C and allow access without the key, preventing silent unencrypted backups. Native AWS S3 already encrypts backups with SSE-S3 and blocks SSE-C by default on new buckets, so kip refuses the flag there.
+Enabling SSE-C requires HTTPS on an external S3-compatible store and a bucket without existing backups, unless you supply the key for existing SSE-C backups. Velero could not read objects written without the key after SSE-C is enabled. Before Velero starts, kip writes a test object with the key, reads it back, and checks that a HEAD request without the key returns HTTP 400 or 403. This rejects stores that ignore SSE-C and allow access without the key, preventing silent unencrypted backups. Without the flag, a failed write test leaves SSE-C off when the store serves the object without the key, returns different content when read with the key, or answers the keyed test write with Not Implemented and accepts the same write without the key. A test that could not run, for example after a timeout or a 503, stops the install. Native AWS S3 already encrypts backups with SSE-S3 and blocks SSE-C by default on new buckets, so kip leaves SSE-C off there and refuses the flag.
+
+`--backup-storage-sse-c=false` turns SSE-C off for that run unless the cluster's backups already use it. For external S3-compatible storage, the install warns that Velero's own objects, including every backed-up Secret, remain unencrypted unless the store encrypts them itself. The choice applies only to the current run. It matters when creating a backup location or moving to another bucket because later runs preserve the running location's settings. Both forms of the flag require the storage flags in the same run, and `=false` cannot be combined with `--backup-storage-sse-c-key-file`. A cluster whose backups already use SSE-C keeps it because Velero needs the key to read them. Rerunning an install with storage credentials against the same bucket leaves existing plain backups plain and prints a warning because Velero could keep writing during the checks and switch.
+
+An SSE-C key Secret that no backup location uses may still protect backups elsewhere. For example, it may remain after an interrupted install or a run with `=false` on a cluster that already held a key. kip keeps it unused with a warning unless the run requests SSE-C or qualifies for automatic activation. Automatic activation uses it only on an empty bucket after a successful write test. Failed activation only attempts to delete a key created in the same run.
+
+If `--backup-storage-sse-c-key-file` supplies a different key, kip checks it with the write test and against any existing backup metadata before replacing the unused key. It first copies the old key to a Secret named `kipper-backup-sse-key-previous-<UTC timestamp>` in the `velero` namespace and reports that Secret's name. When a backup location uses the cluster's key, kip refuses a different key file because existing backups need the current key.
+
+In-cluster MinIO stores backups without server-side encryption, and every install and upgrade that uses it prints a warning. Upgrades without storage credentials leave SSE-C as it is.
 
 SSE-C covers the objects Velero writes itself: resource definitions such as Deployments and Secrets, backup logs and metadata. Kopia encrypts volume data with the [backup repository key](#backup-repository-key) alone because it does not send the SSE-C key. `kip backup list` shows both protections below the list.
 
-Save the key outside the cluster right after install, next to the repository key:
+The install reminds you to save the key outside the cluster, next to the repository key:
 
 ```bash
 kip backup sse-key export --to ~/example-backups-sse.key

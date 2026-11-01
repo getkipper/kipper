@@ -386,7 +386,7 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if err := prepareBackupRepository(client, target, check, repositoryKey); err != nil {
 		return err
 	}
-	sseC, err := prepareBackupSSEC(client, cfg, target, check)
+	sseC, notice, err := prepareBackupSSEC(client, cfg, target, check)
 	if err != nil {
 		return err
 	}
@@ -413,6 +413,7 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if _, err := client.Run(veleroCmd); err != nil {
 		return fmt.Errorf("applying Velero HelmChart: %w", err)
 	}
+	fmt.Print(notice)
 	return nil
 }
 

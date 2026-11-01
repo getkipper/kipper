@@ -107,3 +107,15 @@ func TestParseRequestRefusesAPlainHTTPBackupEndpoint(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "https://")
 }
+
+func TestRequestCarriesSSECTurnedOff(t *testing.T) {
+	req := Request{Version: RequestVersion, RunID: "r1", Host: "203.0.113.10",
+		Backup: &Backup{Bucket: "b", Region: "hel1", Endpoint: "https://hel1.example.com", SSECOff: true}}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	got, err := ParseRequest(data)
+	require.NoError(t, err)
+
+	assert.True(t, got.Options().BackupStorage.SSECOff)
+}

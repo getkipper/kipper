@@ -21,10 +21,17 @@ type fakeRepoHost struct {
 	liveBSL string // The default backup location as "bucket|s3Url[|sseKeySecret]", or empty if absent.
 	bucket  string // The simulated listing result: "empty", "populated" or "fail".
 
-	sseKey   string // The live SSE-C key Secret's raw bytes, or empty if absent.
-	sseWrite string // The SSE-C write test's log, sseWriteOKMarker when it passes.
-	sseCheck string // The SSE-C key check's log.
-	sseProbe string // The log of the check for SSE-C backups on an install without SSE-C.
+	sseKey          string // The live SSE-C key Secret's raw bytes, or empty if absent.
+	sseWrite        string // The SSE-C write test's log, sseWriteOKMarker when it passes.
+	sseCheck        string // The SSE-C key check's log.
+	sseProbe        string // The log of the check for SSE-C backups on an install without SSE-C.
+	failSSEGenerate bool   // The server-side SSE-C key generation fails before creating the Secret.
+	failSSECopy     bool   // Copying the SSE-C key to a Secret of its own fails.
+	failSSEReplace  bool   // Replacing the SSE-C key fails with output that echoes the new key.
+	failCandidateRm bool   // Removing the candidate key Secret fails once it exists.
+
+	sseCandidate string            // The key file's SSE-C key while kip checks it.
+	ssePrevious  map[string]string // Copies of earlier SSE-C keys by Secret name.
 
 	cmds       []string
 	stdins     []string
@@ -36,6 +43,25 @@ type fakeRepoHost struct {
 const discoveryWarning = "E1018 12:00:00.000000 memcache.go:265] couldn't get current server API group list\n"
 
 func (h *fakeRepoHost) Run(cmd string) (string, error) {
+	if h.failSSEGenerate && strings.Contains(cmd, "/dev/urandom") && strings.Contains(cmd, sseKeySecret) {
+		h.cmds = append(h.cmds, cmd)
+		return "", errors.New("the server is currently unable to handle the request")
+	}
+	if h.failCandidateRm && h.sseCandidate != "" && strings.Contains(cmd, "delete secret "+sseCandidateSecret) {
+		h.cmds = append(h.cmds, cmd)
+		return "", errors.New("etcdserver: request timed out")
+	}
+	if _, after, ok := strings.Cut(cmd, "create secret generic "+sseKeySecret+"-previous-"); ok {
+		h.cmds = append(h.cmds, cmd)
+		if h.failSSECopy {
+			return "", errors.New("secrets is forbidden, data: " + base64.StdEncoding.EncodeToString([]byte(h.sseKey)))
+		}
+		if h.ssePrevious == nil {
+			h.ssePrevious = map[string]string{}
+		}
+		h.ssePrevious[sseKeySecret+"-previous-"+strings.Fields(after)[0]] = h.sseKey
+		return "", nil
+	}
 	out := h.run(cmd)
 	if !strings.Contains(cmd, "2>/dev/null") && !strings.Contains(cmd, "logs job/") {
 		out = discoveryWarning + out
@@ -46,6 +72,8 @@ func (h *fakeRepoHost) Run(cmd string) (string, error) {
 func (h *fakeRepoHost) run(cmd string) string {
 	h.cmds = append(h.cmds, cmd)
 	switch {
+	case strings.Contains(cmd, "delete secret "+sseCandidateSecret):
+		h.sseCandidate = ""
 	case strings.Contains(cmd, "get secret "+sseKeySecret) && strings.Contains(cmd, "jsonpath"):
 		return base64.StdEncoding.EncodeToString([]byte(h.sseKey))
 	case strings.Contains(cmd, "get secret "+sseKeySecret) && strings.Contains(cmd, "-o name"):
@@ -109,7 +137,21 @@ func (h *fakeRepoHost) RunStdin(cmd string, in io.Reader) (string, error) {
 	if strings.Contains(cmd, "create secret generic "+repositoryKeySecret) {
 		h.secret = string(b)
 	}
-	if strings.Contains(cmd, "create secret generic "+sseKeySecret) {
+	switch {
+	case strings.Contains(cmd, "create secret generic "+sseCandidateSecret):
+		h.sseCandidate = string(b)
+	case strings.Contains(cmd, "create secret generic "+sseKeySecret) && strings.Contains(cmd, "kubectl replace -f -"):
+		if h.failSSEReplace {
+			return "", errors.New("the object has been modified, data: " + base64.StdEncoding.EncodeToString(b))
+		}
+		if h.sseKey == "" {
+			return "", errors.New("secrets \"" + sseKeySecret + "\" not found")
+		}
+		h.sseKey = string(b)
+	case strings.Contains(cmd, "create secret generic "+sseKeySecret):
+		if h.sseKey != "" {
+			return "", errors.New("secrets \"" + sseKeySecret + "\" already exists")
+		}
 		h.sseKey = string(b)
 	}
 	return "", nil
