@@ -322,7 +322,7 @@ System components use their own namespaces and security settings.
 
 ### Authentication
 
-The web console is protected by Dex (OAuth2/OIDC identity provider) with bcrypt-hashed passwords. API access requires a valid JWT token.
+The web console is protected by Dex (OAuth2/OIDC identity provider) with bcrypt-hashed passwords. API access requires a valid JWT token. Backups exclude Dex's signing keys and sessions to prevent their reuse from backups to create or renew console sessions. Restores exclude them as well. See [Back up the system namespaces too](/en/backups#back-up-the-system-namespaces-too).
 
 Service-UI share links are the one deliberate exception: an admin can mint a signed, expiring link that opens a single browseable service UI without a Dex login. Each link is a bearer capability backed by a server-side grant, structurally separate from Dex tokens, and it reaches nothing but that one UI. If a link leaks, revoke it (or revoke every link) and rotate the signing key twice. See [Sharing a UI without a login](/en/service-uis#sharing-a-ui-without-a-login) for the full model and the leak runbook.
 

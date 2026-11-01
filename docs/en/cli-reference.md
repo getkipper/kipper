@@ -1398,7 +1398,7 @@ The `nano` profile blocks `kip backup drill` because running a second copy of a 
 
 A default `kip backup create` excludes system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`). The daily schedule uses the same exclusion. Without it, Velero would try to back up its own MinIO PVC and the backup would hang. Pass `--include-system` if you really want a backup of those namespaces too.
 
-Every backup also skips cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges), including when `--include-system` is set. cert-manager recreates them on demand, and restoring them stops certificates renewing.
+Every backup also skips cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges) and Dex's signing keys and sessions, including when `--include-system` is set. cert-manager recreates its issuance objects on demand, and restoring stale issuance state can interfere with certificate renewal. Excluding Dex's keys and sessions prevents their reuse from backups to create or renew console sessions.
 
 ### kip backup mirror {#kip-backup-mirror}
 

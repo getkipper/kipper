@@ -15,11 +15,7 @@ func TestBackupUsesOnlyTheScopedFiltersVeleroAllowsTogether(t *testing.T) {
 	assert.NotContains(t, spec, "includedResources")
 	assert.NotContains(t, spec, "includeClusterResources")
 
-	assert.Equal(t, []interface{}{
-		"certificaterequests.cert-manager.io",
-		"orders.acme.cert-manager.io",
-		"challenges.acme.cert-manager.io",
-	}, spec["excludedNamespaceScopedResources"])
+	assert.Equal(t, toAnySlice(TransientResources()), spec["excludedNamespaceScopedResources"])
 	assert.Equal(t, []interface{}{
 		"projects.kipper.run",
 		"resourceadjustments.kipper.run",
@@ -43,15 +39,12 @@ func TestRestoreLeavesKipperClusterObjectsOutByDefault(t *testing.T) {
 
 	// Automatic selection allows Velero to restore PVs related to restored PVCs.
 	assert.NotContains(t, spec, "includeClusterResources")
-	assert.Equal(t, []interface{}{
-		"certificaterequests.cert-manager.io",
-		"orders.acme.cert-manager.io",
-		"challenges.acme.cert-manager.io",
+	assert.Equal(t, append(toAnySlice(TransientResources()),
 		"projects.kipper.run",
 		"resourceadjustments.kipper.run",
 		"platformconfigs.kipper.run",
 		"clusteridentities.kipper.run",
-	}, spec["excludedResources"])
+	), spec["excludedResources"])
 }
 
 func TestRestoreWithClusterResourcesBringsBackProjectsOnly(t *testing.T) {
@@ -82,6 +75,30 @@ func TestTransientResourcesKeepCertificatesAndTheirSecrets(t *testing.T) {
 	// objects can interfere with renewal.
 	assert.NotContains(t, TransientResources(), "certificates.cert-manager.io")
 	assert.NotContains(t, TransientResources(), "secrets")
+}
+
+// TestBackupsLeaveDexSessionsAndKeysOut protects against backup readers using
+// signing keys or refresh tokens to create or renew console sessions, and against
+// restoring sessions revoked since the backup. Accounts and connectors remain eligible.
+func TestBackupsLeaveDexSessionsAndKeysOut(t *testing.T) {
+	for _, kind := range []string{
+		"authcodes.dex.coreos.com",
+		"authrequests.dex.coreos.com",
+		"signingkeies.dex.coreos.com",
+		"refreshtokens.dex.coreos.com",
+		"offlinesessionses.dex.coreos.com",
+		"devicerequests.dex.coreos.com",
+		"devicetokens.dex.coreos.com",
+	} {
+		assert.Contains(t, TransientResources(), kind)
+	}
+	for _, kind := range []string{"passwords.dex.coreos.com", "oauth2clients.dex.coreos.com", "connectors.dex.coreos.com"} {
+		assert.NotContains(t, TransientResources(), kind)
+	}
+
+	restore := map[string]interface{}{}
+	Restore(restore, true)
+	assert.Contains(t, restore["excludedResources"], "signingkeies.dex.coreos.com", "an older backup must not bring old keys back either")
 }
 
 func TestListsAreFreshOnEveryCall(t *testing.T) {

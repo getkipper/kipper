@@ -30,15 +30,30 @@ func ExcludedNamespaces() []string {
 	}
 }
 
-// TransientResources returns the cert-manager issuance kinds that backups and
-// restores skip. A restored CertificateRequest can collide with request names
-// generated after its Certificate loses revision state. Certificates and TLS
-// Secrets stay included. Each call returns a fresh slice.
+// TransientResources returns the resource kinds excluded from backups and restores.
+// Each call returns a fresh slice.
+//
+// Excluding cert-manager's issuance objects prevents restored CertificateRequests
+// from colliding with request names generated after a Certificate loses revision
+// state. Certificates and TLS Secrets remain eligible for backup and restore.
+//
+// Excluding Dex's signing keys and sessions prevents their reuse from backups
+// to create or renew console sessions. Restores also exclude these resources
+// from older backups and preserve the target cluster's current keys and sessions.
+// Dex passwords, OAuth clients and connectors remain eligible. Resource names
+// match Dex's Kubernetes storage registrations, including their unusual plurals.
 func TransientResources() []string {
 	return []string{
 		"certificaterequests.cert-manager.io",
 		"orders.acme.cert-manager.io",
 		"challenges.acme.cert-manager.io",
+		"authcodes.dex.coreos.com",
+		"authrequests.dex.coreos.com",
+		"signingkeies.dex.coreos.com",
+		"refreshtokens.dex.coreos.com",
+		"offlinesessionses.dex.coreos.com",
+		"devicerequests.dex.coreos.com",
+		"devicetokens.dex.coreos.com",
 	}
 }
 
@@ -59,7 +74,8 @@ func BackedUpClusterResources() []string {
 
 // Backup overwrites excludedNamespaceScopedResources and
 // includedClusterScopedResources in a non-nil Velero Backup spec with the
-// transient issuance exclusions and Kipper cluster resource selection.
+// cert-manager issuance and Dex key and session exclusions, plus the Kipper
+// cluster resource selection.
 // Callers control namespace selection. Velero's scoped filters cannot be
 // combined with includedResources, excludedResources or includeClusterResources.
 func Backup(spec map[string]interface{}) {
@@ -75,10 +91,13 @@ func BackupWholeCluster(spec map[string]interface{}) {
 	spec["includedClusterScopedResources"] = []interface{}{"*"}
 }
 
-// Restore sets the shared selection on a Velero Restore spec: the platform
-// configuration and cluster identity always stay out, projects only with
-// clusterResources. It never sets includeClusterResources to false, which would
-// skip the PV behind each restored PVC and leave the PVC bound to a missing volume.
+// Restore overwrites excludedResources in a non-nil Velero Restore spec with
+// TransientResources, platform configuration and cluster identity. Projects and
+// resource adjustments are also excluded unless clusterResources is true.
+// When true, clusterResources sets includeClusterResources to true. Otherwise,
+// that field is unchanged so a fresh spec uses Velero's automatic selection,
+// which allows PVs behind restored PVCs to be restored with them. Setting the
+// field to false would leave those PVCs bound to missing volumes.
 func Restore(spec map[string]interface{}, clusterResources bool) {
 	excluded := TransientResources()
 	if !clusterResources {
