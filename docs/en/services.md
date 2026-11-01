@@ -571,6 +571,8 @@ kip service export mydb --file nightly.dump --database app
   Restore with: kip service import mydb --file nightly.dump
 ```
 
+The dump contains the whole database, so the export creates a file with owner-only read and write permissions and rejects existing regular files. You can also write to an existing device or pipe such as `/dev/stdout` to send the dump to another tool.
+
 While an import or export runs, the resource tuner is paused for that service. A saturation-triggered resource change would restart the database mid-restore. The pause is a short lease the CLI keeps renewing for as long as the transfer runs, so if the CLI dies the tuner resumes by itself within 15 minutes.
 
 ## Copying data between environments

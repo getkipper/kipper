@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // valueSnapshot is the on-disk format for the registry state. Entries are held
@@ -130,7 +131,7 @@ func (r *Registry) Prune(keep func(ip string) bool) int {
 	for subdomain, entry := range r.entries {
 		if !keep(entry.IP) {
 			delete(r.entries, subdomain)
-			delete(r.tokens, entry.Token)
+			delete(r.tokens, entry.TokenHash)
 			removed++
 		}
 	}
@@ -148,15 +149,17 @@ func (r *Registry) PruneEntries(drop func(*Entry) bool) int {
 	for subdomain, entry := range r.entries {
 		if drop(entry) {
 			delete(r.entries, subdomain)
-			delete(r.tokens, entry.Token)
+			delete(r.tokens, entry.TokenHash)
 			removed++
 		}
 	}
 	return removed
 }
 
-// LoadFrom restores registry state from a JSON file.
-// If the file does not exist, the registry starts empty (not an error).
+// LoadFrom replaces registry state from a JSON file. A missing file leaves
+// the current state unchanged and returns nil. Legacy plaintext tokens are
+// hashed, and migrated state is marked dirty for the next flush. Read and
+// JSON parsing failures return an error.
 func (r *Registry) LoadFrom(path string) error {
 	data, err := os.ReadFile(path) //nolint:gosec // path from config, not user input
 	if err != nil {
@@ -194,8 +197,13 @@ func (r *Registry) LoadFrom(path string) error {
 			// served, losing the tombstone this exists to preserve.
 			migrated = true
 		}
+		// Snapshots written before hashing hold the token itself.
+		if !strings.HasPrefix(entry.TokenHash, tokenHashPrefix) {
+			entry.TokenHash = hashToken(entry.TokenHash)
+			migrated = true
+		}
 		r.entries[entry.Subdomain] = &entry
-		r.tokens[entry.Token] = entry.Subdomain
+		r.tokens[entry.TokenHash] = entry.Subdomain
 	}
 	r.dirty = migrated
 

@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,10 +12,15 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 )
 
@@ -165,8 +172,120 @@ func TestAuthConnectors_Update_EnableGitHub(t *testing.T) {
 	connConfig, ok := conn["config"].(map[string]interface{})
 	assert.True(t, ok)
 	assert.Equal(t, "my-id", connConfig["clientID"])
-	assert.Equal(t, "my-secret", connConfig["clientSecret"])
+	assert.True(t, strings.HasPrefix(connConfig["clientSecret"].(string), "$KIPPER_GITHUB_CLIENT_SECRET_"), "Dex expands the reference from its environment")
+	assert.NotContains(t, cm.Data["config.yaml"], "my-secret")
 	assert.Equal(t, "https://dex.test/dex/callback", connConfig["redirectURI"])
+
+	assert.Equal(t, "my-secret", connectorSecretValue(t, client, "github"))
+	assertDexReadsConnectorSecrets(t, client)
+}
+
+// connectorSecretValue is the value Dex finds for the connector's client
+// secret: the Secret entry its config refers to.
+func connectorSecretValue(t *testing.T, client *fake.Clientset, id string) string {
+	t.Helper()
+	cm, err := client.CoreV1().ConfigMaps("dex").Get(context.Background(), "dex-config", metav1.GetOptions{})
+	require.NoError(t, err)
+	var config map[string]interface{}
+	require.NoError(t, yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &config))
+	connectors, _ := config["connectors"].([]interface{})
+	for _, c := range connectors {
+		conn, _ := c.(map[string]interface{})
+		if conn["id"] != id {
+			continue
+		}
+		ref, _ := conn["config"].(map[string]interface{})["clientSecret"].(string)
+		require.True(t, strings.HasPrefix(ref, "$"), "the config holds a reference, not the secret")
+		secret, err := client.CoreV1().Secrets("dex").Get(context.Background(), dexConnectorSecretName, metav1.GetOptions{})
+		require.NoError(t, err)
+		value, ok := secret.Data[strings.TrimPrefix(ref, "$")]
+		require.True(t, ok, "the Secret lacks %s", ref)
+		return string(value)
+	}
+	t.Fatalf("no connector %s in the Dex config", id)
+	return ""
+}
+
+// A save that fails after the new secret is stored must leave Dex with the
+// client ID and secret that belong together.
+func TestAuthConnectors_Update_AFailedSaveKeepsTheWorkingPair(t *testing.T) {
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(baseDexConfig), dexDeploymentForConnectors())
+	ac := &AuthConnectors{Client: client}
+	r := chi.NewRouter()
+	r.Put("/api/v1/settings/auth", ac.Update)
+	put := func(body string) int {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/settings/auth", strings.NewReader(body)))
+		return rec.Code
+	}
+	require.Equal(t, http.StatusOK, put(`{"type":"github","client_id":"first-id","client_secret":"first-secret","enabled":true}`))
+
+	client.PrependReactor("update", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("conflict")
+	})
+	assert.Equal(t, http.StatusInternalServerError, put(`{"type":"github","client_id":"second-id","client_secret":"second-secret","enabled":true}`))
+
+	assert.Equal(t, "first-secret", connectorSecretValue(t, client, "github"))
+}
+
+// Two admins saving connectors at once both write the connector Secret, and
+// the one that loses the race reads it again instead of failing.
+func TestAuthConnectors_Update_RetriesASecretWriteThatLostARace(t *testing.T) {
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(baseDexConfig), dexDeploymentForConnectors())
+	ac := &AuthConnectors{Client: client}
+	r := chi.NewRouter()
+	r.Put("/api/v1/settings/auth", ac.Update)
+	put := func(body string) int {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/settings/auth", strings.NewReader(body)))
+		return rec.Code
+	}
+	require.Equal(t, http.StatusOK, put(`{"type":"github","client_id":"first-id","client_secret":"first-secret","enabled":true}`))
+
+	conflicts := 1
+	client.PrependReactor("update", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicts == 0 {
+			return false, nil, nil
+		}
+		conflicts--
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, dexConnectorSecretName, errors.New("modified"))
+	})
+	require.Equal(t, http.StatusOK, put(`{"type":"gitlab","client_id":"second-id","client_secret":"second-secret","enabled":true}`))
+
+	assert.Equal(t, "second-secret", connectorSecretValue(t, client, "gitlab"))
+	assert.Equal(t, "first-secret", connectorSecretValue(t, client, "github"))
+}
+
+func assertDexReadsConnectorSecrets(t *testing.T, client *fake.Clientset) {
+	t.Helper()
+	deploy, err := client.AppsV1().Deployments("dex").Get(context.Background(), "dex", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to read the Dex deployment: %v", err)
+	}
+	envFrom := deploy.Spec.Template.Spec.Containers[0].EnvFrom
+	if assert.Len(t, envFrom, 1) && assert.NotNil(t, envFrom[0].SecretRef) {
+		assert.Equal(t, dexConnectorSecretName, envFrom[0].SecretRef.Name)
+	}
+}
+
+// Dex expands the reference inside the connector's JSON, so a value that
+// JSON would need to escape cannot pass through it intact.
+func TestAuthConnectors_Update_RefusesASecretDexCannotExpand(t *testing.T) {
+	for _, secret := range []string{`a"b`, `a\b`, "a\nb"} {
+		client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(baseDexConfig), dexDeploymentForConnectors())
+		ac := &AuthConnectors{Client: client}
+		r := chi.NewRouter()
+		r.Put("/api/v1/settings/auth", ac.Update)
+
+		body, err := json.Marshal(connectorConfig{Type: "github", ClientID: "my-id", ClientSecret: secret, Enabled: true}) //nolint:gosec // G117: the request body carries a test secret
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/settings/auth", strings.NewReader(string(body))))
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "secret %q: %s", secret, rec.Body.String())
+	}
 }
 
 func TestAuthConnectors_Update_DisableGitHub(t *testing.T) {
@@ -213,6 +332,86 @@ staticPasswords: []
 	assert.Empty(t, connectors, "connectors should be empty after disabling")
 }
 
+func TestAuthConnectors_Update_DisablingThenEnablingUsesTheNewSecret(t *testing.T) {
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(baseDexConfig), dexDeploymentForConnectors())
+	ac := &AuthConnectors{Client: client}
+	r := chi.NewRouter()
+	r.Put("/api/v1/settings/auth", ac.Update)
+	put := func(body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/settings/auth", strings.NewReader(body)))
+		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	}
+
+	put(`{"type":"github","client_id":"my-id","client_secret":"first-secret","enabled":true}`)
+	put(`{"type":"github","enabled":false}`)
+	cm, err := client.CoreV1().ConfigMaps("dex").Get(context.Background(), "dex-config", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to read dex-config: %v", err)
+	}
+	assert.NotContains(t, cm.Data["config.yaml"], "KIPPER_GITHUB_CLIENT_SECRET", "a disabled connector is gone from the config")
+
+	put(`{"type":"github","client_id":"my-id","client_secret":"second-secret","enabled":true}`)
+	assert.Equal(t, "second-secret", connectorSecretValue(t, client, "github"))
+}
+
+func TestMoveDexConnectorSecretsTakesInlineSecretsOutOfTheConfigMap(t *testing.T) {
+	inline := `issuer: https://dex.test/dex
+connectors:
+- type: github
+  id: github
+  name: GitHub
+  config:
+    clientID: gh-id
+    clientSecret: gh-secret
+    redirectURI: https://dex.test/dex/callback
+- type: oidc
+  id: corp-sso
+  name: Corp
+  config:
+    clientID: corp-id
+    clientSecret: corp-secret
+staticPasswords: []
+`
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(inline), dexDeploymentForConnectors())
+
+	if err := MoveDexConnectorSecrets(context.Background(), client); err != nil {
+		t.Fatalf("moving connector secrets: %v", err)
+	}
+
+	cm, _ := client.CoreV1().ConfigMaps("dex").Get(context.Background(), "dex-config", metav1.GetOptions{})
+	assert.NotContains(t, cm.Data["config.yaml"], "gh-secret")
+	assert.NotContains(t, cm.Data["config.yaml"], "corp-secret")
+	assert.Contains(t, cm.Data["config.yaml"], "$KIPPER_GITHUB_CLIENT_SECRET")
+	assert.Contains(t, cm.Data["config.yaml"], "$KIPPER_CORP_SSO_CLIENT_SECRET")
+	assert.Equal(t, "gh-secret", connectorSecretValue(t, client, "github"))
+	assert.Equal(t, "corp-secret", connectorSecretValue(t, client, "corp-sso"))
+	assertDexReadsConnectorSecrets(t, client)
+	deploy, _ := client.AppsV1().Deployments("dex").Get(context.Background(), "dex", metav1.GetOptions{})
+	restarted := deploy.Spec.Template.Annotations["kipper.run/restartedAt"]
+	assert.NotEmpty(t, restarted, "Dex reads its config only when it starts")
+
+	if err := MoveDexConnectorSecrets(context.Background(), client); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	deploy, _ = client.AppsV1().Deployments("dex").Get(context.Background(), "dex", metav1.GetOptions{})
+	assert.Equal(t, restarted, deploy.Spec.Template.Annotations["kipper.run/restartedAt"], "a second run has nothing to move and leaves Dex running")
+}
+
+func TestMoveDexConnectorSecretsLeavesAClusterWithoutConnectorsAlone(t *testing.T) {
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(baseDexConfig), dexDeploymentForConnectors())
+
+	if err := MoveDexConnectorSecrets(context.Background(), client); err != nil {
+		t.Fatalf("moving connector secrets: %v", err)
+	}
+
+	_, err := client.CoreV1().Secrets("dex").Get(context.Background(), dexConnectorSecretName, metav1.GetOptions{})
+	assert.Error(t, err, "nothing to move creates no Secret")
+	deploy, _ := client.AppsV1().Deployments("dex").Get(context.Background(), "dex", metav1.GetOptions{})
+	assert.Empty(t, deploy.Spec.Template.Annotations["kipper.run/restartedAt"])
+}
+
 func TestAuthConnectors_Update_InvalidType(t *testing.T) {
 	client := fake.NewClientset(
 		dexNamespace(),
@@ -236,4 +435,95 @@ func TestAuthConnectors_Update_InvalidType(t *testing.T) {
 		t.Fatalf("failed to decode error response: %v", err)
 	}
 	assert.Equal(t, "type must be github, gitlab, or google", resp["error"])
+}
+
+// raceDexConfig enforces resource versions on dex-config and adds a static-password
+// user between the caller's first read and write to simulate an accepted invite.
+func raceDexConfig(t *testing.T, client *fake.Clientset) {
+	t.Helper()
+	gvr := corev1.SchemeGroupVersion.WithResource("configmaps")
+	version := 1
+	reads := 0
+	client.PrependReactor("get", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		reads++
+		obj, err := client.Tracker().Get(gvr, "dex", "dex-config")
+		if err != nil {
+			return true, nil, err
+		}
+		stale := obj.(*corev1.ConfigMap).DeepCopy()
+		stale.ResourceVersion = fmt.Sprint(version)
+		if reads == 1 {
+			fresh := stale.DeepCopy()
+			fresh.Data["config.yaml"] += "- email: invited@example.com\n  username: invited\n"
+			fresh.Data["config.yaml"] = strings.Replace(fresh.Data["config.yaml"], "staticPasswords: []\n", "staticPasswords:\n", 1)
+			version++
+			fresh.ResourceVersion = fmt.Sprint(version)
+			require.NoError(t, client.Tracker().Update(gvr, fresh, "dex"))
+		}
+		return true, stale, nil
+	})
+	client.PrependReactor("update", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		cm := action.(k8stesting.UpdateAction).GetObject().(*corev1.ConfigMap).DeepCopy()
+		if cm.ResourceVersion != fmt.Sprint(version) {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, cm.Name, errors.New("modified"))
+		}
+		version++
+		cm.ResourceVersion = fmt.Sprint(version)
+		return true, cm, client.Tracker().Update(gvr, cm, "dex")
+	})
+}
+
+func dexConfigText(t *testing.T, client *fake.Clientset) string {
+	t.Helper()
+	cm, err := client.CoreV1().ConfigMaps("dex").Get(context.Background(), "dex-config", metav1.GetOptions{})
+	require.NoError(t, err)
+	return cm.Data["config.yaml"]
+}
+
+func TestMoveDexConnectorSecretsKeepsAUserAddedWhileItRan(t *testing.T) {
+	inline := `issuer: https://dex.test/dex
+connectors:
+- type: github
+  id: github
+  name: GitHub
+  config:
+    clientID: gh-id
+    clientSecret: gh-secret
+staticPasswords: []
+`
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(inline), dexDeploymentForConnectors())
+	raceDexConfig(t, client)
+
+	require.NoError(t, MoveDexConnectorSecrets(context.Background(), client))
+
+	config := dexConfigText(t, client)
+	assert.Contains(t, config, "invited@example.com")
+	assert.NotContains(t, config, "gh-secret")
+	var parsed struct {
+		Connectors []struct {
+			Config struct {
+				ClientSecret string `json:"clientSecret"`
+			} `json:"config"`
+		} `json:"connectors"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(config), &parsed))
+	require.Len(t, parsed.Connectors, 1)
+	assert.Equal(t, "gh-secret", connectorSecretValue(t, client, "github"))
+}
+
+func TestAuthConnectors_Update_KeepsAUserAddedWhileItRan(t *testing.T) {
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(baseDexConfig), dexDeploymentForConnectors())
+	raceDexConfig(t, client)
+	ac := &AuthConnectors{Client: client}
+	r := chi.NewRouter()
+	r.Put("/api/v1/settings/auth", ac.Update)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/settings/auth", strings.NewReader(`{"type":"github","client_id":"gh-id","client_secret":"gh-secret","enabled":true}`)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	config := dexConfigText(t, client)
+	assert.Contains(t, config, "invited@example.com")
+	assert.Contains(t, config, "gh-id")
+	assert.Equal(t, "gh-secret", connectorSecretValue(t, client, "github"))
 }

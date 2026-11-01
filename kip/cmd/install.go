@@ -336,6 +336,9 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 		}
 		return nil, nil
 	}
+	if err := installer.CheckBackupEndpoint(endpoint); err != nil {
+		return nil, err
+	}
 	var sseKey []byte
 	if sseKeyPath != "" {
 		var err error

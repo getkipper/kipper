@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func writeCredsFile(t *testing.T, content string) string {
@@ -137,4 +138,59 @@ func TestVeleroCredentialsBlock(t *testing.T) {
 	got := c.VeleroCredentialsBlock()
 	want := "[default]\naws_access_key_id = AKIA\naws_secret_access_key = secret\n"
 	assert.Equal(t, want, got)
+}
+
+func TestPlainHTTPBackupEndpointsMustStayOnAPrivateNetwork(t *testing.T) {
+	for _, endpoint := range []string{
+		"",
+		"https://objects.example.com",
+		"HTTPS://objects.example.com:8443",
+		"http://127.0.0.1:9000",
+		"http://localhost:9000",
+		"http://10.0.0.5:9000",
+		"http://192.168.1.20:9000",
+		"http://[fd00::5]:9000",
+		"http://[fe80::1%25eth0]:9000",
+		"http://[::ffff:10.0.0.5]:9000",
+		"http://minio.velero.svc:9000",
+		"http://minio.storage.svc.cluster.local:9000",
+		"http://minio:9000",
+	} {
+		assert.NoError(t, CheckBackupEndpoint(endpoint), endpoint)
+	}
+	for _, endpoint := range []string{
+		"http://objects.example.com",
+		"http://203.0.113.7:9000",
+		"http://[2001:db8::7]:9000",
+		"http://[2001:db8::7%25eth0]:9000",
+		"http://3405803783:9000",
+		"http://0xcb007107:9000",
+		"http://0.0.0.0:9000",
+		"objects.example.com",
+		"ftp://objects.example.com",
+		"https://",
+	} {
+		assert.Error(t, CheckBackupEndpoint(endpoint), endpoint)
+	}
+}
+
+// A Service in another namespace is a common plain HTTP target, so the error
+// gives an accepted Service name format and a private IP alternative for other hosts.
+func TestARefusedEndpointNamesTheAcceptedServiceForm(t *testing.T) {
+	err := CheckBackupEndpoint("http://minio.storage:9000")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "minio.storage.svc")
+	assert.Contains(t, err.Error(), "private IP address")
+}
+
+// Clusters retain endpoints configured before the plain HTTP check, so install
+// and upgrade warn about rejected endpoints until the operator changes them.
+func TestAStoredPlainEndpointGetsAWarning(t *testing.T) {
+	assert.Contains(t, PlainEndpointWarning(&BackupStorageConfig{Endpoint: "http://objects.example.com"}), "http://objects.example.com")
+	assert.Empty(t, PlainEndpointWarning(&BackupStorageConfig{Endpoint: "https://objects.example.com"}))
+	assert.Empty(t, PlainEndpointWarning(&BackupStorageConfig{Endpoint: "http://10.0.0.5:9000"}))
+	assert.Empty(t, PlainEndpointWarning(nil))
+	assert.Contains(t, PlainEndpointWarning(&BackupStorageConfig{Endpoint: "HTTP://objects.example.com"}), "plain HTTP")
+	assert.Empty(t, PlainEndpointWarning(&BackupStorageConfig{Endpoint: "ftp://objects.example.com"}), "only a plain HTTP endpoint is described as one")
 }

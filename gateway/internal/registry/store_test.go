@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,8 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "registry.json")
 
 	r1 := New()
-	_, _, _ = r1.Register("myapp", "198.51.100.1", "")
+	created, _, _ := r1.Register("myapp", "198.51.100.1", "")
+	token := created.Token
 	_, _, _ = r1.Register("staging", "10.0.0.2", "")
 
 	if err := r1.SaveTo(path); err != nil {
@@ -38,8 +40,50 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	if entry.IP != "198.51.100.1" {
 		t.Errorf("expected 198.51.100.1, got %s", entry.IP)
 	}
-	if entry.Token == "" {
-		t.Error("expected token to survive round-trip")
+	if !r2.HeldBy("myapp", token) {
+		t.Error("expected the token to authenticate after a round-trip")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), token) {
+		t.Error("the registry file holds the management token itself")
+	}
+}
+
+// A registry written before tokens were hashed holds them in plain text. Loading
+// it preserves token authentication and marks the hashes for the next flush.
+func TestLoadingAPlainTokenHashesIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	plain := `{"entries":[{"subdomain":"myapp","ip":"198.51.100.1","token":"plain-token-value","created_at":"2026-10-01T00:00:00Z","last_seen":"2026-10-31T00:00:00Z"}]}`
+	if err := os.WriteFile(path, []byte(plain), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New()
+	if err := r.LoadFrom(path); err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if !r.HeldBy("myapp", "plain-token-value") {
+		t.Fatal("a cluster's token must keep working after the migration")
+	}
+	if err := r.Ping("plain-token-value"); err != nil {
+		t.Fatalf("ping with the migrated token: %v", err)
+	}
+	saved, err := r.FlushIfDirty(path)
+	if err != nil || !saved {
+		t.Fatalf("the migration must be written: saved=%v err=%v", saved, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "plain-token-value") {
+		t.Error("the rewritten registry still holds the token")
+	}
+	if !strings.Contains(string(data), hashToken("plain-token-value")) {
+		t.Error("the rewritten registry lacks the token hash")
 	}
 }
 
@@ -382,5 +426,49 @@ func TestBackfillMarksTheRegistryForPersistence(t *testing.T) {
 	}
 	if wrote, err := clean.FlushIfDirty(filepath.Join(dir, "unwanted.json")); err != nil || wrote {
 		t.Errorf("a load with nothing to migrate must not mark the registry dirty (wrote=%v err=%v)", wrote, err)
+	}
+}
+
+// A pruned registration's token must not reach whoever takes the label next.
+func TestAPrunedTokenCannotTouchTheNextHolder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		prune func(r *Registry) int
+	}{
+		{"Prune", func(r *Registry) int { return r.Prune(func(ip string) bool { return ip != "203.0.113.7" }) }},
+		{"PruneEntries", func(r *Registry) int { return r.PruneEntries(func(e *Entry) bool { return e.Subdomain == "shop" }) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "registry.json")
+			first := New()
+			old, _, _ := first.Register("shop", "203.0.113.7", "")
+			if err := first.SaveTo(path); err != nil {
+				t.Fatal(err)
+			}
+
+			r := New()
+			if err := r.LoadFrom(path); err != nil {
+				t.Fatal(err)
+			}
+			if removed := tc.prune(r); removed != 1 {
+				t.Fatalf("expected 1 entry pruned, got %d", removed)
+			}
+			if _, indexed := r.tokens[hashToken(old.Token)]; indexed {
+				t.Error("the pruned token is still indexed")
+			}
+			if _, _, err := r.Register("shop", "198.51.100.9", ""); err != nil {
+				t.Fatalf("registering the freed label: %v", err)
+			}
+
+			if err := r.Ping(old.Token); err == nil {
+				t.Error("the pruned token renewed the next holder's registration")
+			}
+			if _, err := r.Deregister(old.Token); err == nil {
+				t.Error("the pruned token removed the next holder's registration")
+			}
+			if r.Lookup("shop") == nil {
+				t.Error("the next holder's registration is gone")
+			}
+		})
 	}
 }

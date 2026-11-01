@@ -60,8 +60,9 @@ type Backup struct {
 	SSECKey         []byte `json:"sse_c_key,omitempty"`
 }
 
-// ParseRequest rejects unknown fields, unsupported versions, invalid run IDs,
-// and empty or flag-like hosts.
+// ParseRequest decodes and validates an install request. It returns an error
+// for unknown fields, unsupported versions, invalid run IDs, empty or flag-like
+// hosts, or backup endpoints rejected by installer.CheckBackupEndpoint.
 func ParseRequest(data []byte) (Request, error) {
 	var r Request
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -81,6 +82,11 @@ func ParseRequest(data []byte) (Request, error) {
 	// Keep the host argument distinct from command-line flags.
 	if strings.HasPrefix(r.Host, "-") {
 		return Request{}, fmt.Errorf("install request host %q is not a host name or address", r.Host)
+	}
+	if r.Backup != nil {
+		if err := installer.CheckBackupEndpoint(r.Backup.Endpoint); err != nil {
+			return Request{}, err
+		}
 	}
 	return r, nil
 }

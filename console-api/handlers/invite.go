@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -34,8 +35,11 @@ type Invites struct {
 	Users     *Users
 }
 
+// invite uses a token hash as its storage key. Legacy stored records use the
+// token itself as the key and retain the Token field for lookup.
 type invite struct {
-	Token   string `json:"token"`
+	Token   string `json:"token,omitempty"`
+	Prefix  string `json:"prefix,omitempty"`
 	Role    string `json:"role"`
 	Expires string `json:"expires"`
 	Email   string `json:"email,omitempty"`
@@ -380,7 +384,7 @@ func (inv *Invites) List(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		result = append(result, pendingInvite{
-			Token:       i.Token[:8] + "...",
+			Token:       i.displayPrefix(),
 			Email:       i.Email,
 			Role:        i.Role,
 			Expires:     i.Expires,
@@ -416,9 +420,9 @@ func (inv *Invites) Revoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	found := false
-	for token := range invites {
-		if len(token) >= 8 && token[:8]+"..." == tokenPrefix {
-			delete(invites, token)
+	for key, i := range invites {
+		if i.displayPrefix() == tokenPrefix {
+			delete(invites, key)
 			found = true
 			break
 		}
@@ -439,10 +443,15 @@ func (inv *Invites) Revoke(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
+// storeInvite stores i under a hash of i.Token and keeps only the token's
+// first eight characters with it.
 func (inv *Invites) storeInvite(ctx context.Context, i invite) error {
+	key := inviteKey(i.Token)
+	i.Prefix = i.Token[:min(8, len(i.Token))]
+	i.Token = ""
 	cm, err := inv.Client.CoreV1().ConfigMaps(inviteNamespace).Get(ctx, inviteConfigMapName, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
-		invites := map[string]invite{i.Token: i}
+		invites := map[string]invite{key: i}
 		data, _ := json.Marshal(invites)
 		_, err = inv.Client.CoreV1().ConfigMaps(inviteNamespace).Create(ctx, &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -470,7 +479,7 @@ func (inv *Invites) storeInvite(ctx context.Context, i invite) error {
 		}
 	}
 
-	invites[i.Token] = i
+	invites[key] = i
 	data, _ := json.Marshal(invites)
 	cm.Data["invites"] = string(data)
 	_, err = inv.Client.CoreV1().ConfigMaps(inviteNamespace).Update(ctx, cm, metav1.UpdateOptions{})
@@ -488,10 +497,11 @@ func (inv *Invites) loadInvite(ctx context.Context, token string) (*invite, erro
 		return nil, err
 	}
 
-	i, ok := invites[token]
+	key, ok := findInvite(invites, token)
 	if !ok {
 		return nil, fmt.Errorf("invite not found")
 	}
+	i := invites[key]
 	return &i, nil
 }
 
@@ -510,12 +520,13 @@ func (inv *Invites) claimInvite(ctx context.Context, token string) (bool, error)
 		if err := json.Unmarshal([]byte(cm.Data["invites"]), &invites); err != nil {
 			return err
 		}
-		if _, ok := invites[token]; !ok {
+		key, ok := findInvite(invites, token)
+		if !ok {
 			// Someone else claimed it between the read that validated it and
 			// this one. Nothing to write, and nothing to report as an error.
 			return nil
 		}
-		delete(invites, token)
+		delete(invites, key)
 		data, err := json.Marshal(invites)
 		if err != nil {
 			return err
@@ -531,6 +542,36 @@ func (inv *Invites) claimInvite(ctx context.Context, token string) (bool, error)
 		return false, err
 	}
 	return claimed, nil
+}
+
+// inviteKey returns the token hash used as the ConfigMap key. Hashing keeps
+// the redeemable token out of newly stored records. kip user invite uses
+// the same format.
+func inviteKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// findInvite returns the stored key for token, checking hashed records before
+// legacy records. The boolean reports whether a matching record exists.
+func findInvite(invites map[string]invite, token string) (string, bool) {
+	if _, ok := invites[inviteKey(token)]; ok {
+		return inviteKey(token), true
+	}
+	if i, ok := invites[token]; ok && i.Token == token {
+		return token, true
+	}
+	return "", false
+}
+
+// displayPrefix returns the abbreviated token used for listing and revocation,
+// falling back to Token for legacy records.
+func (i invite) displayPrefix() string {
+	prefix := i.Prefix
+	if prefix == "" && len(i.Token) >= 8 {
+		prefix = i.Token[:8]
+	}
+	return prefix + "..."
 }
 
 func parseDuration(s string) (time.Duration, error) {

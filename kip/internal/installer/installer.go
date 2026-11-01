@@ -397,6 +397,9 @@ func Run(opts Options) (*Result, error) {
 	if memoryFloorOverridden {
 		preflight.Warnings = append(preflight.Warnings, sentence(floorWarning))
 	}
+	if warning := PlainEndpointWarning(opts.BackupStorage); warning != "" {
+		preflight.Warnings = append(preflight.Warnings, sentence(warning))
+	}
 	fmt.Printf("  ✔  OS: %s %s\n", sysInfo.OS, sysInfo.OSVersion)
 	fmt.Printf("  ✔  RAM: %dMB available\n", sysInfo.RAMMB)
 	fmt.Printf("  ✔  CPUs: %d\n", sysInfo.CPUs)

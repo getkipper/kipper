@@ -95,3 +95,15 @@ func TestRequestCarriesTheSSECSettings(t *testing.T) {
 	assert.Equal(t, key, opts.BackupStorage.SSECKey)
 	assert.NotContains(t, got.String(), string(key))
 }
+
+func TestParseRequestRefusesAPlainHTTPBackupEndpoint(t *testing.T) {
+	req := Request{Version: RequestVersion, RunID: "r1", Host: "203.0.113.10",
+		Backup: &Backup{Bucket: "b", Region: "eu-central", Endpoint: "http://objects.example.com"}}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	_, err = ParseRequest(data)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://")
+}

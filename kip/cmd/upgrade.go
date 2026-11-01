@@ -429,6 +429,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	if warning := installer.PlainEndpointWarning(installer.BackupStorageFromRef(cluster.BackupStorage)); warning != "" {
+		fmt.Printf("\n  ⚠  %s\n", warning)
+	}
+
 	if skipSystem {
 		fmt.Printf("\n  System components skipped (--skip-system).\n")
 		fmt.Printf("  Kipper CRDs, console and trust material are up to date. Run 'kip upgrade'\n")

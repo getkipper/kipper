@@ -85,10 +85,85 @@ func TestInvite_Create(t *testing.T) {
 	assert.Equal(t, "deployer", resp.Role)
 	assert.NotEmpty(t, resp.Expires)
 
-	// Verify invite stored in ConfigMap
+	// The ConfigMap holds a hash of the token, so reading it does not let
+	// anyone redeem the invite.
 	cm, err := client.CoreV1().ConfigMaps("kipper-system").Get(context.Background(), "kipper-invites", metav1.GetOptions{})
 	assert.NoError(t, err)
-	assert.Contains(t, cm.Data["invites"], resp.Token)
+	assert.NotContains(t, cm.Data["invites"], resp.Token)
+	assert.Contains(t, cm.Data["invites"], inviteKey(resp.Token))
+	assert.Contains(t, cm.Data["invites"], `"prefix":"`+resp.Token[:8]+`"`)
+
+	r.Get("/api/v1/invites/{token}", inv.Validate)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/invites/"+resp.Token, nil))
+	assert.Equal(t, http.StatusOK, rec.Code, "the token still opens its invite: %s", rec.Body.String())
+}
+
+// The key format is shared with kip invite, which writes the same ConfigMap.
+func TestInviteKeyIsTheSHA256OfTheToken(t *testing.T) {
+	assert.Equal(t, "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", inviteKey("hello"))
+}
+
+// Invites stored before tokens were hashed are keyed by the token itself, and
+// stay usable until they expire.
+func TestInvite_AnInviteStoredWithItsTokenStillWorks(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	expires := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+	legacy, err := json.Marshal(map[string]invite{token: {Token: token, Role: "viewer", Expires: expires, Email: "old@example.com"}})
+	require.NoError(t, err)
+	client := fake.NewClientset(
+		kipperSystemNamespace(), dexNamespace(), dexConfigMapWithIssuer(), dexDeploymentForInvite(),
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: inviteConfigMapName, Namespace: inviteNamespace},
+			Data:       map[string]string{"invites": string(legacy)},
+		},
+	)
+	store := middleware.NewRoleStore(client)
+	inv := &Invites{Client: client, RoleStore: store, Users: &Users{Client: client, RoleStore: store}}
+	r := chi.NewRouter()
+	r.Get("/api/v1/invites", inv.List)
+	r.Get("/api/v1/invites/{token}", inv.Validate)
+	r.Post("/api/v1/invites/{token}/accept", inv.Accept)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/invites", nil))
+	assert.Contains(t, rec.Body.String(), `"token":"01234567..."`)
+
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/invites/"+token, nil))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/v1/invites/"+token+"/accept",
+		strings.NewReader(`{"email":"old@example.com","password":"Correct-Horse-9-Battery"}`)))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// The listing and revocation work from the prefix the invite records, since
+// the stored key no longer starts with the token.
+func TestInvite_AHashedInviteIsListedAndRevokedByItsPrefix(t *testing.T) {
+	client := fake.NewClientset(kipperSystemNamespace())
+	inv := &Invites{Client: client}
+	const token = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	expires := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+	require.NoError(t, inv.storeInvite(context.Background(), invite{Token: token, Role: "viewer", Expires: expires, Email: "new@example.com"}))
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/invites", inv.List)
+	r.Delete("/api/v1/invites/{token}", inv.Revoke)
+	r.Get("/api/v1/invites/{token}", inv.Validate)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/invites", nil))
+	assert.Contains(t, rec.Body.String(), `"token":"fedcba98..."`)
+
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/v1/invites/fedcba98...", nil))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/invites/"+token, nil))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 // An invite without an address is a bearer credential: whoever sees the link
@@ -608,4 +683,21 @@ func TestParseDuration_Hours(t *testing.T) {
 func TestParseDuration_Invalid(t *testing.T) {
 	_, err := parseDuration("abc")
 	assert.Error(t, err)
+}
+
+// Someone who has read the ConfigMap holds the stored key, which must not
+// redeem the invite in place of its token.
+func TestInvite_TheStoredKeyIsNotAToken(t *testing.T) {
+	client := fake.NewClientset(kipperSystemNamespace())
+	inv := &Invites{Client: client}
+	const token = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	expires := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+	require.NoError(t, inv.storeInvite(context.Background(), invite{Token: token, Role: "admin", Expires: expires, Email: "new@example.com"}))
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/invites/{token}", inv.Validate)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/invites/"+inviteKey(token), nil))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

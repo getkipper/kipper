@@ -2,6 +2,7 @@ package registry
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
@@ -47,9 +48,12 @@ const defaultTombstoneTTL = 90 * 24 * time.Hour
 
 // Entry represents a registered subdomain mapping.
 type Entry struct {
-	Subdomain string    `json:"subdomain"`
-	IP        string    `json:"ip"`
-	Token     string    `json:"token"`
+	Subdomain string `json:"subdomain"`
+	IP        string `json:"ip"`
+	// The legacy JSON field stores "sha256:" followed by the token's hex digest.
+	TokenHash string `json:"token"`
+	// Populated only for registrations created in this process and excluded from JSON.
+	Token     string    `json:"-"`
 	CreatedAt time.Time `json:"created_at"`
 	LastSeen  time.Time `json:"last_seen"`
 
@@ -88,7 +92,7 @@ type Entry struct {
 type Registry struct {
 	mu      sync.RWMutex
 	entries map[string]*Entry // keyed by subdomain
-	tokens  map[string]string // token -> subdomain (one subdomain per token)
+	tokens  map[string]string // token hash -> subdomain (one subdomain per token)
 
 	// saveMu serialises SaveTo end to end — snapshot through rename — so
 	// concurrent saves commit in run order and an older snapshot can't overwrite
@@ -197,12 +201,12 @@ func (r *Registry) Register(subdomain, ip, token string) (*Entry, Outcome, error
 	if existing, ok := r.entries[subdomain]; ok && r.isReleasableLocked(existing) {
 		// The tombstone is spent. Drop it here rather than waiting for the next
 		// Cleanup, so the label is free to the caller asking for it now.
-		delete(r.tokens, existing.Token)
+		delete(r.tokens, existing.TokenHash)
 		delete(r.entries, subdomain)
 	}
 
 	if existing, ok := r.entries[subdomain]; ok {
-		authorised := token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(existing.Token)) == 1
+		authorised := tokenMatches(existing, token)
 		// Whether this call is reviving something that had stopped serving, read
 		// before anything below changes it. A revival re-arms proof; a renewal of
 		// a live registration must not, or the daily heartbeat would suspend the
@@ -244,13 +248,14 @@ func (r *Registry) Register(subdomain, ip, token string) (*Entry, Outcome, error
 	entry := &Entry{
 		Subdomain: subdomain,
 		IP:        ip,
+		TokenHash: hashToken(newToken),
 		Token:     newToken,
 		CreatedAt: time.Now(),
 		LastSeen:  time.Now(),
 	}
 
 	r.entries[subdomain] = entry
-	r.tokens[newToken] = subdomain
+	r.tokens[entry.TokenHash] = subdomain
 	// Mark dirty so a failed immediate save is retried by the periodic
 	// flush instead of the registration silently vanishing on restart.
 	r.dirty = true
@@ -290,13 +295,16 @@ func (r *Registry) Deregister(token string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	subdomain, ok := r.tokens[token]
-	if !ok {
+	subdomain, ok := r.tokens[hashToken(token)]
+	if !ok || token == "" {
+		return "", fmt.Errorf("invalid token")
+	}
+	if entry, held := r.entries[subdomain]; !held || !tokenMatches(entry, token) {
 		return "", fmt.Errorf("invalid token")
 	}
 
 	delete(r.entries, subdomain)
-	delete(r.tokens, token)
+	delete(r.tokens, hashToken(token))
 	r.dirty = true
 
 	return subdomain, nil
@@ -310,7 +318,7 @@ func (r *Registry) HeldBy(subdomain, token string) bool {
 	defer r.mu.RUnlock()
 
 	entry, ok := r.entries[subdomain]
-	return ok && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(entry.Token)) == 1
+	return ok && tokenMatches(entry, token)
 }
 
 // Lookup returns a copy of the entry for a subdomain, or nil if not found.
@@ -397,14 +405,17 @@ func (r *Registry) Ping(token string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	subdomain, ok := r.tokens[token]
-	if !ok {
+	subdomain, ok := r.tokens[hashToken(token)]
+	if !ok || token == "" {
 		return fmt.Errorf("invalid token")
 	}
 
 	entry, ok := r.entries[subdomain]
 	if !ok {
 		return fmt.Errorf("subdomain not found")
+	}
+	if !tokenMatches(entry, token) {
+		return fmt.Errorf("invalid token")
 	}
 	if r.isExpiredLocked(entry) {
 		return fmt.Errorf("registration for %q has lapsed; re-register to bring it back", subdomain)
@@ -427,7 +438,7 @@ func (r *Registry) Cleanup() []string {
 	now := time.Now()
 	for subdomain, entry := range r.entries {
 		if r.isReleasableLocked(entry) {
-			delete(r.tokens, entry.Token)
+			delete(r.tokens, entry.TokenHash)
 			delete(r.entries, subdomain)
 			removed = append(removed, subdomain)
 			continue
@@ -541,10 +552,18 @@ func (r *Registry) PinState(subdomain string) PinState {
 	return s
 }
 
-// tokenMatches compares a presented token against the entry's in constant
-// time. Never compare tokens any other way.
+// tokenMatches compares token hashes in constant time and rejects empty tokens.
+// Use it for token authentication to keep comparisons consistent.
 func tokenMatches(entry *Entry, token string) bool {
-	return token != "" && subtle.ConstantTimeCompare([]byte(entry.Token), []byte(token)) == 1
+	return token != "" && subtle.ConstantTimeCompare([]byte(entry.TokenHash), []byte(hashToken(token))) == 1
+}
+
+const tokenHashPrefix = "sha256:"
+
+// hashToken returns the prefixed SHA-256 digest used for storage and indexing.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return tokenHashPrefix + hex.EncodeToString(sum[:])
 }
 
 // AssertResult is the outcome of a pre-dial pin assertion.

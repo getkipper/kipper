@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,12 +19,15 @@ const (
 	DexConfigMapName = "dex-config"
 )
 
-// DexUserImportReport summarises what ImportDexUsers added to the live
-// dex-config when merging a snapshot.
+// DexUserImportReport summarizes a snapshot merge. Added static passwords are
+// identified by email and connectors by ID. ConnectorsSkipped lists IDs with
+// environment variable secret references. AlreadyPresent counts snapshot entries
+// whose keys were already present and left unchanged.
 type DexUserImportReport struct {
-	StaticPasswordsAdded []string // emails
-	ConnectorsAdded      []string // ids
-	AlreadyPresent       int      // entries that already existed and were left untouched
+	StaticPasswordsAdded []string
+	ConnectorsAdded      []string
+	ConnectorsSkipped    []string
+	AlreadyPresent       int
 }
 
 // HasChanges returns true when the migration actually added anything.
@@ -31,22 +35,17 @@ func (r DexUserImportReport) HasChanges() bool {
 	return len(r.StaticPasswordsAdded)+len(r.ConnectorsAdded) > 0
 }
 
-// ImportDexUsers merges the snapshot's `staticPasswords` and
-// `connectors` blocks into the live `dex/dex-config` ConfigMap. Returns
-// the report so the caller can print it.
+// MergeDexConfig merges staticPasswords and connectors from a snapshot into the
+// live Dex config and returns the merged YAML and an import report. Both inputs
+// are config.yaml contents, as stored in a ConfigMap's data["config.yaml"].
 //
-// Snapshot rules:
-//   - liveConfigYAML is the YAML body the live ConfigMap stores under
-//     `data["config.yaml"]`.
-//   - snapshotConfigYAML is the same body from a captured snapshot.
-//   - For staticPasswords, entries are keyed by `email`. Existing
-//     emails on the live side stay untouched; new emails from the
-//     snapshot are appended.
-//   - For connectors, entries are keyed by `id`. Same merge rule.
-//   - Every other field of the Dex config is left exactly as the live
-//     side had it (issuer, staticClients, storage, oauth2, etc.).
-//
-// Returns the merged config YAML, the report, and any parse error.
+// Static passwords are matched by email and connectors by ID. Existing entries
+// are preserved, and new entries are appended in snapshot order. Snapshot
+// connectors whose clientSecret starts with "$" are reported as skipped because
+// their environment variable values, including secrets in the source cluster's
+// dex-connector-secrets Secret, are outside this config snapshot.
+// Other live config fields (issuer, staticClients, storage, oauth2, etc.) retain
+// their values. YAML parsing or encoding failures return an error.
 func MergeDexConfig(liveConfigYAML, snapshotConfigYAML []byte) ([]byte, DexUserImportReport, error) {
 	var report DexUserImportReport
 
@@ -62,7 +61,6 @@ func MergeDexConfig(liveConfigYAML, snapshotConfigYAML []byte) ([]byte, DexUserI
 		return nil, report, fmt.Errorf("parsing snapshot dex-config: %w", err)
 	}
 
-	// staticPasswords merge.
 	livePws, _ := live["staticPasswords"].([]any)
 	snapPws, _ := snap["staticPasswords"].([]any)
 	merged, added, present := mergeListByKey(livePws, snapPws, "email")
@@ -70,9 +68,19 @@ func MergeDexConfig(liveConfigYAML, snapshotConfigYAML []byte) ([]byte, DexUserI
 	report.AlreadyPresent += present
 	live["staticPasswords"] = merged
 
-	// connectors merge.
 	liveConns, _ := live["connectors"].([]any)
-	snapConns, _ := snap["connectors"].([]any)
+	var snapConns []any
+	all, _ := snap["connectors"].([]any)
+	for _, c := range all {
+		conn, _ := c.(map[string]any)
+		connConfig, _ := conn["config"].(map[string]any)
+		if secret, _ := connConfig["clientSecret"].(string); strings.HasPrefix(secret, "$") {
+			id, _ := conn["id"].(string)
+			report.ConnectorsSkipped = append(report.ConnectorsSkipped, id)
+			continue
+		}
+		snapConns = append(snapConns, c)
+	}
 	merged, added, present = mergeListByKey(liveConns, snapConns, "id")
 	report.ConnectorsAdded = added
 	report.AlreadyPresent += present
@@ -143,7 +151,7 @@ func ExtractDexConfigYAML(raw []byte) ([]byte, error) {
 }
 
 // mergeListByKey returns dst with every entry from src whose `key`
-// value is not already present in dst appended. The boolean `key` is
+// value is not already present in dst appended. The string key is
 // the map field used to identify an entry (e.g. "email" for
 // staticPasswords, "id" for connectors). Entries that aren't maps are
 // preserved verbatim from dst.
