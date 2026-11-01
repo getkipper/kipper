@@ -1,7 +1,9 @@
 package localrun
 
 import (
+	"bufio"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,4 +146,19 @@ func TestRunNamesAMissingBash(t *testing.T) {
 	_, err := r.Run("true")
 
 	assert.ErrorContains(t, err, "bash is not installed")
+}
+
+func TestStartKeepsTheCommandRunningUntilItsInputCloses(t *testing.T) {
+	r := &Runner{Home: t.TempDir(), Dir: t.TempDir(), Path: RootPath}
+
+	held, err := r.Start(`while read -r line; do echo "got $line $HOME"; done`)
+	require.NoError(t, err)
+	_, err = io.WriteString(held.Stdin, "ping\n")
+	require.NoError(t, err)
+	line, err := bufio.NewReader(held.Stdout).ReadString('\n')
+	require.NoError(t, err)
+	require.NoError(t, held.Stdin.Close())
+
+	assert.Equal(t, "got ping "+r.Home+"\n", line)
+	assert.NoError(t, held.Wait())
 }

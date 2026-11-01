@@ -17,6 +17,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 func TestVeleroBSLBlock_InClusterMinIO(t *testing.T) {
@@ -244,13 +245,33 @@ type fakeVeleroHost struct {
 	chartValues   string
 	helperConfigs string
 	patches       []string
+	stoppedBy     string
+	movedBSL      string
+	chartStuck    bool
+	chartInput    string // A HelmChart spec field kip does not write, as JSON after a comma.
+	fenced        int
+	replicas      string
 	cmds          []string
 }
 
 func (h *fakeVeleroHost) Run(cmd string) (string, error) {
+	if _, inner, ok := strings.Cut(cmd, "kipper-node-ops.lock"); ok {
+		h.fenced++
+		_, inner, _ = strings.Cut(inner, "(\n")
+		cmd = strings.TrimSuffix(inner, "\n)")
+	}
 	h.cmds = append(h.cmds, cmd)
 	if cmd == "cat /etc/os-release" {
 		return h.osRelease, nil
+	}
+	if strings.Contains(cmd, "helmchartconfig velero") {
+		return `{"chart":"velero","repo":"r","version":"12.0.0","targetNamespace":"velero","createNamespace":true,"valuesContent":"x"` + h.chartInput + "}\n", nil
+	}
+	if strings.Contains(cmd, "chart-values-velero") {
+		if h.chartStuck {
+			return "new-values old-values 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,", nil
+		}
+		return "values values 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,", nil
 	}
 	if strings.Contains(cmd, "get configmap -l velero.io/plugin-config") {
 		return h.helperConfigs, nil
@@ -269,6 +290,24 @@ func (h *fakeVeleroHost) Run(cmd string) (string, error) {
 	}
 	if strings.Contains(cmd, "get crd backupstoragelocations.velero.io") && h.liveBSL != "" {
 		return "customresourcedefinition.apiextensions.k8s.io/backupstoragelocations.velero.io", nil
+	}
+	if strings.Contains(cmd, "kind: HelmChart") {
+		if !h.chartStuck && h.movedBSL != "" {
+			h.liveBSL = h.movedBSL
+		}
+		return "helmchart.helm.cattle.io/velero configured", nil
+	}
+	if strings.Contains(cmd, "kipper\\.run/stopped-by") {
+		if h.replicas != "" {
+			return h.stoppedBy + "|" + h.replicas, nil
+		}
+		return h.stoppedBy + "|0", nil
+	}
+	if strings.Contains(cmd, "annotate deploy/velero kipper.run/stopped-by-") {
+		h.stoppedBy = ""
+	}
+	if strings.Contains(cmd, "scale deploy/velero --replicas=") {
+		h.replicas = cmd[strings.Index(cmd, "--replicas=")+len("--replicas="):]
 	}
 	if strings.Contains(cmd, "get backupstoragelocation default") {
 		return h.liveBSL, nil
@@ -563,4 +602,270 @@ func TestStorageCredentialsStayOutOfBackups(t *testing.T) {
 	external := &fakeVeleroHost{}
 	require.NoError(t, installVeleroCredentials(external, externalStorage, ""))
 	assert.Contains(t, strings.Join(external.cmds, "\n"), "label secret cloud-credentials velero.io/exclude-from-backup=true")
+}
+
+// leasedVeleroHost is a server where another kip command holds the node lease.
+type leasedVeleroHost struct {
+	fakeVeleroHost
+	holder string
+}
+
+type closedInput struct{ io.Writer }
+
+func (closedInput) Close() error { return nil }
+
+func (h *leasedVeleroHost) Start(string) (*ssh.Held, error) {
+	return &ssh.Held{
+		Stdin:  closedInput{io.Discard},
+		Stdout: strings.NewReader(leaseHeld + " " + h.holder + "\n"),
+		Wait:   func() error { return nil },
+	}, nil
+}
+
+func TestInstallBackupRefusesWhileAKeyResetRuns(t *testing.T) {
+	h := &leasedVeleroHost{holder: "kip backup repository-key reset"}
+
+	err := InstallBackup(h, nil, "local", nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip backup repository-key reset")
+	assert.Empty(t, h.cmds, "nothing touches Velero while another command holds the lease")
+}
+
+func TestInstallVeleroStartsAVeleroAResetLeftStoppedOnceTheBucketMoved(t *testing.T) {
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", liveBSL: "old-backups|https://objects.example.com",
+		movedBSL: "velero|http://minio.velero.svc:9000", stoppedBy: veleroStoppedByReset}
+
+	require.NoError(t, installVelero(h, nil, "pw", nil))
+
+	assert.Equal(t, "1", h.replicas, "the half-emptied bucket is no longer Velero's, so nothing holds it back")
+	assert.Empty(t, h.stoppedBy)
+}
+
+func TestInstallVeleroWaitsForTheLocationToMove(t *testing.T) {
+	fastLocationMove(t)
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", liveBSL: "old-backups|https://objects.example.com", stoppedBy: veleroStoppedByReset}
+
+	err := installVelero(h, nil, "pw", nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bucket velero")
+	assert.Empty(t, h.replicas, "Velero may still point at the half-emptied bucket")
+	assert.Equal(t, veleroStoppedByReset, h.stoppedBy)
+}
+
+func TestInstallVeleroRefusesTheBucketAnUnfinishedResetStopped(t *testing.T) {
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", liveBSL: "velero|http://minio.velero.svc:9000", stoppedBy: veleroStoppedByReset}
+
+	err := installVelero(h, nil, "pw", nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip backup repository-key reset")
+	for _, cmd := range h.cmds {
+		assert.NotContains(t, cmd, "kind: HelmChart", "the chart would bring Velero back with replicas: 1")
+		assert.NotContains(t, cmd, "cloud-credentials --from-file", "the cleanup reads these credentials")
+	}
+}
+
+func TestInstallBackupRefusesAConnectionThatCannotHoldTheLease(t *testing.T) {
+	h := &fakeVeleroHost{}
+
+	err := InstallBackup(h, nil, "local", nil)
+
+	require.Error(t, err)
+	assert.Empty(t, h.cmds)
+}
+
+func fastLocationMove(t *testing.T) {
+	t.Helper()
+	poll, timeout := resetPollInterval, veleroApplyTimeout
+	resetPollInterval, veleroApplyTimeout = 0, 0
+	t.Cleanup(func() { resetPollInterval, veleroApplyTimeout = poll, timeout })
+}
+
+// grantedVeleroHost is a server where kip gets the node lease.
+type grantedVeleroHost struct {
+	fakeVeleroHost
+}
+
+type closeFunc func() error
+
+func (f closeFunc) Write(p []byte) (int, error) { return len(p), nil }
+func (f closeFunc) Close() error                { return f() }
+
+func (h *fakeVeleroHost) SurvivesSSHRateLimit() bool             { return true }
+func (h *fakeVeleroHost) ConfirmFreshConnection() error          { return nil }
+func (h *fakeVeleroHost) ObservedAddress(string) (string, error) { return "", nil }
+
+func (h *grantedVeleroHost) Start(string) (*ssh.Held, error) {
+	r, w := io.Pipe()
+	go func() { _, _ = io.WriteString(w, leaseAcquired+" 7 0123456789abcdef0123456789abcdef\n") }()
+	return &ssh.Held{Stdin: closeFunc(w.Close), Stdout: r, Wait: func() error { return nil }}, nil
+}
+
+func TestUpgradeSkipsVeleroWhileAResetIsUnfinishedOnItsBucket(t *testing.T) {
+	h := &grantedVeleroHost{fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", liveBSL: "velero|http://minio.velero.svc:9000", stoppedBy: veleroStoppedByReset}}
+
+	zotUpgraded := false
+	components := []SystemComponent{
+		{Name: "velero", Apply: func(c CommandRunner) error { return upgradeVelero(c, nil, platform.StorageLocal) }},
+		{Name: "zot", Apply: func(CommandRunner) error { zotUpgraded = true; return nil }},
+	}
+
+	var err error
+	out := stdoutOf(t, func() { err = RunSystemUpgrade(h, components) })
+
+	require.NoError(t, err)
+	assert.True(t, zotUpgraded, "the components after Velero still get upgraded")
+	assert.Contains(t, out, "kip backup repository-key reset")
+	assert.Contains(t, out, "velero skipped")
+	assert.NotContains(t, out, "✔  velero")
+	assert.Contains(t, out, "✔  zot")
+	assert.NotContains(t, strings.Join(h.cmds, "\n"), "kind: HelmChart")
+}
+
+func TestInstallVeleroSaysTheOldKeyStaysAfterAMove(t *testing.T) {
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", liveBSL: "old-backups|https://objects.example.com",
+		movedBSL: "velero|http://minio.velero.svc:9000", stoppedBy: veleroStoppedByReset}
+
+	out := stdoutOf(t, func() { require.NoError(t, installVelero(h, nil, "pw", nil)) })
+
+	assert.Contains(t, out, "old repository key")
+}
+
+func TestInstallVeleroHoldsOnUntilTheChartIsApplied(t *testing.T) {
+	fastLocationMove(t)
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", chartStuck: true}
+
+	err := installVelero(h, nil, "pw", nil)
+
+	require.Error(t, err, "a reset that takes the lease next would meet a chart apply that starts Velero again")
+	assert.Contains(t, err.Error(), "Velero chart")
+}
+
+type chartCheckRunner struct{ out string }
+
+func (r chartCheckRunner) Run(string) (string, error) { return r.out, nil }
+
+func (r chartCheckRunner) RunStdin(cmd string, _ io.Reader) (string, error) { return r.Run(cmd) }
+
+func TestVeleroChartAppliedNeedsTheCurrentChartAndASucceededJob(t *testing.T) {
+	cases := map[string]struct {
+		out     string
+		applied bool
+	}{
+		"current chart, Job succeeded":           {"abc abc 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", true},
+		"values waiting, earlier Job done":       {"new old 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", false},
+		"version waiting, earlier Job done":      {"abc abc 1|12.1.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", false},
+		"repository waiting, earlier Job done":   {"abc abc 1|12.0.0|r2|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", false},
+		"current chart, Job still running":       {"abc abc 1|12.0.0|r|velero|SHA256=H |12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", false},
+		"current chart, old Job being replaced":  {"abc abc 1|12.0.0|r|velero|SHA256=H 2026-11-01T12:00:00Z1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", false},
+		"current chart, Job failed":              {"abc abc 1|12.0.0|r|velero|SHA256=H 0|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", false},
+		"values changed since the Job ran":       {"abc abc 1|12.0.0|r|velero|SHA256=NEW 1|12.0.0|r|velero|SHA256=OLD [\"install\"] |HelmChartValuesContent,\n", false},
+		"Job ran with a removed override":        {"abc abc 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\",\"--set\",\"a=b\"] |HelmChartValuesContent,\n", false},
+		"values from the older Secret layout":    {"abc abc 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |values-01_HelmChart.yaml,\n", true},
+		"removed structured values still stored": {"abc abc 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValues,HelmChartValuesContent,\n", false},
+		"removed HelmChartConfig still stored":   {"abc abc 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartConfigValuesContent,HelmChartValuesContent,\n", false},
+		"removed chart content still stored":     {"abc abc 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] velero.tgz.base64,|HelmChartValuesContent,\n", false},
+		"no install Job":                         {"abc abc 1|12.0.0|r|velero|SHA256=H none |HelmChartValuesContent,\n", false},
+		"no chart values Secret yet":             {"abc e3b0 1|12.0.0|r|velero|SHA256=H 1|12.0.0|r|velero|SHA256=H [\"install\"] |HelmChartValuesContent,\n", false},
+		"nothing printed":                        {"", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			applied, err := veleroChartApplied(chartCheckRunner{out: tc.out})
+			require.NoError(t, err)
+			assert.Equal(t, tc.applied, applied)
+		})
+	}
+}
+
+func TestInstallVeleroAcceptsAChartWhoseValuesAreAlreadyApplied(t *testing.T) {
+	fastLocationMove(t)
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n"}
+
+	require.NoError(t, installVelero(h, nil, "pw", nil), "an apply that only touches metadata needs no new Job")
+}
+
+func TestInstallVeleroIgnoresAMarkOnARunningVelero(t *testing.T) {
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", liveBSL: "velero|http://minio.velero.svc:9000", stoppedBy: veleroStoppedByReset, replicas: "1"}
+
+	require.NoError(t, installVelero(h, nil, "pw", nil), "a mark left by a failed start does not describe a stopped Velero")
+}
+
+func TestInstallBackupSendsEveryCommandThroughTheLease(t *testing.T) {
+	h := &grantedVeleroHost{fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n"}}
+
+	require.NoError(t, InstallBackup(h, nil, platform.StorageLocal, nil))
+
+	assert.Equal(t, len(h.cmds), h.fenced, "a command after the lease ended must not run")
+	assert.Contains(t, strings.Join(h.cmds, "\n"), "cat > ", "uploads go through the fence as well")
+}
+
+func TestEnsureVeleroCoversNodesLeavesTheChartOfAResetStoppedVelero(t *testing.T) {
+	h := &fakeVeleroHost{
+		osImages:    "Ubuntu 26.04 LTS\nRocky Linux 10.2 (Red Quartz)\n",
+		chartValues: chartValuesContent(t, veleroManifest(externalStorage, false)),
+		stoppedBy:   veleroStoppedByReset,
+	}
+
+	var changed bool
+	out := stdoutOf(t, func() {
+		var err error
+		changed, err = EnsureVeleroCoversNodes(h)
+		require.NoError(t, err)
+	})
+
+	assert.False(t, changed)
+	assert.Empty(t, h.patches, "the chart apply would start Velero on the bucket the reset is emptying")
+	assert.Contains(t, out, "kip upgrade")
+}
+
+func TestEnsureVeleroCoversNodesSaysNothingDuringAResetWhenNoNodeNeedsAChange(t *testing.T) {
+	for name, h := range map[string]*fakeVeleroHost{
+		"no RHEL node": {
+			osImages:    "Ubuntu 26.04 LTS\nDebian GNU/Linux 13 (trixie)\n",
+			chartValues: chartValuesContent(t, veleroManifest(externalStorage, false)),
+			stoppedBy:   veleroStoppedByReset,
+		},
+		"chart already privileged": {
+			osImages:    "Ubuntu 26.04 LTS\nRocky Linux 10.2 (Red Quartz)\n",
+			chartValues: chartValuesContent(t, veleroManifest(externalStorage, true)),
+			stoppedBy:   veleroStoppedByReset,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := stdoutOf(t, func() {
+				changed, err := EnsureVeleroCoversNodes(h)
+				require.NoError(t, err)
+				assert.False(t, changed)
+			})
+
+			assert.Empty(t, out, "the chart would stay as it is for these nodes anyway")
+		})
+	}
+}
+
+func TestVeleroManifestSetsTheFieldsTheChartCheckCompares(t *testing.T) {
+	manifest := veleroManifest(externalStorage, false)
+
+	for _, field := range []string{"repo", "version", "targetNamespace"} {
+		assert.Regexp(t, `(?m)^  `+field+`: \S`, manifest, "the Helm controller's Job reports %s, and an empty one never matches", field)
+	}
+}
+
+func TestVeleroChartCheckReadsEachChartObjectOnce(t *testing.T) {
+	assert.Equal(t, 1, strings.Count(veleroChartCheck, "get secret chart-values-velero"),
+		"the values, their keys and the Job's config hash must come from one revision of the Secret")
+	assert.Equal(t, 1, strings.Count(veleroChartCheck, "get configmap chart-content-velero"))
+}
+
+func TestInstallVeleroNamesAChartInputKipDoesNotManage(t *testing.T) {
+	fastLocationMove(t)
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\n", chartInput: `,"set":{"configuration.logLevel":"debug"}`, chartStuck: true}
+
+	err := installVelero(h, nil, "pw", nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.set", "a timeout blaming the Helm controller would send the operator to the wrong place")
 }

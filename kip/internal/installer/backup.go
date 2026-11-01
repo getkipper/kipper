@@ -18,6 +18,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const veleroChartVersion = "12.0.0"
@@ -94,7 +95,39 @@ type Uploader interface {
 // key is generated only after confirming the bucket has no backups.
 // Changing the backup destination to a bucket with existing backups returns
 // an error before the live storage credentials are replaced.
+// It holds the node lifecycle lease through chart application to serialize
+// backup setup with repository key resets. The client must implement LeaseServer
+// and FirewallRunner. An unfinished reset on the same backup destination
+// returns an error. Moving to another destination restarts Velero with the
+// existing key.
 func InstallBackup(client Uploader, cfg *BackupStorageConfig, storageMode string, repositoryKey []byte) error {
+	server, ok := client.(interface {
+		LeaseServer
+		FirewallRunner
+	})
+	if !ok {
+		return errors.New("this connection cannot hold the node lifecycle lease, so kip cannot keep a repository key reset from running alongside the backup setup. Backups were not changed")
+	}
+	lease, err := TakeNodeLease(server, "backup setup in kip install or kip upgrade")
+	if err != nil {
+		return fmt.Errorf("%w. Backups were not changed", err)
+	}
+	defer lease.Release()
+	return installBackup(leasedUploader{lease.Server(server)}, cfg, storageMode, repositoryKey)
+}
+
+// leasedUploader routes uploads through the lease fence and keeps their
+// contents on stdin, so uploads have the same lease checks as other commands.
+type leasedUploader struct{ FirewallRunner }
+
+func (u leasedUploader) Upload(content io.Reader, path string, mode os.FileMode) error {
+	if _, err := u.RunStdin(ssh.UploadCommand(path, mode), content); err != nil {
+		return fmt.Errorf("uploading to %s: %w", path, err)
+	}
+	return nil
+}
+
+func installBackup(client Uploader, cfg *BackupStorageConfig, storageMode string, repositoryKey []byte) error {
 	if cfg == nil {
 		password, err := ensureMinIOPassword(client)
 		if err != nil {
@@ -380,6 +413,19 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if _, err := client.Run("kubectl create namespace velero --dry-run=client -o yaml | kubectl apply -f -"); err != nil {
 		return fmt.Errorf("creating velero namespace: %w", err)
 	}
+	live, err := liveBackupLocation(client)
+	if err != nil {
+		return err
+	}
+	moved := live.bucket != "" && live.changesFrom(target)
+	stoppedByReset, err := veleroStoppedByAReset(client)
+	if err != nil {
+		return err
+	}
+	// Applying the chart would restart Velero on the partially emptied bucket.
+	if stoppedByReset && !moved {
+		return &unfinishedResetError{bucket: live.bucket}
+	}
 	// The checks run before the credentials are written, so a refused change
 	// leaves the live backups working with their current credentials.
 	check := &bucketCheck{client: client, target: target}
@@ -412,6 +458,24 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest(cfg, host.K3sSELinux() || rhelNode))
 	if _, err := client.Run(veleroCmd); err != nil {
 		return fmt.Errorf("applying Velero HelmChart: %w", err)
+	}
+	// Hold the caller's node lease until the asynchronous chart apply finishes.
+	// Otherwise, it could restore one Velero replica during the next reset.
+	if err := checkVeleroChartInputs(client); err != nil {
+		return err
+	}
+	if err := waitForVeleroChart(client); err != nil {
+		return err
+	}
+	if moved {
+		if err := waitForLocation(client, target); err != nil {
+			return err
+		}
+		if stoppedByReset {
+			if err := startVeleroStoppedByReset(client); err != nil {
+				return err
+			}
+		}
 	}
 	fmt.Print(notice)
 	return nil
@@ -459,6 +523,8 @@ func configureRestoreHelper(client CommandRunner) error {
 // EnsureVeleroCoversNodes enables privileged file system backups for RHEL-family
 // nodes when a Velero chart is present, preserving backup storage and credentials.
 // It waits for the node agent rollout and reports whether it changed the chart.
+// While an unfinished repository key reset keeps Velero stopped, it leaves
+// the chart unchanged and returns false with no error.
 func EnsureVeleroCoversNodes(client CommandRunner) (bool, error) {
 	values, err := client.Run("kubectl -n kube-system get helmchart velero -o jsonpath='{.spec.valuesContent}' --ignore-not-found")
 	if err != nil {
@@ -469,6 +535,14 @@ func EnsureVeleroCoversNodes(client CommandRunner) (bool, error) {
 	}
 	rhelNode, err := clusterHasRHELNode(client)
 	if err != nil || !rhelNode {
+		return false, err
+	}
+	// Applying a changed chart would restart Velero during the unfinished reset.
+	stoppedByReset, err := veleroStoppedByAReset(client)
+	if err != nil || stoppedByReset {
+		if stoppedByReset && !strings.Contains(values, "--node-agent-configmap=") {
+			fmt.Printf("       An unfinished repository key reset keeps Velero stopped, so kip left its chart unchanged. Run kip upgrade once the reset has finished to back up this node's volumes.\n")
+		}
 		return false, err
 	}
 	changed := false

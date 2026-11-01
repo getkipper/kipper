@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/getkipper/kipper/kip/internal/localrun"
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
@@ -422,4 +423,17 @@ func TestThePurposeCannotBreakTheScript(t *testing.T) {
 func lockHeld(dir, name string) bool {
 	out, _ := exec.Command("sh", "-c", "flock -n "+filepath.Join(dir, name)+" true && echo free").CombinedOutput()
 	return !bytes.Contains(out, []byte("free"))
+}
+
+func TestTheLocalRunnerHoldsTheNodeLease(t *testing.T) {
+	c := newLeaseCluster(t)
+	local := &localrun.Runner{Home: t.TempDir(), Dir: t.TempDir(), Path: localrun.RootPath}
+	l, err := takeNodeLease(local, c.dir, c.stateDir, "kip install --local")
+	require.NoError(t, err)
+	t.Cleanup(l.Release)
+
+	_, err = takeNodeLease(c.server, c.dir, c.stateDir, "kip backup repository-key reset")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip install --local")
 }
