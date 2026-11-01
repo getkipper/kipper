@@ -358,6 +358,12 @@ Encryption protects a copy of the datastore taken on its own, such as `state.db`
 - Copies of Secrets written before encryption stay in the datastore file until k3s compacts its history and reuses the space. Backups taken before the run keep them too. Change any credential that must not survive such a copy.
 - Velero reads Secrets through the API, so backups hold them decrypted. See [the backup repository key](/en/installation#backup-repository-key) and [SSE-C](/en/installation#backup-sse-c) for how backups are encrypted.
 
+### Volumes at rest {#volumes-at-rest}
+
+Volumes are stored unencrypted on the nodes' disks, whether they use local storage or Longhorn. This includes database files, uploads, anything else a workload writes, the image registry and logs. It also includes the in-cluster MinIO that holds backups unless you use external backup storage. Anyone with root access to a node or a copy of its disk can read the data stored there. Enable your provider's disk encryption on every node where available, or encrypt each node's disk during setup, so disk copies, snapshots and retired disks stay unreadable on their own. Root access to a running node still exposes the data.
+
+Volume backups are encrypted with the [backup repository key](/en/installation#backup-repository-key), which is stored as a Secret in the cluster. On a single-node cluster with in-cluster MinIO, a copy of the server's disk therefore holds both the backups and the key that decrypts them. Resource definitions that Velero writes to in-cluster MinIO, including Secrets, remain readable there.
+
 ### Revealing stored credentials
 
 Git credentials and container-registry credentials stored under Settings are masked in both the console UI and the list API. If you lose your copy of a token, you can recover it two ways:
