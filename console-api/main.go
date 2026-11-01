@@ -145,14 +145,15 @@ func main() {
 		})
 
 	// Move SSO client secrets written into the Dex config by earlier versions
-	// into their Secret. One console-api replica does it at a time.
+	// into their Secret, then retire secrets absent from the config after a grace
+	// period. A leader lease coordinates this work across console-api replicas.
 	var dexSecretsMove leader.Worker
 	go leader.Run(context.Background(), clientset, resourcebounds.ModeConfigMapNamespace, "kipper-dex-connector-secrets", podName,
 		leader.DefaultTiming, &dexSecretsMove, func(ctx context.Context) {
 			if err := handlers.MoveDexConnectorSecrets(ctx, clientset); err != nil {
 				log.Printf("moving SSO client secrets out of the Dex config: %v", err)
 			}
-			<-ctx.Done()
+			handlers.RetireConnectorSecrets(ctx, clientset, 10*time.Minute, time.Now)
 		})
 
 	// Backstop cleanup of build Jobs and their ephemeral credential secrets in

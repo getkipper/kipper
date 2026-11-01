@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,17 +9,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/yaml"
-)
 
-// dexConnectorSecretName is the Secret in the dex namespace that holds the
-// SSO client secrets. Dex loads them as environment variables referenced
-// by its connector configuration.
-const dexConnectorSecretName = "dex-connector-secrets" //nolint:gosec // G101: Kubernetes Secret object name, not a credential value
+	"github.com/getkipper/kipper/controller/pkg/dexsecrets"
+)
 
 // AuthConnectors handles OAuth connector configuration.
 type AuthConnectors struct {
@@ -105,14 +100,14 @@ func (ac *AuthConnectors) Update(w http.ResponseWriter, r *http.Request) {
 	if enable {
 		// A unique key preserves the client ID and secret pair used by an existing
 		// config if this update fails or overlaps another update.
-		env := connectorSecretEnv(req.Type)
+		env := dexsecrets.NewKey(req.Type)
 		// Store the secret and configure Dex to load it before saving its reference,
 		// so a restart between these steps can still load the current config.
-		if err := ac.storeConnectorSecrets(ctx, map[string]string{env: req.ClientSecret}); err != nil {
+		if err := dexsecrets.Store(ctx, ac.Client, map[string]string{env: req.ClientSecret}); err != nil {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save: %v", err))
 			return
 		}
-		if err := ac.ensureDexReadsConnectorSecrets(ctx); err != nil {
+		if err := dexsecrets.EnsureDexReads(ctx, ac.Client); err != nil {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save: %v", err))
 			return
 		}
@@ -176,7 +171,7 @@ func MoveDexConnectorSecrets(ctx context.Context, client kubernetes.Interface) e
 			}
 			env, ok := envs[id+"\x00"+secret]
 			if !ok {
-				env = connectorSecretEnv(id)
+				env = dexsecrets.NewKey(id)
 				envs[id+"\x00"+secret] = env
 			}
 			values[env] = secret
@@ -186,10 +181,10 @@ func MoveDexConnectorSecrets(ctx context.Context, client kubernetes.Interface) e
 		if !moved {
 			return false, nil
 		}
-		if err := ac.storeConnectorSecrets(ctx, values); err != nil {
+		if err := dexsecrets.Store(ctx, ac.Client, values); err != nil {
 			return false, err
 		}
-		return true, ac.ensureDexReadsConnectorSecrets(ctx)
+		return true, dexsecrets.EnsureDexReads(ctx, ac.Client)
 	})
 	if err != nil || !moved {
 		return err
@@ -197,17 +192,29 @@ func MoveDexConnectorSecrets(ctx context.Context, client kubernetes.Interface) e
 	return ac.restartDex(ctx)
 }
 
-// connectorSecretEnv names a new environment variable for a connector's client
-// secret. A random suffix protects references in saved configs and concurrent
-// updates from having their values replaced.
-func connectorSecretEnv(connectorID string) string {
-	name := strings.Map(func(r rune) rune {
-		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			return r
+// RetireConnectorSecrets runs dexsecrets.Retire immediately and every interval
+// until ctx is canceled, removing client secrets marked unused for at least
+// dexsecrets.UnusedGrace and still absent from the stored Dex config. The now
+// function supplies each pass's time. Deletions and errors are logged, except
+// for errors after cancellation. Each pass reads the current config and Secret.
+// It blocks until cancellation and panics if interval is not positive.
+func RetireConnectorSecrets(ctx context.Context, client kubernetes.Interface, interval time.Duration, now func() time.Time) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		deleted, err := dexsecrets.Retire(ctx, client, now())
+		if err != nil && ctx.Err() == nil {
+			log.Printf("auth connectors: retiring unused SSO client secrets: %v", err)
 		}
-		return '_'
-	}, strings.ToUpper(connectorID))
-	return "KIPPER_" + name + "_CLIENT_SECRET_" + rand.Text()[:12]
+		for _, key := range deleted {
+			log.Printf("auth connectors: removed unused SSO client secret %s", key)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // dexCanExpand reports whether Dex can expand secret into its connector
@@ -217,70 +224,6 @@ func dexCanExpand(secret string) bool {
 	return !strings.ContainsFunc(secret, func(r rune) bool {
 		return r == '"' || r == '\\' || r < 0x20 || r == 0x7f
 	})
-}
-
-// storeConnectorSecrets adds values to the dex-connector-secrets Secret,
-// creating it if needed. Conflicts trigger a fresh read to preserve concurrent
-// writes to other keys.
-func (ac *AuthConnectors) storeConnectorSecrets(ctx context.Context, values map[string]string) error {
-	secrets := ac.Client.CoreV1().Secrets("dex")
-	raced := func(err error) bool { return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) }
-	return retry.OnError(retry.DefaultRetry, raced, func() error {
-		secret, err := secrets.Get(ctx, dexConnectorSecretName, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: dexConnectorSecretName, Namespace: "dex"}}
-			for k, v := range values {
-				setSecretValue(secret, k, v)
-			}
-			_, err = secrets.Create(ctx, secret, metav1.CreateOptions{})
-			return err
-		}
-		if err != nil {
-			return err
-		}
-		for k, v := range values {
-			setSecretValue(secret, k, v)
-		}
-		_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
-		return err
-	})
-}
-
-func setSecretValue(secret *corev1.Secret, key, value string) {
-	if secret.Data == nil {
-		secret.Data = map[string][]byte{}
-	}
-	secret.Data[key] = []byte(value)
-}
-
-// ensureDexReadsConnectorSecrets loads dex-connector-secrets into the Dex
-// container's environment if needed, triggering a rollout. The added reference
-// is optional so Dex can start before the Secret exists.
-func (ac *AuthConnectors) ensureDexReadsConnectorSecrets(ctx context.Context) error {
-	deploys := ac.Client.AppsV1().Deployments("dex")
-	deploy, err := deploys.Get(ctx, "dex", metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	containers := deploy.Spec.Template.Spec.Containers
-	for i := range containers {
-		if containers[i].Name != "dex" {
-			continue
-		}
-		for _, from := range containers[i].EnvFrom {
-			if from.SecretRef != nil && from.SecretRef.Name == dexConnectorSecretName {
-				return nil
-			}
-		}
-		optional := true
-		containers[i].EnvFrom = append(containers[i].EnvFrom, corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: dexConnectorSecretName},
-			Optional:             &optional,
-		}})
-		_, err = deploys.Update(ctx, deploy, metav1.UpdateOptions{})
-		return err
-	}
-	return fmt.Errorf("the dex Deployment has no container named dex")
 }
 
 // restartDex rolls Dex, which reads its config only when it starts.

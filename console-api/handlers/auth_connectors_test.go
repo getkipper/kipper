@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
@@ -22,6 +24,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
+
+	"github.com/getkipper/kipper/controller/pkg/dexsecrets"
 )
 
 func dexConfigMapForConnectors(configYAML string) *corev1.ConfigMap {
@@ -196,7 +200,7 @@ func connectorSecretValue(t *testing.T, client *fake.Clientset, id string) strin
 		}
 		ref, _ := conn["config"].(map[string]interface{})["clientSecret"].(string)
 		require.True(t, strings.HasPrefix(ref, "$"), "the config holds a reference, not the secret")
-		secret, err := client.CoreV1().Secrets("dex").Get(context.Background(), dexConnectorSecretName, metav1.GetOptions{})
+		secret, err := client.CoreV1().Secrets("dex").Get(context.Background(), dexsecrets.SecretName, metav1.GetOptions{})
 		require.NoError(t, err)
 		value, ok := secret.Data[strings.TrimPrefix(ref, "$")]
 		require.True(t, ok, "the Secret lacks %s", ref)
@@ -248,7 +252,7 @@ func TestAuthConnectors_Update_RetriesASecretWriteThatLostARace(t *testing.T) {
 			return false, nil, nil
 		}
 		conflicts--
-		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, dexConnectorSecretName, errors.New("modified"))
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, dexsecrets.SecretName, errors.New("modified"))
 	})
 	require.Equal(t, http.StatusOK, put(`{"type":"gitlab","client_id":"second-id","client_secret":"second-secret","enabled":true}`))
 
@@ -264,7 +268,7 @@ func assertDexReadsConnectorSecrets(t *testing.T, client *fake.Clientset) {
 	}
 	envFrom := deploy.Spec.Template.Spec.Containers[0].EnvFrom
 	if assert.Len(t, envFrom, 1) && assert.NotNil(t, envFrom[0].SecretRef) {
-		assert.Equal(t, dexConnectorSecretName, envFrom[0].SecretRef.Name)
+		assert.Equal(t, dexsecrets.SecretName, envFrom[0].SecretRef.Name)
 	}
 }
 
@@ -406,7 +410,7 @@ func TestMoveDexConnectorSecretsLeavesAClusterWithoutConnectorsAlone(t *testing.
 		t.Fatalf("moving connector secrets: %v", err)
 	}
 
-	_, err := client.CoreV1().Secrets("dex").Get(context.Background(), dexConnectorSecretName, metav1.GetOptions{})
+	_, err := client.CoreV1().Secrets("dex").Get(context.Background(), dexsecrets.SecretName, metav1.GetOptions{})
 	assert.Error(t, err, "nothing to move creates no Secret")
 	deploy, _ := client.AppsV1().Deployments("dex").Get(context.Background(), "dex", metav1.GetOptions{})
 	assert.Empty(t, deploy.Spec.Template.Annotations["kipper.run/restartedAt"])
@@ -526,4 +530,36 @@ func TestAuthConnectors_Update_KeepsAUserAddedWhileItRan(t *testing.T) {
 	assert.Contains(t, config, "invited@example.com")
 	assert.Contains(t, config, "gh-id")
 	assert.Equal(t, "gh-secret", connectorSecretValue(t, client, "github"))
+}
+
+// A disabled connector's client secret is removed after the grace period
+// measured from its first unused mark. An enabled connector keeps its secret.
+func TestRetireConnectorSecretsRemovesADisabledConnectorsSecret(t *testing.T) {
+	client := fake.NewClientset(dexNamespace(), dexConfigMapForConnectors(baseDexConfig), dexDeploymentForConnectors())
+	ac := &AuthConnectors{Client: client}
+	r := chi.NewRouter()
+	r.Put("/api/v1/settings/auth", ac.Update)
+	put := func(body string) {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/settings/auth", strings.NewReader(body)))
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+	put(`{"type":"github","client_id":"gh-id","client_secret":"gh-secret","enabled":true}`)
+	put(`{"type":"gitlab","client_id":"gl-id","client_secret":"gl-secret","enabled":true}`)
+	put(`{"type":"github","enabled":false}`)
+
+	start := time.Now()
+	var passes atomic.Int64
+	clock := func() time.Time { return start.Add(time.Duration(passes.Add(1)) * dexsecrets.UnusedGrace) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { RetireConnectorSecrets(ctx, client, time.Millisecond, clock); close(done) }()
+	require.Eventually(t, func() bool {
+		secret, err := client.CoreV1().Secrets("dex").Get(context.Background(), dexsecrets.SecretName, metav1.GetOptions{})
+		return err == nil && len(secret.Data) == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	cancel()
+	<-done
+
+	assert.Equal(t, "gl-secret", connectorSecretValue(t, client, "gitlab"))
 }
