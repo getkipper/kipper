@@ -12,15 +12,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubMC simulates mc. The cat command returns the write test payload. The
-// find command uses FIND_OUT, FIND_ERR and FIND_RC for stdout, stderr and exit
-// status. The stat command reads "rc|stderr" from STAT_KEYED for --enc-c
-// requests and STAT_PLAIN otherwise.
+// stubMC simulates mc using environment variables. CP_KEYED_RC and CP_PLAIN_RC
+// control cp exit codes with and without --enc-c. Keyed failures print
+// CP_KEYED_ERR, defaulting to HTTP 501. Plain failures print HTTP 503.
+// CAT_KEYED and CAT_PLAIN control cat output, defaulting to the test payload.
+// CAT_KEYED_RC and CAT_PLAIN_RC cause failures when nonzero. FIND_OUT, FIND_ERR,
+// and FIND_RC control find stdout, stderr, and exit status. STAT_KEYED and
+// STAT_PLAIN provide "rc|stderr" for stat requests with and without --enc-c.
 const stubMC = `#!/bin/sh
 cmd=$1; shift
+keyed=
+case " $* " in *" --enc-c "*) keyed=1;; esac
 case "$cmd" in
 find) printf '%s' "$FIND_OUT"; printf '%s' "$FIND_ERR" >&2; exit "$FIND_RC";;
-cat) echo kipper;;
+cp)
+  rc=${CP_PLAIN_RC:-0}; err="mc: <ERROR> Failed to copy. 503 Service Unavailable."
+  [ -n "$keyed" ] && { rc=${CP_KEYED_RC:-0}; err=${CP_KEYED_ERR-"mc: <ERROR> Failed to copy. 501 Not Implemented."}; }
+  [ "$rc" = 0 ] || echo "$err" >&2
+  exit "$rc";;
+cat)
+  if [ -n "$keyed" ]; then rc=${CAT_KEYED_RC:-0}; out=${CAT_KEYED-kipper}; else rc=${CAT_PLAIN_RC:-0}; out=${CAT_PLAIN-kipper}; fi
+  [ "$rc" = 0 ] || { echo "mc: <ERROR> Unable to read. 400 Bad Request." >&2; exit "$rc"; }
+  echo "$out";;
 stat)
   spec=$STAT_PLAIN
   case " $* " in *" --enc-c "*) spec=$STAT_KEYED;; esac
@@ -89,9 +102,40 @@ func TestTheKeyCheckAnswersOnlyWhatItKnows(t *testing.T) {
 	}
 }
 
-func TestTheWriteTestPassesOnlyOnAnSSECRefusal(t *testing.T) {
-	assert.Contains(t, runSSEScript(t, sseWriteTestScript, map[string]string{"STAT_PLAIN": statRefused}), sseWriteOKMarker)
-	assert.NotContains(t, runSSEScript(t, sseWriteTestScript, map[string]string{"STAT_PLAIN": statOK}), sseWriteOKMarker,
-		"a store that serves the object without the key ignored SSE-C")
-	assert.NotContains(t, runSSEScript(t, sseWriteTestScript, map[string]string{"STAT_PLAIN": statBroken}), sseWriteOKMarker)
+// TestTheWriteTestAnswersOnlyWhatItKnows requires demonstrated incompatibility
+// for fallback, so inconclusive failures cannot leave backups without SSE-C.
+func TestTheWriteTestAnswersOnlyWhatItKnows(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"refused without the key", map[string]string{"STAT_PLAIN": statRefused}, sseWriteOKMarker},
+		{"served without the key", map[string]string{"STAT_PLAIN": statOK}, sseUnsupportedMarker},
+		{"changed with the key", map[string]string{"STAT_PLAIN": statRefused, "CAT_KEYED": "other"}, sseUnsupportedMarker},
+		{"keyed write not implemented, plain write accepted", map[string]string{"CP_KEYED_RC": "1"}, sseUnsupportedMarker},
+		{"keyed write header not implemented, plain write accepted", map[string]string{"CP_KEYED_RC": "1",
+			"CP_KEYED_ERR": "mc: <ERROR> Failed to copy. A header you provided implies functionality that is not implemented."}, sseUnsupportedMarker},
+		{"keyed write unavailable, plain write accepted", map[string]string{"CP_KEYED_RC": "1",
+			"CP_KEYED_ERR": "mc: <ERROR> Failed to copy. 503 Service Unavailable."}, ""},
+		{"keyed write timed out, plain write accepted", map[string]string{"CP_KEYED_RC": "1",
+			"CP_KEYED_ERR": "mc: <ERROR> Failed to copy. context deadline exceeded"}, ""},
+		{"keyed write throttled, plain write accepted", map[string]string{"CP_KEYED_RC": "1",
+			"CP_KEYED_ERR": "mc: <ERROR> Failed to copy. Please reduce your request rate."}, ""},
+		{"keyed read refused, plain read served", map[string]string{"CAT_KEYED_RC": "1"}, sseUnsupportedMarker},
+		{"stat failed", map[string]string{"STAT_PLAIN": statBroken}, ""},
+		{"every write failed", map[string]string{"CP_KEYED_RC": "1", "CP_PLAIN_RC": "1"}, ""},
+		{"every read failed", map[string]string{"CAT_KEYED_RC": "1", "CAT_PLAIN_RC": "1"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runSSEScript(t, sseWriteTestScript, tc.env)
+			for _, marker := range []string{sseWriteOKMarker, sseUnsupportedMarker} {
+				if marker == tc.want {
+					assert.Contains(t, out, marker)
+				} else {
+					assert.NotContains(t, out, marker)
+				}
+			}
+		})
+	}
 }

@@ -23,9 +23,11 @@ import (
 //
 // Credentials come from the local AWS credentials file and are stored in a
 // Kubernetes Secret in velero. Upgrades can omit them to reuse that Secret.
-// SSEC requests a server-generated key for a bucket without backups. SSECKey
-// supplies 32 raw bytes instead, including for recovery. An existing key is
-// retained, and an active SSE-C location stays enabled without either setting.
+// SSEC requires SSE-C, generating a key for an empty bucket if needed. SSECKey
+// supplies 32 raw bytes instead, including for recovery. Without either, an
+// install with credentials attempts SSE-C on a new or changed location with an
+// empty bucket, unless SSECOff is set. An active SSE-C location stays enabled.
+// Replacing an unused key preserves the old key in a separate Secret.
 type BackupStorageConfig struct {
 	Bucket          string
 	Region          string
@@ -34,6 +36,7 @@ type BackupStorageConfig struct {
 	SecretAccessKey string
 	SSEC            bool
 	SSECKey         []byte
+	SSECOff         bool
 }
 
 // CheckBackupEndpoint returns nil for an empty endpoint (AWS S3), an HTTPS URL,

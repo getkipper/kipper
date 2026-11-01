@@ -22,8 +22,8 @@ var backupSSEKeyCmd = &cobra.Command{
 var backupSSEKeyExportCmd = &cobra.Command{
 	Use:   "export --to <file>",
 	Short: "Save the backup SSE-C key to a new local file",
-	Long: `Saves the SSE-C key of a cluster installed with --backup-storage-sse-c to a
-new file with mode 0600, or with its folder's permissions on Windows. The
+	Long: `Saves the SSE-C key of a cluster whose backups use SSE-C to a new file
+with mode 0600, or with its folder's permissions on Windows. The
 file holds the key as base64 text. The key is required to read the backup
 objects it protects, including when recovering into a new cluster with
 --backup-storage-sse-c-key-file. Keep the file outside the cluster, for example
