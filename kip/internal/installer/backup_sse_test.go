@@ -131,6 +131,7 @@ func TestAKeyFileMovesAnUnusedKeyAside(t *testing.T) {
 		assert.Regexp(t, `^`+sseKeySecret+`-previous-\d{14}$`, name)
 		assert.Equal(t, unusedSSEKey, key)
 		assert.Contains(t, notice, "velero/"+name)
+		assert.Contains(t, notice, "kip backup sse-key export --previous "+name, "the operator needs a way to save the old key")
 	}
 	assert.Contains(t, h.lastSSEJob, "secretName: "+sseCandidateSecret, "the file's key is checked before the old one moves")
 	assert.Empty(t, h.sseCandidate)

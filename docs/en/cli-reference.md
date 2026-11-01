@@ -1393,7 +1393,7 @@ The `nano` profile blocks `kip backup drill` because running a second copy of a 
 
 `kip backup repository-key export` saves the volume backup encryption key to a new file with mode 0600. The command asks for confirmation, which you can skip with `--yes`. On Windows, the file inherits its folder's permissions. It never overwrites an existing file. Keep the key outside the cluster because a recovery install needs it to read the volume backups. See [The backup repository key](/en/installation#backup-repository-key).
 
-`kip backup sse-key export` does the same for the SSE-C key of a cluster whose backups use SSE-C, writing it as base64 text that `--backup-storage-sse-c-key-file` reads back. See [SSE-C](/en/installation#backup-sse-c).
+`kip backup sse-key export` does the same for the SSE-C key of a cluster whose backups use SSE-C, writing it as base64 text that `--backup-storage-sse-c-key-file` reads back. With `--previous kipper-backup-sse-key-previous-<timestamp>`, it exports the old key that kip saved when a key file replaced an unused SSE-C key. See [SSE-C](/en/installation#backup-sse-c).
 
 `kip backup repository-key reset` replaces the key. It deletes every backup in the bucket, because the old ones cannot be read with a new key, then takes a full backup from each schedule. It asks for the bucket's name before deleting anything. Use `--yes` to skip the prompt. Like `kip cluster encrypt-secrets`, it requires SSH access to the server. See [The backup repository key](/en/installation#backup-repository-key).
 

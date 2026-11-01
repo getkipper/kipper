@@ -237,8 +237,8 @@ func moveUnusedSSECKeyAside(client CommandRunner, key []byte, target backupTarge
 		return "", fmt.Errorf("replacing the SSE-C key with the key from the file failed. Check Secret velero/%s to see which key it holds. "+
 			"Secret velero/%s holds a copy of the old key", sseKeySecret, previous)
 	}
-	return sseWarning("The key file replaced an SSE-C key that no backup location used. kip moved that key to Secret velero/%s, "+
-		"because backups elsewhere may need it", previous), nil
+	return sseWarning("The key file replaced an SSE-C key that no backup location used. kip saved the old key in Secret velero/%s "+
+		"because backups elsewhere may need it. Save it with kip backup sse-key export --previous %s --to <file>", previous, previous), nil
 }
 
 // triesSSECAutomatically reports whether automatic activation can be attempted.
