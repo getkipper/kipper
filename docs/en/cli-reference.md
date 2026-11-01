@@ -1185,6 +1185,7 @@ kip user role dev@example.com admin                # change role
 kip user monitoring grant dev@example.com          # let them open Grafana
 kip user monitoring revoke dev@example.com
 kip user remove dev@example.com
+kip user import --from-backup daily-20261101030000 # bring accounts back after recovery onto a new cluster
 kip user import dex-snapshot.yaml                  # bulk-import Dex users from a snapshot
 kip user import dex-snapshot.yaml --restart-dex    # also roll Dex so the new config takes effect
 ```
@@ -1204,11 +1205,20 @@ Use `kip user list` to check the **MONITORING** column. See [Accessing Grafana](
 
 ### kip user import {#kip-user-import}
 
-Merges the `staticPasswords` and `connectors` blocks from a captured `dex-config` snapshot into the live `dex/dex-config` ConfigMap. The snapshot can be either a full ConfigMap manifest (`kubectl get cm dex-config -n dex -o yaml`) or the raw Dex config YAML directly.
+Adds console accounts and sign-in connectors from a backup or a captured snapshot to this cluster. Backup imports also add roles.
 
-Existing entries on the live side always win on conflicts, so the install admin cannot get overwritten with stale snapshot data. Use this after a Velero restore that brought a pre-rename `dex-config` across. Without it, production users live in the snapshot but the new install only knows about the bootstrap admin.
+```bash
+kip user import --from-backup <backup> [--restart-dex]
+kip user import <snapshot.yaml> [--restart-dex]
+```
 
-Pass `--restart-dex` to roll the Dex Deployment automatically. Without it, run `kubectl -n dex rollout restart deploy/dex` once the import finishes.
+With `--from-backup`, kip restores the backup's Dex configuration, connector client secrets and roles into a temporary namespace, merges them, and removes the namespace again. Use it after recovering onto a new cluster, where the restore keeps the new installation's accounts. For imported connectors whose callback URL matches the source Dex issuer's callback, kip updates the URL to this cluster's Dex callback. When the URL changes, kip prints it so you can update those providers' app settings. Custom callback URLs stay unchanged. The backup must cover the `dex` and `kipper-system` namespaces. See [Console accounts after recovery](/en/backups#console-accounts-after-recovery).
+
+With a snapshot file, kip merges the `staticPasswords` and `connectors` blocks of a captured `dex-config`. The file can be either a full ConfigMap manifest or the raw Dex config YAML directly. Connectors whose client secret is stored outside the config are skipped, and kip lists them so you can enable them again in the console.
+
+Accounts, connectors and roles the cluster already has always win, so the install admin cannot get overwritten with stale data.
+
+Dex reads the new configuration when it restarts. Pass `--restart-dex` to roll the Dex Deployment once the import finishes.
 
 ### kip user add flags {#kip-user-add-flags}
 

@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-// DrillNamespace is where kip backup drill restores a namespace's services.
+// DrillNamespace is where kip backup drill restores a namespace's services and
+// kip user import --from-backup restores the accounts it reads.
 const DrillNamespace = "kipper-restore-drill"
 
 // ExcludedNamespaces returns the namespaces that backups of user workloads

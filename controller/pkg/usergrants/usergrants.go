@@ -47,28 +47,96 @@ func SetMonitoring(data map[string]string, email string, granted bool) error {
 		return err
 	}
 	if granted {
-		roles := map[string]string{}
-		if raw := data[UsersKey]; raw != "" {
-			if err := json.Unmarshal([]byte(raw), &roles); err != nil {
-				return fmt.Errorf("parsing %s in %s/%s: %w", UsersKey, Namespace, ConfigMapName, err)
-			}
+		userRoles, err := roles(data)
+		if err != nil {
+			return err
 		}
-		if roles[email] == "" {
+		if userRoles[email] == "" {
 			return fmt.Errorf("%w: %s", ErrUnknownUser, email)
 		}
 		grants[email] = true
 	} else {
 		delete(grants, email)
 	}
-	emails := make([]string, 0, len(grants))
-	for e := range grants {
-		emails = append(emails, e)
-	}
-	sort.Strings(emails)
-	out, err := json.Marshal(emails)
+	out, err := json.Marshal(sortedEmails(grants))
 	if err != nil {
 		return err
 	}
 	data[MonitoringKey] = string(out)
 	return nil
+}
+
+// Merge adds backup roles and monitoring grants for users whose live role is
+// empty or missing and returns their emails in sorted order. Existing roles and grants
+// are preserved. Both maps contain kipper-users ConfigMap data, and live must
+// be non-nil. If no users are added, it returns nil without changing live.
+// Invalid role or monitoring JSON returns an error and leaves live unchanged.
+func Merge(live, backup map[string]string) ([]string, error) {
+	liveRoles, err := roles(live)
+	if err != nil {
+		return nil, err
+	}
+	backupRoles, err := roles(backup)
+	if err != nil {
+		return nil, err
+	}
+	backupGrants, err := Monitoring(backup)
+	if err != nil {
+		return nil, err
+	}
+	grants, err := Monitoring(live)
+	if err != nil {
+		return nil, err
+	}
+
+	var added []string
+	for email, role := range backupRoles {
+		if liveRoles[email] != "" {
+			continue
+		}
+		liveRoles[email] = role
+		added = append(added, email)
+		if backupGrants[email] {
+			grants[email] = true
+		}
+	}
+	if len(added) == 0 {
+		return nil, nil
+	}
+	sort.Strings(added)
+
+	usersJSON, err := json.Marshal(liveRoles)
+	if err != nil {
+		return nil, err
+	}
+	monitoringJSON, err := json.Marshal(sortedEmails(grants))
+	if err != nil {
+		return nil, err
+	}
+	live[UsersKey] = string(usersJSON)
+	live[MonitoringKey] = string(monitoringJSON)
+	return added, nil
+}
+
+// roles returns the console roles in data. A missing key means no roles.
+func roles(data map[string]string) (map[string]string, error) {
+	roles := map[string]string{}
+	if raw := data[UsersKey]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &roles); err != nil {
+			return nil, fmt.Errorf("parsing %s in %s/%s: %w", UsersKey, Namespace, ConfigMapName, err)
+		}
+	}
+	if roles == nil {
+		roles = map[string]string{}
+	}
+	return roles, nil
+}
+
+func sortedEmails(grants map[string]bool) []string {
+	emails := make([]string, 0, len(grants))
+	for e := range grants {
+		emails = append(emails, e)
+	}
+	sort.Strings(emails)
+	return emails
 }
