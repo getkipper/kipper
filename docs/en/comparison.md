@@ -1,6 +1,6 @@
 ---
 title: 'Kipper vs Coolify, Dokploy, Dokku and others'
-description: 'How Kipper compares with Coolify, Dokploy, Dokku, Sealos, CapRover and Kubero: underlying infrastructure, licenses, when each project is the better choice, and requirements for running Kipper on a small server.'
+description: 'How Kipper compares with Coolify, Dokploy, Dokku, Sealos, CapRover and Kubero: what runs underneath, licenses, and when each project is the better choice.'
 ---
 
 # Kipper vs Coolify, Dokploy, Dokku, Sealos, CapRover and Kubero

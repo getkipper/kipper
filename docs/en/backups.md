@@ -1,6 +1,6 @@
 ---
 title: 'Back up a Kubernetes cluster to S3 and restore it'
-description: 'Daily and on-demand backups of user resources and volumes, with Velero, kept on the cluster by default or in an S3-compatible bucket, and restored into the same namespace or another.'
+description: 'Daily and on-demand backups of resources and volumes with Velero, kept on the cluster or in an S3-compatible bucket, and restored into any namespace.'
 ---
 
 # Backup & Restore
