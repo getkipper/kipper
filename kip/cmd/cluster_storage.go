@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
@@ -24,13 +25,24 @@ var clusterStorageCmd = &cobra.Command{
 	Use:   "storage",
 	Short: "Show the cluster's storage and set how many copies it offers",
 	Long: `Shows the storage mode, the most copies of a volume the cluster offers,
-and how many nodes can hold copies. With --max-copies, sets the offer: with
-2, deployers may create services and volumes with two copies. Existing
-volumes keep their copies either way. Two copies need Longhorn storage.
+how many nodes can hold copies and, on Longhorn, the estimated capacity of
+the server's roomiest disk for new single-copy volumes. --max-copies sets
+the offer. At 2, deployers may create services and volumes with two copies.
+Existing volumes keep their copies when the offer changes. Two copies need
+Longhorn storage.
+
+Longhorn counts each volume at its full size, regardless of how much data it holds.
+--over-provisioning sets how much it may schedule, as a percentage of each
+disk's space after its reserve. At 200, the volumes on a disk may add up
+to twice that space. Writes fail once the volumes together fill the physical
+disk, so raise the percentage only while the volumes hold much less data
+than their configured sizes.
+kip upgrade keeps the value.
 
 Examples:
   kip cluster storage
-  kip cluster storage --max-copies 2`,
+  kip cluster storage --max-copies 2
+  kip cluster storage --over-provisioning 200`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE:         runClusterStorage,
@@ -93,6 +105,7 @@ Examples:
 
 func init() {
 	clusterStorageCmd.Flags().Int32("max-copies", 0, "the most copies of a volume deployers may ask for: 1 or 2")
+	clusterStorageCmd.Flags().Int32("over-provisioning", 0, "how much Longhorn may schedule, as a percentage of each disk's space after its reserve: at least 100")
 	clusterStorageLonghornCmd.Flags().String("ssh-key", "", "path to SSH private key")
 	addSkipMemoryFloorFlag(clusterStorageLonghornCmd)
 	clusterStoragePruneCmd.Flags().BoolP("yes", "y", false, "skip the confirmation prompt")
@@ -348,9 +361,17 @@ func runClusterStorage(cmd *cobra.Command, _ []string) error {
 	}
 	ctx := context.Background()
 	dyn := k8sClient.Dynamic()
+	var percent, maxCopies *int32
+	if cmd.Flags().Changed("over-provisioning") {
+		v, _ := cmd.Flags().GetInt32("over-provisioning")
+		percent = &v
+	}
 	if cmd.Flags().Changed("max-copies") {
-		maxCopies, _ := cmd.Flags().GetInt32("max-copies")
-		return setCopiesOffer(ctx, os.Stdout, dyn, maxCopies)
+		v, _ := cmd.Flags().GetInt32("max-copies")
+		maxCopies = &v
+	}
+	if percent != nil || maxCopies != nil {
+		return setStorageFlags(ctx, os.Stdout, dyn, percent, maxCopies)
 	}
 	c := readCopiesCluster(ctx, dyn)
 	say(os.Stdout, "\n  Storage:      %s\n", c.mode)
@@ -361,10 +382,12 @@ func runClusterStorage(cmd *cobra.Command, _ []string) error {
 	}
 	say(os.Stdout, "  Copies:       up to %d offered\n", recordedCopiesOffer(ctx, dyn))
 	if c.replicaNodes == unknownReplicaNodes {
-		say(os.Stdout, "  Copy nodes:   unknown (Longhorn's nodes could not be read)\n\n")
+		say(os.Stdout, "  Copy nodes:   unknown (Longhorn's nodes could not be read)\n")
 	} else {
-		say(os.Stdout, "  Copy nodes:   %d ready to hold copies\n\n", c.replicaNodes)
+		say(os.Stdout, "  Copy nodes:   %d ready to hold copies\n", c.replicaNodes)
 	}
+	reportLonghornRoom(ctx, os.Stdout, &service.Manager{Client: k8sClient.Clientset(), Dynamic: dyn})
+	say(os.Stdout, "\n")
 	reportLocalVolumes(ctx, os.Stdout, k8sClient.Clientset(), dyn, time.Now())
 	return nil
 }
@@ -396,4 +419,75 @@ func setCopiesOffer(ctx context.Context, out io.Writer, dyn dynamic.Interface, m
 	}
 	say(out, "\n")
 	return nil
+}
+
+const overProvisioningSetting = "storage-over-provisioning-percentage"
+
+// setStorageFlags checks every given setting before changing any, then sets
+// Longhorn's over-provisioning and the copies offer. Nil arguments preserve
+// existing settings. If setting the copies offer fails after over-provisioning
+// was set, rerunning the command retries the writes.
+func setStorageFlags(ctx context.Context, out io.Writer, dyn dynamic.Interface, percent, maxCopies *int32) error {
+	if percent != nil {
+		if err := refuseOverProvisioning(ctx, dyn, *percent); err != nil {
+			return err
+		}
+	}
+	if maxCopies != nil {
+		if err := refuseCopiesOutOfRange(*maxCopies); err != nil {
+			return fmt.Errorf("--max-copies must be 1 or 2, got %d", *maxCopies)
+		}
+	}
+	if percent != nil {
+		if err := setOverProvisioning(ctx, out, dyn, *percent); err != nil {
+			return err
+		}
+	}
+	if maxCopies != nil {
+		return setCopiesOffer(ctx, out, dyn, *maxCopies)
+	}
+	return nil
+}
+
+// refuseOverProvisioning rejects values below 100 and clusters on local storage.
+func refuseOverProvisioning(ctx context.Context, dyn dynamic.Interface, percent int32) error {
+	if percent < 100 {
+		return fmt.Errorf("--over-provisioning must be at least 100, got %d", percent)
+	}
+	if k8s.ReadStorageMode(ctx, dyn) == platform.StorageLocal {
+		return fmt.Errorf("over-provisioning is a Longhorn setting, and this cluster uses local storage")
+	}
+	return nil
+}
+
+// setOverProvisioning sets Longhorn's storage-over-provisioning-percentage,
+// which caps the volume sizes Longhorn schedules on a disk at that percentage
+// of the disk's space after its reserve. Values below 100 and clusters on local
+// storage are refused.
+func setOverProvisioning(ctx context.Context, out io.Writer, dyn dynamic.Interface, percent int32) error {
+	if err := refuseOverProvisioning(ctx, dyn, percent); err != nil {
+		return err
+	}
+	patch := []byte(fmt.Sprintf(`{"value":"%d"}`, percent))
+	if _, err := dyn.Resource(longhornSettingGVR).Namespace("longhorn-system").Patch(ctx, overProvisioningSetting, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("setting Longhorn's over-provisioning: %w", err)
+	}
+	say(out, "\n  ✔  Longhorn may schedule volumes up to %d%% of each disk's space after its reserve.\n\n", percent)
+	return nil
+}
+
+// reportLonghornRoom prints the estimated capacity of the server's roomiest
+// disk for new single-copy volumes and Longhorn's over-provisioning percentage.
+// A failed capacity estimate or setting read suppresses the output.
+func reportLonghornRoom(ctx context.Context, out io.Writer, mgr *service.Manager) {
+	room, err := mgr.ServerStorageRoom(ctx)
+	if err != nil {
+		return
+	}
+	setting, err := mgr.Dynamic.Resource(longhornSettingGVR).Namespace("longhorn-system").Get(ctx, overProvisioningSetting, metav1.GetOptions{})
+	if err != nil {
+		return
+	}
+	percent, _, _ := unstructured.NestedString(setting.Object, "value")
+	say(out, "  Room:         %s's roomiest disk has about %s for new single-copy volumes (over-provisioning %s%%)\n", room.Node, service.FormatSize(room.Bytes), percent)
 }
