@@ -116,15 +116,20 @@ func parseDumpCheck(out string) (results []dumpCheck, present bool, err error) {
 
 // checkConsistentDump restores and verifies the service's consistent dump,
 // prints one line per database, and returns an error if execution, output parsing
-// or any database check fails. A missing manifest skips verification.
+// or any database check fails. If the manifest is missing, it skips dump
+// verification and reports that only the volume copy was checked.
 func checkConsistentDump(ctx context.Context, exec podExecFunc, podName string) error {
 	var stdout, stderr bytes.Buffer
 	if err := exec(ctx, []string{"sh", "-c", drillDumpScript}, nil, &stdout, &stderr); err != nil {
 		return fmt.Errorf("checking the consistent dump: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	results, present, err := parseDumpCheck(stdout.String())
-	if err != nil || !present {
+	if err != nil {
 		return err
+	}
+	if !present {
+		fmt.Printf("  ·  %s: the backup contains no consistent dump, so the drill checked only the volume copy\n", podName)
+		return nil
 	}
 	failed := false
 	for _, r := range results {
