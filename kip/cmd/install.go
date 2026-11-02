@@ -75,6 +75,7 @@ func init() {
 	installCmd.Flags().String("backup-storage-profile", "default", "profile name within the credentials file (e.g. 'acme')")
 	installCmd.Flags().Bool("backup-storage-sse-c", false, "require SSE-C for backup objects, with a key kip generates on the server. Without the flag, kip turns SSE-C on where the store supports it and the bucket holds no backups. Use --backup-storage-sse-c=false to turn it off")
 	installCmd.Flags().String("backup-storage-sse-c-key-file", "", "file containing the SSE-C key used to encrypt existing backups, as saved by kip backup sse-key export (mode 0600)")
+	installCmd.Flags().Bool("backup-storage-read-only", false, "attach the backup bucket for restores only, with the backup schedules off, to read an old location after kip backup storage set. Requires --backup-repository-key-file")
 	installCmd.Flags().String("backup-repository-key-file", "", "file containing the key used to encrypt existing volume backups (mode 0600). Required only when the bucket holds backups and this cluster has no key yet")
 
 	_ = installCmd.MarkFlagRequired("host")
@@ -172,6 +173,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if repositoryKey, err = installer.ReadRepositoryKeyFile(path); err != nil {
 			return err
 		}
+	}
+	if err := requireRecoveryKey(backupStorage, repositoryKey != nil); err != nil {
+		return err
 	}
 
 	// Pre-install there is no cluster entry to read SSH config from, so
@@ -327,12 +331,16 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 	profile, _ := cmd.Flags().GetString("backup-storage-profile")
 	sseC, _ := cmd.Flags().GetBool("backup-storage-sse-c")
 	sseKeyPath, _ := cmd.Flags().GetString("backup-storage-sse-c-key-file")
+	readOnly, _ := cmd.Flags().GetBool("backup-storage-read-only")
 
 	anySet := bucket != "" || region != "" || endpoint != "" || credsPath != "" ||
 		cmd.Flags().Changed("backup-storage-profile")
 	if !anySet {
 		if cmd.Flags().Changed("backup-storage-sse-c") || sseKeyPath != "" {
 			return nil, fmt.Errorf("the SSE-C flags need the external backup storage flags in the same run. Pass --backup-storage-bucket, --backup-storage-region and --backup-storage-endpoint")
+		}
+		if readOnly {
+			return nil, fmt.Errorf("--backup-storage-read-only needs external backup storage. Pass --backup-storage-bucket and --backup-storage-region")
 		}
 		return nil, nil
 	}
@@ -353,24 +361,13 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 	if region == "" {
 		return nil, fmt.Errorf("--backup-storage-region is required when configuring external backup storage")
 	}
-
-	if credsPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolving ~/.aws/credentials path: %w", err)
-		}
-		credsPath = filepath.Join(home, ".aws", "credentials")
-	} else if strings.HasPrefix(credsPath, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("expanding ~ in credentials path: %w", err)
-		}
-		credsPath = filepath.Join(home, credsPath[2:])
+	if readOnly && sseC {
+		return nil, fmt.Errorf("--backup-storage-read-only reads existing backups, so it takes their key with --backup-storage-sse-c-key-file instead of --backup-storage-sse-c")
 	}
 
-	creds, err := installer.LoadAWSCredentials(credsPath, profile)
+	creds, err := loadBackupCredentials(credsPath, profile)
 	if err != nil {
-		return nil, fmt.Errorf("loading credentials for external backup storage: %w", err)
+		return nil, err
 	}
 
 	cfg := &installer.BackupStorageConfig{
@@ -382,6 +379,7 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 		SSEC:            sseC,
 		SSECKey:         sseKey,
 		SSECOff:         cmd.Flags().Changed("backup-storage-sse-c") && !sseC,
+		ReadOnly:        readOnly,
 	}
 	if cfg.SSECOff && sseKey != nil {
 		return nil, fmt.Errorf("--backup-storage-sse-c=false and --backup-storage-sse-c-key-file contradict each other. The key file turns SSE-C on")
@@ -392,6 +390,36 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 		}
 	}
 	return cfg, nil
+}
+
+// loadBackupCredentials reads a profile from an AWS credentials file. An
+// empty path means ~/.aws/credentials and a leading ~/ is expanded.
+func loadBackupCredentials(path, profile string) (*installer.AWSCredentials, error) {
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolving ~/.aws/credentials path: %w", err)
+		}
+		path = filepath.Join(home, ".aws", "credentials")
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("expanding ~ in credentials path: %w", err)
+		}
+		path = filepath.Join(home, path[2:])
+	}
+	creds, err := installer.LoadAWSCredentials(path, profile)
+	if err != nil {
+		return nil, fmt.Errorf("loading credentials for external backup storage: %w", err)
+	}
+	return creds, nil
+}
+
+func requireRecoveryKey(cfg *installer.BackupStorageConfig, haveKey bool) error {
+	if cfg != nil && cfg.ReadOnly && !haveKey {
+		return fmt.Errorf("--backup-storage-read-only requires --backup-repository-key-file with the key used to write the bucket's backups, such as the previous key file saved by kip backup storage set")
+	}
+	return nil
 }
 
 // installingKipVersion is the version recorded on the CRDs an install writes, so

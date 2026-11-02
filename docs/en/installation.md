@@ -52,6 +52,7 @@ kip install --host <ip> [flags]
 | `--backup-storage-profile` | No | `default` | Profile name inside the credentials file. Lets you reuse an existing AWS CLI profile like `acme` without copying it to a separate file |
 | `--backup-storage-sse-c` | No | on where supported | Require encryption of backup objects with a customer-provided key (SSE-C) that kip generates on the server, and fail when the store or bucket cannot support it. Without the flag, kip turns SSE-C on where it can and warns where it cannot. `--backup-storage-sse-c=false` turns it off. See [SSE-C](#backup-sse-c) |
 | `--backup-storage-sse-c-key-file` | To recover from SSE-C backups | — | File containing the SSE-C key used to encrypt the bucket's backups, as saved by `kip backup sse-key export`, mode 0600 |
+| `--backup-storage-read-only` | No | `false` | Attach the bucket for restores only, with both backup schedules off, to read the old bucket after `kip backup storage set`. Requires `--backup-repository-key-file`. See [Read the old backups](/en/backups#read-old-backups) |
 | `--backup-repository-key-file` | If the bucket holds backups and the cluster has no key | — | File containing the key used to encrypt existing volume backups, mode 0600. See [The backup repository key](#backup-repository-key) |
 
 #### DNS for a domain you run

@@ -168,6 +168,12 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	if err := recoverNetworkChange(cluster, sshKey, autoYes); err != nil {
 		return err
 	}
+	// Check before upgrading components so an unfinished storage move keeps
+	// its Velero configuration.
+	backupStorage, err := backupStorageForUpgrade(ctx, clientset, cluster.Name, installer.BackupStorageFromRef(cluster.BackupStorage))
+	if err != nil {
+		return err
+	}
 	if upgradeK3s {
 		if err := preflightK3s(cluster, sshKey); err != nil {
 			return err
@@ -449,8 +455,8 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// Credentials are not persisted in ~/.kip/config.yaml; for external
 	// mode they stay on the cluster as a Kubernetes Secret and the
 	// upgrade preserves them rather than rewriting.
-	if bs := installer.BackupStorageFromRef(cluster.BackupStorage); bs != nil {
-		state.BackupStorage = bs
+	if backupStorage != nil {
+		state.BackupStorage = backupStorage
 	}
 	if err := recordLegacyBackup(ctx, k8sClient.Dynamic(), &state); err != nil {
 		return err
@@ -1225,6 +1231,24 @@ func recordLegacyStorage(ctx context.Context, dyn dynamic.Interface) error {
 		return fmt.Errorf("recording Longhorn storage: %w", err)
 	}
 	return nil
+}
+
+// backupStorageForUpgrade uses the cluster's recorded location and saves it
+// locally when it differs. An unfinished move returns an error. Without a
+// record, it returns the local settings.
+func backupStorageForUpgrade(ctx context.Context, clientset kubernetes.Interface, clusterName string, local *installer.BackupStorageConfig) (*installer.BackupStorageConfig, error) {
+	cm, err := clientset.CoreV1().ConfigMaps("velero").Get(ctx, installer.StorageRecordConfigMap, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return local, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the backup storage record: %w", err)
+	}
+	rec, err := installer.ParseStorageRecord(cm.Data)
+	if err != nil {
+		return nil, err
+	}
+	return installer.UpgradeBackupStorage(rec, local, clusterName)
 }
 
 // requireBackupDestination rejects missing external storage settings to prevent

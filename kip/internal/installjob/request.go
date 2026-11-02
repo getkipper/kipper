@@ -59,6 +59,7 @@ type Backup struct {
 	SSEC            bool   `json:"sse_c,omitempty"`
 	SSECKey         []byte `json:"sse_c_key,omitempty"`
 	SSECOff         bool   `json:"sse_c_off,omitempty"`
+	ReadOnly        bool   `json:"read_only,omitempty"`
 }
 
 // ParseRequest decodes and validates an install request. It returns an error
@@ -125,6 +126,7 @@ func (r Request) Options() installer.Options {
 		opts.BackupStorage = &installer.BackupStorageConfig{
 			Bucket: b.Bucket, Region: b.Region, Endpoint: b.Endpoint,
 			AccessKeyID: b.AccessKeyID, SecretAccessKey: b.SecretAccessKey, SSEC: b.SSEC, SSECKey: b.SSECKey, SSECOff: b.SSECOff,
+			ReadOnly: b.ReadOnly,
 		}
 	}
 	return opts

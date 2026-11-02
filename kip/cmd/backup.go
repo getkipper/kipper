@@ -226,8 +226,13 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing backups: %w", err)
 	}
 
+	previous := previousStorageNote(ctx, k8sClient.Clientset())
 	if len(backups.Items) == 0 {
-		fmt.Printf("\n  No backups found\n\n")
+		fmt.Printf("\n  No backups found\n")
+		if previous != "" {
+			fmt.Printf("  %s\n", previous)
+		}
+		fmt.Println()
 		return nil
 	}
 
@@ -266,9 +271,28 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s\n", line)
 		}
 	}
+	if previous != "" {
+		fmt.Printf("  %s\n", previous)
+	}
 	reportVolumesOutsideBackups(ctx, k8sClient.Clientset())
 	fmt.Println()
 	return nil
+}
+
+// previousStorageNote explains where to find backups from the previous location.
+// It returns an empty string if there is no previous location or its record
+// cannot be read or parsed.
+func previousStorageNote(ctx context.Context, clientset kubernetes.Interface) string {
+	cm, err := clientset.CoreV1().ConfigMaps("velero").Get(ctx, installer.StorageRecordConfigMap, metav1.GetOptions{})
+	if err != nil {
+		return ""
+	}
+	rec, err := installer.ParseStorageRecord(cm.Data)
+	if err != nil || rec.Previous == nil {
+		return ""
+	}
+	return fmt.Sprintf("Backups from before %s stay in bucket %s. Read them with a read-only recovery install (kip install --backup-storage-read-only).",
+		rec.Previous.SwitchedAt, rec.Previous.StorageLocation)
 }
 
 // reportVolumesOutsideBackups prints volumes whose files would be omitted from

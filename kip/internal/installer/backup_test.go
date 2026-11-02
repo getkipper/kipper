@@ -159,6 +159,35 @@ func TestVeleroManifestSchedulesBackUpKipperClusterObjects(t *testing.T) {
 	}
 }
 
+func TestVeleroManifestForAReadOnlyLocationWritesNothing(t *testing.T) {
+	values := func(readOnly bool) map[string]any {
+		var chart struct {
+			Spec struct {
+				ValuesContent string `yaml:"valuesContent"`
+			} `yaml:"spec"`
+		}
+		cfg := &BackupStorageConfig{Bucket: "old-backups", Region: "eu-west-1", ReadOnly: readOnly}
+		require.NoError(t, yaml.Unmarshal([]byte(veleroManifest(cfg, false)), &chart))
+		v := map[string]any{}
+		require.NoError(t, yaml.Unmarshal([]byte(chart.Spec.ValuesContent), &v))
+		return v
+	}
+	for _, readOnly := range []bool{false, true} {
+		v := values(readOnly)
+		bsl := v["configuration"].(map[string]any)["backupStorageLocation"].([]any)[0].(map[string]any)
+		if readOnly {
+			assert.Equal(t, "ReadOnly", bsl["accessMode"], "Velero refuses backups, deletion and maintenance only on a ReadOnly location")
+		} else {
+			assert.NotContains(t, bsl, "accessMode")
+		}
+		schedules := v["schedules"].(map[string]any)
+		require.Len(t, schedules, 2)
+		for name, schedule := range schedules {
+			assert.Equal(t, readOnly, schedule.(map[string]any)["disabled"], name)
+		}
+	}
+}
+
 // Preserve the existing manifests for hosts where Kipper leaves k3s SELinux support disabled.
 func TestVeleroManifestWithoutSELinuxMatchesTheGoldenFiles(t *testing.T) {
 	cases := map[string]*BackupStorageConfig{

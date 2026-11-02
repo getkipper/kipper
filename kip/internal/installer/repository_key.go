@@ -45,31 +45,36 @@ var (
 // On systems other than Windows, it rejects any group or other permissions,
 // as SSH does for private keys.
 func ReadRepositoryKeyFile(path string) ([]byte, error) {
+	return readRepositoryKeyFile("--backup-repository-key-file", path)
+}
+
+// readRepositoryKeyFile is ReadRepositoryKeyFile with errors naming flag.
+func readRepositoryKeyFile(flag, path string) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("--backup-repository-key-file: %w", err)
+		return nil, fmt.Errorf("%s: %w", flag, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("--backup-repository-key-file %s is not a regular file", path)
+		return nil, fmt.Errorf("%s %s is not a regular file", flag, path)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("--backup-repository-key-file %s grants permissions to other users. Run chmod 600 %s", path, path)
+		return nil, fmt.Errorf("%s %s grants permissions to other users. Run chmod 600 %s", flag, path, path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("--backup-repository-key-file: %w", err)
+		return nil, fmt.Errorf("%s: %w", flag, err)
 	}
 	defer func() { _ = f.Close() }()
 	key, err := io.ReadAll(io.LimitReader(f, maxRepositoryKeyBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("--backup-repository-key-file: %w", err)
+		return nil, fmt.Errorf("%s: %w", flag, err)
 	}
 	if len(key) > maxRepositoryKeyBytes {
-		return nil, fmt.Errorf("--backup-repository-key-file %s is larger than %d bytes", path, maxRepositoryKeyBytes)
+		return nil, fmt.Errorf("%s %s is larger than %d bytes", flag, path, maxRepositoryKeyBytes)
 	}
 	key = []byte(strings.TrimSuffix(strings.TrimSuffix(string(key), "\n"), "\r"))
 	if err := CheckRepositoryKey(key); err != nil {
-		return nil, fmt.Errorf("--backup-repository-key-file %s: %w", path, err)
+		return nil, fmt.Errorf("%s %s: %w", flag, path, err)
 	}
 	return key, nil
 }
@@ -104,14 +109,19 @@ func CheckRepositoryKey(key []byte) error {
 // file or symlink causes an error. A failed write attempts to remove the partial file.
 // Call CheckRepositoryKey first when the key needs validation.
 func WriteRepositoryKeyFile(path string, key []byte) error {
+	return writeNewKeyFile("--to", path, key)
+}
+
+// writeNewKeyFile is WriteRepositoryKeyFile with errors naming flag.
+func writeNewKeyFile(flag, path string, key []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("--to: %w", err)
+		return fmt.Errorf("%s: %w", flag, err)
 	}
 	if _, err := f.Write(key); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
-		return fmt.Errorf("--to: %w", err)
+		return fmt.Errorf("%s: %w", flag, err)
 	}
 	return f.Close()
 }
@@ -127,10 +137,11 @@ func IsDefaultRepositoryKey(key []byte) bool {
 // because credentials are absent (as on external-storage upgrades) or because
 // mc cannot use the endpoint or credentials. noList explains those restrictions.
 type backupTarget struct {
-	bucket string
-	s3URL  string
-	mcHost string
-	noList string
+	bucket   string
+	s3URL    string
+	mcHost   string
+	noList   string
+	readOnly bool
 }
 
 // normalizeEndpoint drops a trailing slash, so https://s3.example.com/ and
@@ -159,7 +170,7 @@ func newBackupTarget(cfg *BackupStorageConfig, minioPassword string) (backupTarg
 	if !bucketNamePattern.MatchString(cfg.Bucket) {
 		return backupTarget{}, fmt.Errorf("backup storage bucket %q is not a valid bucket name", cfg.Bucket)
 	}
-	t := backupTarget{bucket: cfg.Bucket, s3URL: cfg.Endpoint}
+	t := backupTarget{bucket: cfg.Bucket, s3URL: cfg.Endpoint, readOnly: cfg.ReadOnly}
 	scheme, host := "https", ""
 	if cfg.Endpoint == "" {
 		if !regionPattern.MatchString(cfg.Region) {
@@ -251,14 +262,26 @@ func prepareBackupRepository(client CommandRunner, target backupTarget, check *b
 // createRepositoryKeyCmd reads the key from stdin, so it never appears in a
 // command line. kubectl create, unlike apply, fails if the Secret appeared in
 // the meantime instead of replacing it.
-var createRepositoryKeyCmd = "kubectl -n velero create secret generic " + repositoryKeySecret +
-	" --from-file=" + repositoryKeyField + "=/dev/stdin --dry-run=client -o yaml" +
-	" | kubectl label --local -f - " + excludeFromBackupLabel + " -o yaml | kubectl create -f -"
+var createRepositoryKeyCmd = createKeySecretCmd(repositoryKeySecret)
+
+// createKeySecretCmd returns a command that reads a repository key from stdin
+// and creates the named Secret with the backup-exclusion label. The command
+// fails if the Secret already exists.
+func createKeySecretCmd(name string) string {
+	return "kubectl -n velero create secret generic " + name +
+		" --from-file=" + repositoryKeyField + "=/dev/stdin --dry-run=client -o yaml" +
+		" | kubectl label --local -f - " + excludeFromBackupLabel + " -o yaml | kubectl create -f -"
+}
 
 // generateRepositoryKeyCmd creates a key from 32 random bytes on the server,
 // so the key never crosses the network. The length check stops a failed read
 // from producing an empty key.
-var generateRepositoryKeyCmd = `k=$(head -c 32 /dev/urandom | base64 | tr -d '\n') && [ ${#k} -eq 44 ] && printf '%s' "$k" | ` + createRepositoryKeyCmd
+var generateRepositoryKeyCmd = generateKeySecretCmd(repositoryKeySecret)
+
+// generateKeySecretCmd is generateRepositoryKeyCmd for the named Secret.
+func generateKeySecretCmd(name string) string {
+	return `k=$(head -c 32 /dev/urandom | base64 | tr -d '\n') && [ ${#k} -eq 44 ] && printf '%s' "$k" | ` + createKeySecretCmd(name)
+}
 
 // requireSameRepositoryKey compares key with the live one after trimming both
 // as Velero does. The live key travels base64-encoded over SSH and is compared
@@ -308,11 +331,12 @@ func refuseMoveToPopulatedBucket(client CommandRunner, check *bucketCheck) error
 // liveLocation is Velero's default backup location as the cluster runs it.
 // An empty bucket means Velero or the location is absent.
 type liveLocation struct {
-	bucket string
-	s3URL  string
-	sseKey string
-	region string
-	prefix string
+	bucket     string
+	s3URL      string
+	sseKey     string
+	region     string
+	prefix     string
+	accessMode string
 }
 
 func liveBackupLocation(client CommandRunner) (liveLocation, error) {
@@ -323,15 +347,15 @@ func liveBackupLocation(client CommandRunner) (liveLocation, error) {
 	if strings.TrimSpace(crd) == "" {
 		return liveLocation{}, nil
 	}
-	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}|{.spec.config.customerKeyEncryptionSecret}|{.spec.config.region}|{.spec.objectStorage.prefix}' 2>/dev/null`)
+	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}|{.spec.config.customerKeyEncryptionSecret}|{.spec.config.region}|{.spec.objectStorage.prefix}|{.spec.accessMode}' 2>/dev/null`)
 	if err != nil {
 		return liveLocation{}, fmt.Errorf("reading the current backup location: %w", err)
 	}
-	fields := strings.SplitN(strings.TrimSpace(out), "|", 5)
-	for len(fields) < 5 {
+	fields := strings.SplitN(strings.TrimSpace(out), "|", 6)
+	for len(fields) < 6 {
 		fields = append(fields, "")
 	}
-	return liveLocation{bucket: fields[0], s3URL: fields[1], sseKey: fields[2], region: fields[3], prefix: fields[4]}, nil
+	return liveLocation{bucket: fields[0], s3URL: fields[1], sseKey: fields[2], region: fields[3], prefix: fields[4], accessMode: fields[5]}, nil
 }
 
 // changesFrom reports whether target differs from the live location,
