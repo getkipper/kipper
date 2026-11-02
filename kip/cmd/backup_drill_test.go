@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/service"
 )
 
 func backupObject(name, phase, completed string, included, excluded []interface{}) unstructured.Unstructured {
@@ -524,4 +526,55 @@ func TestADrillReportsAHolderAsARestoredSharedVolume(t *testing.T) {
 	service := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-0", Labels: map[string]string{"kipper.run/service-type": "postgres"}}}
 	_, ok = drillHolderClaim(&service)
 	assert.False(t, ok, "a service pod gets its row check")
+}
+
+func drillClaimIn(name string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: drillNamespace, Name: name, UID: types.UID(name + "-uid")}}
+}
+
+func TestADrillGivesUpOnAVolumeLonghornCannotPlace(t *testing.T) {
+	grace := drillUnschedulableGrace
+	drillUnschedulableGrace = 50 * time.Millisecond
+	t.Cleanup(func() { drillUnschedulableGrace = grace })
+	clientset := kubefake.NewClientset(drillClaimIn("data-db-0"), drillClaimIn("db-dump"))
+	copies := func(_ context.Context, c *corev1.PersistentVolumeClaim) (service.ClaimCopies, error) {
+		if c.Name == "db-dump" {
+			return service.ClaimCopies{Wanted: 1, Placed: 1}, nil
+		}
+		return service.ClaimCopies{Wanted: 1, Unscheduled: "ReplicaSchedulingFailure: insufficient storage"}, nil
+	}
+	check := unplacedWatch(clientset, copies, "drill-x")
+	ctx := context.Background()
+
+	assert.NoError(t, check(ctx), "a new volume gets time for Longhorn to place it")
+	time.Sleep(60 * time.Millisecond)
+	err := check(ctx)
+	assert.ErrorContains(t, err, "data-db-0")
+	assert.NotContains(t, err.Error(), "db-dump")
+	assert.ErrorContains(t, err, "insufficient storage")
+	assert.ErrorContains(t, err, "kip stopped waiting for restore drill-x. The restore is still running")
+	assert.ErrorContains(t, err, "kip backup restore --cancel drill-x")
+}
+
+func TestADrillWaitsForAVolumeLonghornPlacesLate(t *testing.T) {
+	grace := drillUnschedulableGrace
+	drillUnschedulableGrace = 50 * time.Millisecond
+	t.Cleanup(func() { drillUnschedulableGrace = grace })
+	clientset := kubefake.NewClientset(drillClaimIn("data-db-0"))
+	placed := false
+	copies := func(context.Context, *corev1.PersistentVolumeClaim) (service.ClaimCopies, error) {
+		if placed {
+			return service.ClaimCopies{Wanted: 2, Placed: 1, Unscheduled: "ReplicaSchedulingFailure: insufficient storage"}, nil
+		}
+		return service.ClaimCopies{Wanted: 2, Unscheduled: "ReplicaSchedulingFailure: insufficient storage"}, nil
+	}
+	check := unplacedWatch(clientset, copies, "drill-x")
+	ctx := context.Background()
+
+	require.NoError(t, check(ctx))
+	placed = true
+	time.Sleep(60 * time.Millisecond)
+	assert.NoError(t, check(ctx), "one placed copy serves the drill, as a degraded volume does")
+	placed = false
+	assert.NoError(t, check(ctx), "the wait starts again after a copy was placed")
 }

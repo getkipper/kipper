@@ -236,7 +236,13 @@ func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn d
 	}
 	fmt.Printf("  ·  Restore %s started\n", name)
 	unschedulable := unschedulableWatch(clientset, name)
-	phase, err := waitForRestorePhase(ctx, dyn, name, time.Hour, func() error { return unschedulable(ctx) })
+	unplaced := unplacedWatch(clientset, claimCopiesReader(clientset, dyn), name)
+	phase, err := waitForRestorePhase(ctx, dyn, name, time.Hour, func() error {
+		if err := unschedulable(ctx); err != nil {
+			return err
+		}
+		return unplaced(ctx)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -645,6 +651,47 @@ func unschedulableWatch(clientset kubernetes.Interface, restore string) func(con
 					return fmt.Errorf("the restored copy of %s in namespace %s has been unschedulable for %s (%s), so kip stopped waiting for restore %s. The restore is still running and holds up later restores. Resolve the scheduler error or end the restore with kip backup restore --cancel %s. Then remove the drill namespace with kip backup drill <namespace> --clean",
 						pod.Name, drillNamespace, drillUnschedulableGrace, c.Message, restore, restore)
 				}
+			}
+		}
+		since = seen
+		return nil
+	}
+}
+
+func claimCopiesReader(clientset kubernetes.Interface, dyn dynamic.Interface) func(context.Context, *corev1.PersistentVolumeClaim) (service.ClaimCopies, error) {
+	return (&service.Manager{Client: clientset, Dynamic: dyn}).ClaimCopies
+}
+
+// unplacedWatch returns a check that reports an error after a claim in the drill
+// namespace has zero placed copies and a scheduling failure reason on every
+// successful check for at least drillUnschedulableGrace. This gives Longhorn
+// time to place the volume so its pod can proceed. One placed copy is enough because drills accept degraded volumes.
+// Timers track claim UIDs. A copy-state read failure, a placed copy or an empty
+// reason resets the claim's timer. A failed claim list preserves all timers
+// until the next poll.
+func unplacedWatch(clientset kubernetes.Interface, copies func(context.Context, *corev1.PersistentVolumeClaim) (service.ClaimCopies, error), restore string) func(context.Context) error {
+	since := map[types.UID]time.Time{}
+	return func(ctx context.Context) error {
+		claims, err := clientset.CoreV1().PersistentVolumeClaims(drillNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil //nolint:nilerr // Keep waiting for the restore and retry the volume check on the next poll.
+		}
+		now := time.Now()
+		seen := map[types.UID]time.Time{}
+		for i := range claims.Items {
+			claim := &claims.Items[i]
+			c, err := copies(ctx, claim)
+			if err != nil || c.Placed > 0 || c.Unscheduled == "" {
+				continue
+			}
+			first, ok := since[claim.UID]
+			if !ok {
+				first = now
+			}
+			seen[claim.UID] = first
+			if now.Sub(first) >= drillUnschedulableGrace {
+				return fmt.Errorf("the restored volume %s in namespace %s has had no copy placed by Longhorn for %s (%s), so kip stopped waiting for restore %s. The restore is still running and holds up later restores. Make room on the disks, or end the restore with kip backup restore --cancel %s. Then remove the drill namespace with kip backup drill <namespace> --clean",
+					claim.Name, drillNamespace, drillUnschedulableGrace, c.Unscheduled, restore, restore)
 			}
 		}
 		since = seen
