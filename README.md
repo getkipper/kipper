@@ -51,6 +51,18 @@ Start with a container image and a server. Kipper handles the Kubernetes setup, 
 
 Kipper is pre-1.0. See [operating considerations](#operating-considerations) before running production workloads.
 
+## How Kipper compares
+
+Coolify, Dokploy, Dokku, CapRover, Sealos and Kubero all let you run apps on your own servers. The difference is what runs underneath.
+
+- **Coolify, Dokploy and CapRover** run apps on Docker. Coolify and Dokploy deploy from Compose files, and Dokploy and CapRover use Swarm for more than one server. Pick one of them if Docker is all you need.
+- **Dokku** brings the Heroku model to your own server, with a mature plugin ecosystem. Its `scheduler-k3s` plugin can run apps on Kubernetes as an alternative to the default Docker scheduler.
+- **Kubero** is a PaaS for a Kubernetes cluster you already have, or one it provisions on a managed provider.
+- **Sealos** installs its own Kubernetes distribution, built for running a multi-tenant cloud.
+- **Kipper** builds a Kubernetes cluster on the server you choose, configuring the console, HTTPS, storage, identity provider and backups together. Backups on local storage require an external backup destination. You can add more servers as workers once the cluster uses Longhorn storage. Your apps are ordinary Kubernetes objects, so `kubectl` works and what your team learns carries over to any other cluster.
+
+The other projects have years of public releases behind them, and Kipper is pre-1.0. The [full comparison](docs/en/comparison.md) covers licenses, where each one is the better choice, and Kipper's resource requirements on a small server.
+
 ## Quick start
 
 ### Prerequisites
