@@ -107,7 +107,7 @@ func TestClaimCopiesReadsTheVolumesRobustnessAndCurrentCopies(t *testing.T) {
 	claim := boundDrillClaim()
 	got, err := mgr.ClaimCopies(context.Background(), &claim)
 	require.NoError(t, err)
-	assert.Equal(t, ClaimCopies{Robustness: "degraded", Wanted: 2, Current: 1}, got)
+	assert.Equal(t, ClaimCopies{Robustness: "degraded", Wanted: 2, Current: 1, Placed: 2}, got)
 }
 
 // The drill counts copies as the service's copies status does: a copy that
@@ -163,4 +163,33 @@ func TestClaimCopiesOfAClaimOutsideLonghornIsEmpty(t *testing.T) {
 	got, err := mgr.ClaimCopies(context.Background(), &claim)
 	require.NoError(t, err)
 	assert.Equal(t, ClaimCopies{}, got, "an unbound claim has no Longhorn volume yet")
+}
+
+func TestClaimCopiesSaysWhyLonghornPlacedNoCopy(t *testing.T) {
+	mgr := drillClaimManager("faulted", 1)
+	v, err := mgr.Dynamic.Resource(LonghornVolumeGVR).Namespace("longhorn-system").Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, unstructured.SetNestedSlice(v.Object, []interface{}{
+		map[string]interface{}{"type": "Scheduled", "status": "False", "reason": "ReplicaSchedulingFailure", "message": "insufficient storage"},
+	}, "status", "conditions"))
+	_, err = mgr.Dynamic.Resource(LonghornVolumeGVR).Namespace("longhorn-system").Update(context.Background(), v, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	claim := boundDrillClaim()
+	got, err := mgr.ClaimCopies(context.Background(), &claim)
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.Placed)
+	assert.Equal(t, "ReplicaSchedulingFailure: insufficient storage", got.Unscheduled)
+}
+
+func TestClaimCopiesCountsEveryPlacedCopy(t *testing.T) {
+	failed := placementReplica("r2", "worker-1", "")
+	require.NoError(t, unstructured.SetNestedField(failed.Object, "2026-10-24T02:00:00Z", "spec", "failedAt"))
+	mgr := drillClaimManager("degraded", 3, placementReplica("r1", "server-1", ""), failed, placementReplica("r3", "", ""))
+
+	claim := boundDrillClaim()
+	got, err := mgr.ClaimCopies(context.Background(), &claim)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Placed, "a copy on a node counts whatever its health, and a copy without a node does not")
+	assert.Empty(t, got.Unscheduled)
 }

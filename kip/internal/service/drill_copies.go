@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -56,20 +57,26 @@ func (m *Manager) EffectiveCopies(ctx context.Context, class string) (int, error
 	return max(1, min(wanted, len(eligible))), nil
 }
 
-// ClaimCopies is the copy state of a claim's Longhorn volume.
+// ClaimCopies describes a claim's Longhorn volume. Robustness is its reported
+// robustness, and Wanted is its configured replica count. Current counts distinct
+// nodes holding a healthy copy as defined by [platform.HealthyCopies], regardless
+// of node availability. Placed counts replicas assigned to a node regardless of
+// health. Unscheduled combines the reason and message of the first false Scheduled
+// condition. It is empty when that condition is absent or both fields are empty.
 type ClaimCopies struct {
-	Robustness string
-	Wanted     int64
-	Current    int
+	Robustness  string
+	Wanted      int64
+	Current     int
+	Placed      int
+	Unscheduled string
 }
 
-// ClaimCopies reads the Longhorn volume behind pvc: its robustness, its
-// configured replica count and the number of distinct nodes holding a healthy
-// copy, as defined by platform.HealthyCopies. An unbound claim, a missing PV or
-// Longhorn volume, or a volume using another driver returns the zero value. So
-// does a PV whose claim name, namespace or UID differs, or a Longhorn volume
-// whose claim name or namespace differs, or a PV with no claim reference.
-// Node availability is not checked. Other read failures return an error.
+// ClaimCopies reads the copy state of the Longhorn volume behind pvc.
+// An unbound claim, a missing PV or Longhorn volume,
+// or a volume using another driver returns the zero value. The zero value is also
+// returned if the PV has no claim reference, its claim name, namespace or UID
+// differs from pvc, or the Longhorn volume's claim name or namespace differs.
+// Other read failures return an error.
 func (m *Manager) ClaimCopies(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (ClaimCopies, error) {
 	if pvc.Spec.VolumeName == "" {
 		return ClaimCopies{}, nil
@@ -112,12 +119,33 @@ func (m *Manager) ClaimCopies(ctx context.Context, pvc *corev1.PersistentVolumeC
 	nodes := map[string]bool{}
 	for i, r := range replicas.Items {
 		node, _, _ := unstructured.NestedString(r.Object, "spec", "nodeID")
+		if node != "" {
+			c.Placed++
+		}
 		if node != "" && healthy[i] {
 			nodes[node] = true
 		}
 	}
 	c.Current = len(nodes)
+	c.Unscheduled = unscheduledReason(volume.Object)
 	return c, nil
+}
+
+// unscheduledReason formats the first false Scheduled condition as
+// "reason: message", omitting the prefix when the reason is empty. It returns
+// an empty string when no such condition exists or both fields are empty.
+func unscheduledReason(volume map[string]interface{}) string {
+	conditions, _, _ := unstructured.NestedSlice(volume, "status", "conditions")
+	for _, raw := range conditions {
+		c, _ := raw.(map[string]interface{})
+		if c["type"] != "Scheduled" || c["status"] != "False" {
+			continue
+		}
+		reason, _ := c["reason"].(string)
+		message, _ := c["message"].(string)
+		return strings.TrimPrefix(reason+": "+message, ": ")
+	}
+	return ""
 }
 
 // copyMarkers reads replicas' failure and health markers in input order.

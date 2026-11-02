@@ -33,6 +33,7 @@ kip cluster dns repair                # restore the curated DNS resolvers on eve
 kip cluster encrypt-secrets           # encrypt the cluster's Secrets at rest (restarts k3s)
 kip cluster storage                   # storage mode, the copies offer and the nodes that can hold copies
 kip cluster storage --max-copies 2    # let deployers create services with two copies
+kip cluster storage --over-provisioning 200 # let Longhorn schedule up to twice the disk space after its reserve
 kip cluster access show               # the operator access list and a check of every node
 kip cluster access allow --here       # restrict SSH and the API to listed operator addresses
 kip platform restart <component>      # restart a platform or cluster component
@@ -308,6 +309,14 @@ kip cluster storage --max-copies 2
 ```
 
 The offer is recorded in the PlatformConfig and enforced by the `kipper-storage-copies-offer` admission policy, which kip renders on install, upgrade and every `--max-copies` change. Admins are not bound by it. If the command stops between the two writes, run it again. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data).
+
+On a Longhorn cluster, the output also estimates the capacity of the server's roomiest disk for new single-copy volumes and shows Longhorn's over-provisioning percentage. A volume with two copies also needs room on another node that can hold copies. Longhorn counts each volume at its full size, regardless of how much data it holds. It schedules volumes up to the over-provisioning percentage of each disk's space after its reserve. When no scheduling capacity remains, even with plenty of free disk space, `kip service add` and `kip volume create` refuse to create volumes. A [drill](/en/backups#test-a-restore-with-a-drill) stops waiting after two minutes of scheduling failures with zero placed copies. Run the command again once there is room. `--over-provisioning` sets the percentage, and it must be at least 100:
+
+```bash
+kip cluster storage --over-provisioning 200
+```
+
+At 200, the volumes on a disk may add up to twice its space after the reserve. Writes fail once the volumes together fill the physical disk, so raise the percentage only while the volumes hold much less data than their configured sizes. Every flag is checked before anything changes. `kip upgrade` keeps the value.
 
 On a Longhorn cluster, the output also lists unfinished moves to Longhorn, service volumes still on local storage, and the local copies kept after a move, the same as `kip status`.
 

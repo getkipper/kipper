@@ -15,6 +15,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/service"
 )
 
 func storagePlatformConfig(mode string) *unstructured.Unstructured {
@@ -130,4 +131,73 @@ func TestTheCopiesOfferIsOneOrTwo(t *testing.T) {
 
 func TestRecordedCopiesOfferWithoutAPlatformConfigIsOne(t *testing.T) {
 	assert.EqualValues(t, 1, recordedCopiesOffer(context.Background(), storageDyn()))
+}
+
+// longhornOverProvisioning is Longhorn's default over-provisioning setting, 100%.
+func longhornOverProvisioning() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "longhorn.io/v1beta2", "kind": "Setting",
+		"metadata": map[string]interface{}{"name": "storage-over-provisioning-percentage", "namespace": "longhorn-system"},
+		"value":    "100",
+	}}
+}
+
+func TestSettingOverProvisioningWritesLonghornsSetting(t *testing.T) {
+	dyn := storageDyn(storagePlatformConfig(platform.StorageLonghorn), longhornOverProvisioning())
+	var out bytes.Buffer
+
+	require.NoError(t, setOverProvisioning(context.Background(), &out, dyn, 200))
+
+	setting, err := dyn.Resource(longhornSettingGVR).Namespace("longhorn-system").Get(context.Background(), "storage-over-provisioning-percentage", metav1.GetOptions{})
+	require.NoError(t, err)
+	value, _, _ := unstructured.NestedString(setting.Object, "value")
+	assert.Equal(t, "200", value)
+	assert.Contains(t, out.String(), "200%")
+}
+
+func TestOverProvisioningBelowTheDiskOrOnLocalStorageIsRefused(t *testing.T) {
+	dyn := storageDyn(storagePlatformConfig(platform.StorageLonghorn), longhornOverProvisioning())
+	err := setOverProvisioning(context.Background(), &bytes.Buffer{}, dyn, 50)
+	assert.ErrorContains(t, err, "at least 100")
+
+	local := storageDyn(storagePlatformConfig(platform.StorageLocal))
+	err = setOverProvisioning(context.Background(), &bytes.Buffer{}, local, 200)
+	assert.ErrorContains(t, err, "local storage")
+}
+
+func TestClusterStorageShowsTheServersRoomForNewVolumes(t *testing.T) {
+	dyn, clientset := longhornServer(t, 20)
+	var out bytes.Buffer
+
+	reportLonghornRoom(context.Background(), &out, &service.Manager{Client: clientset, Dynamic: dyn})
+
+	assert.Contains(t, out.String(), "server-1's roomiest disk has about 8Gi for new single-copy volumes")
+	assert.Contains(t, out.String(), "over-provisioning 100%")
+}
+
+func TestAnInvalidCopiesOfferLeavesOverProvisioningAlone(t *testing.T) {
+	dyn := storageDyn(storagePlatformConfig(platform.StorageLonghorn), longhornOverProvisioning())
+	percent, copies := int32(200), int32(3)
+
+	err := setStorageFlags(context.Background(), &bytes.Buffer{}, dyn, &percent, &copies)
+
+	require.Error(t, err)
+	setting, getErr := dyn.Resource(longhornSettingGVR).Namespace("longhorn-system").Get(context.Background(), "storage-over-provisioning-percentage", metav1.GetOptions{})
+	require.NoError(t, getErr)
+	value, _, _ := unstructured.NestedString(setting.Object, "value")
+	assert.Equal(t, "100", value, "nothing changes while any flag is invalid")
+}
+
+func TestOverProvisioningAndTheCopiesOfferCanBeSetTogether(t *testing.T) {
+	objects := []runtime.Object{storagePlatformConfig(platform.StorageLonghorn), longhornOverProvisioning()}
+	objects = append(objects, replicaNode("server-1")...)
+	dyn := storageDyn(objects...)
+	percent, copies := int32(100), int32(1)
+
+	require.NoError(t, setStorageFlags(context.Background(), &bytes.Buffer{}, dyn, &percent, &copies))
+
+	pc, err := dyn.Resource(platformConfigGVR).Get(context.Background(), "platform", metav1.GetOptions{})
+	require.NoError(t, err)
+	offered, _, _ := unstructured.NestedInt64(pc.Object, "spec", "maxCopies")
+	assert.Equal(t, int64(1), offered)
 }

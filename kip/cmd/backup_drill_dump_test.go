@@ -42,3 +42,14 @@ func TestAFailedDumpFailsTheDrill(t *testing.T) {
 	}
 	assert.NoError(t, checkConsistentDump(context.Background(), clean, "db-0"))
 }
+
+func TestADrillWithoutADumpSaysOnlyTheVolumeWasChecked(t *testing.T) {
+	exec := func(_ context.Context, _ []string, _ io.Reader, stdout, _ io.Writer) error {
+		_, err := io.WriteString(stdout, "KIPPER_DUMP_NONE\n")
+		return err
+	}
+	var err error
+	out := captureStdout(t, func() { err = checkConsistentDump(context.Background(), exec, "db-0") })
+	require.NoError(t, err)
+	assert.Contains(t, out, "db-0: the backup contains no consistent dump, so the drill checked only the volume copy")
+}
