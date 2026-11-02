@@ -10,6 +10,7 @@ export default withMermaid(
     title: SITE_TITLE,
     description: SITE_DESCRIPTION,
 
+    cleanUrls: true,
     sitemap: { hostname: SITE_URL },
 
     transformHead({ pageData }) {
@@ -26,7 +27,7 @@ export default withMermaid(
       if (pageData.relativePath !== '404.md') {
         const path = pageData.relativePath
           .replace(/index\.md$/, '')
-          .replace(/\.md$/, '.html')
+          .replace(/\.md$/, '')
         head.push(
           ['link', { rel: 'canonical', href: `${SITE_URL}/${path}` }],
           ['meta', { property: 'og:url', content: `${SITE_URL}/${path}` }],
@@ -69,7 +70,7 @@ export default withMermaid(
     },
 
     themeConfig: {
-      logo: '/logo.svg',
+      logo: { src: '/logo.svg', alt: 'Kipper' },
 
       nav: [
         { text: 'Guide', link: '/en/getting-started' },

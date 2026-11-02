@@ -1,3 +1,8 @@
+---
+title: 'Kipper vs Coolify, Dokploy, Dokku and others'
+description: 'How Kipper compares with Coolify, Dokploy, Dokku, Sealos, CapRover and Kubero: underlying infrastructure, licenses, when each project is the better choice, and requirements for running Kipper on a small server.'
+---
+
 # Kipper vs Coolify, Dokploy, Dokku, Sealos, CapRover and Kubero
 
 Most self-hosted PaaS comparisons put Docker tools next to each other. This one is written from the Kubernetes side, because that is the choice that separates these projects, and it says where each of the others is the better answer.
