@@ -919,7 +919,7 @@ func AbortBackupStorageMove(client CommandRunner, out io.Writer) error {
 // RetirePreviousBackupStorage clears the previous location and deletes the
 // cluster's copy of its repository key, leaving the exported file for recovery.
 // The old bucket and its objects remain intact. A move in progress, a missing
-// previous location, or lack of a completed backup created after the switch
+// previous location, or lack of a completed backup started after the switch
 // returns an error. Reading or parsing cluster state and cleanup can also fail.
 //
 // The caller must hold the node lifecycle lease and supply non-nil confirm and
@@ -940,7 +940,7 @@ func RetirePreviousBackupStorage(client CommandRunner, confirm func(summary []st
 	if err != nil {
 		return fmt.Errorf("reading when the move happened: %w", err)
 	}
-	list, err := client.Run(`kubectl -n velero get backups.velero.io -o jsonpath='{range .items[*]}{.status.phase} {.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null`)
+	list, err := client.Run(`kubectl -n velero get backups.velero.io -o jsonpath='{range .items[*]}{.status.phase} {.status.startTimestamp}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
 		return fmt.Errorf("listing backups: %w", err)
 	}
@@ -950,12 +950,14 @@ func RetirePreviousBackupStorage(client CommandRunner, confirm func(summary []st
 		if len(f) != 2 || f[0] != "Completed" {
 			continue
 		}
-		if created, err := time.Parse(time.RFC3339, f[1]); err == nil && created.After(switchedAt) {
+		// Use the start time to verify a backup ran after the move because syncing
+		// a backup gives it a new creation time.
+		if started, err := time.Parse(time.RFC3339, f[1]); err == nil && started.After(switchedAt) {
 			completed = true
 		}
 	}
 	if !completed {
-		return errors.New("no backup has completed at the new location since the move. Run kip backup create and, ideally, kip backup drill <namespace> first")
+		return errors.New("no backup has completed that started at the new location after the move. Run kip backup create and, ideally, kip backup drill <namespace> first")
 	}
 	if err := confirm([]string{
 		"Previous location: bucket " + rec.Previous.String() + ", left at " + rec.Previous.SwitchedAt,

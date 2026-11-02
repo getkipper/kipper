@@ -24,6 +24,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/doctor"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
@@ -252,7 +253,7 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 
 		namespaces := backupNamespaces(b)
 
-		created := b.GetCreationTimestamp().Format("2006-01-02 15:04")
+		created := doctor.BackupStarted(b).Format("2006-01-02 15:04")
 
 		dumps := "unknown"
 		if pvbErr == nil {

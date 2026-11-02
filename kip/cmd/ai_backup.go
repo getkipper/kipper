@@ -224,7 +224,7 @@ func runAIBackupList(_ *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(w, "NAME\tPHASE\tAGE\tITEMS\tERRORS")
 	for _, s := range summaries {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\n",
-			s.Name, s.Phase, humanAge(time.Now(), s.CreatedAt), s.ItemsBackedUp, s.Errors)
+			s.Name, s.Phase, humanAge(time.Now(), s.Started()), s.ItemsBackedUp, s.Errors)
 	}
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("rendering table: %w", err)

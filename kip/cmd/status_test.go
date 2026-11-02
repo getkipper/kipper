@@ -26,7 +26,7 @@ func TestWriteBackupHealth(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	state := doctor.BackupState{Configured: true,
 		Schedules: []doctor.BackupSchedule{{Name: "velero-daily-apps", Cron: "0 3 * * *", Created: now.AddDate(0, -1, 0), LastBackup: now.Add(-9 * time.Hour)}},
-		Runs:      []doctor.BackupRun{{Name: "velero-daily-apps-20261021030000", Schedule: "velero-daily-apps", Phase: "PartiallyFailed", Created: now.Add(-9 * time.Hour), Errors: 1}},
+		Runs:      []doctor.BackupRun{{Name: "velero-daily-apps-20261021030000", Schedule: "velero-daily-apps", Phase: "PartiallyFailed", Started: now.Add(-9 * time.Hour), Errors: 1}},
 	}
 	var out bytes.Buffer
 

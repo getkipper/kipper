@@ -62,6 +62,16 @@ type BackupSummary struct {
 	Warnings      int64
 }
 
+// Started returns StartedAt, falling back to CreatedAt when StartedAt is zero.
+// Using StartedAt preserves the backup's age when syncing from a bucket gives
+// the object a new CreatedAt.
+func (s BackupSummary) Started() time.Time {
+	if s.StartedAt.IsZero() {
+		return s.CreatedAt
+	}
+	return s.StartedAt
+}
+
 // StartedBackup describes the just-created Velero CRs that callers
 // pass to WaitBackup or WatchBackupForWindow. The HasSibling flag
 // drives whether the wait covers one or two physical backups.
@@ -598,11 +608,13 @@ func (i *Installer) waitForBackup(ctx context.Context, name string) (*BackupSumm
 	}
 }
 
-// ListBackups returns the primary Kipper-owned Velero Backups in the
-// velero namespace, sorted newest first. Each entry folds the
-// matching `-aiconfig` sibling's status into the logical view, so a
-// failed config backup never shows up as healthy because the primary
-// happened to complete.
+// ListBackups returns Kipper-owned Velero backups in the velero namespace,
+// newest first by Started. The order of backups with equal times is unspecified.
+// Each primary entry includes its matching -aiconfig sibling's status, so a
+// failed config backup makes the combined snapshot unhealthy even if the primary
+// completed. Orphan siblings appear under their own names as PartiallyFailed.
+// An empty result means no matching backups exist. Missing Velero resources or
+// a failed API request return an error.
 func (i *Installer) ListBackups(ctx context.Context) ([]BackupSummary, error) {
 	list, err := i.Dynamic.Resource(veleroBackupGVR).Namespace(VeleroNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: managedByLabel + "=" + managedByValue + ",app.kubernetes.io/part-of=kipper-ai",
@@ -665,7 +677,7 @@ func (i *Installer) ListBackups(ctx context.Context) ([]BackupSummary, error) {
 	}
 	for a := 0; a < len(out); a++ {
 		for b := a + 1; b < len(out); b++ {
-			if out[b].CreatedAt.After(out[a].CreatedAt) {
+			if out[b].Started().After(out[a].Started()) {
 				out[a], out[b] = out[b], out[a]
 			}
 		}

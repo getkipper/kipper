@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
@@ -68,6 +69,27 @@ func TestBackupsCreateOnALegacyCluster(t *testing.T) {
 	list, err := h.Dynamic.Resource(backupGVR).Namespace("velero").List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, list.Items, 1, "the Velero backup is created")
+}
+
+func TestBackupsListShowsWhenTheBackupStarted(t *testing.T) {
+	dyn := backupDynamic(platform.BackupExternal)
+	synced := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "velero.io/v1", "kind": "Backup",
+		"metadata": map[string]interface{}{"name": "pre-move", "namespace": "velero", "creationTimestamp": "2026-11-02T10:59:00Z"},
+		"status":   map[string]interface{}{"phase": "Completed", "startTimestamp": "2026-11-02T10:43:00Z"},
+	}}
+	_, err := dyn.Resource(backupGVR).Namespace("velero").Create(context.Background(), synced, metav1.CreateOptions{})
+	require.NoError(t, err)
+	h := &Backups{Client: fake.NewClientset(), Dynamic: dyn}
+	rec := httptest.NewRecorder()
+
+	h.List(rec, httptest.NewRequest("GET", "/backups", nil))
+
+	var body []backupResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body, 1)
+	started := time.Date(2026, 11, 2, 10, 43, 0, 0, time.UTC).Local().Format("2006-01-02 15:04")
+	assert.Equal(t, started, body[0].Created, "a backup synced from a bucket keeps the time it was made")
 }
 
 func createdSpec(t *testing.T, h *Backups, gvr schema.GroupVersionResource) map[string]interface{} {

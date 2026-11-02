@@ -60,6 +60,19 @@ type backupResponse struct {
 	Reason     string `json:"reason"`
 }
 
+// backupStarted returns the backup's start time in the local time zone. If the
+// start timestamp is missing or invalid, it returns the object's creation time
+// unchanged. Using the start time preserves the backup's age when syncing from
+// a bucket gives the object a new creation time.
+func backupStarted(u unstructured.Unstructured) time.Time {
+	if started, found, _ := unstructured.NestedString(u.Object, "status", "startTimestamp"); found {
+		if t, err := time.Parse(time.RFC3339, started); err == nil {
+			return t.Local()
+		}
+	}
+	return u.GetCreationTimestamp().Time
+}
+
 type scheduleResponse struct {
 	Name       string `json:"name"`
 	Schedule   string `json:"schedule"`
@@ -125,7 +138,7 @@ func (b *Backups) List(w http.ResponseWriter, r *http.Request) {
 			Name:       item.GetName(),
 			Status:     status,
 			Namespaces: namespaces,
-			Created:    item.GetCreationTimestamp().Format("2006-01-02 15:04"),
+			Created:    backupStarted(item).Format("2006-01-02 15:04"),
 			TTL:        ttl,
 			Reason:     reason,
 		})

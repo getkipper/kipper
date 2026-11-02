@@ -901,6 +901,25 @@ func TestListBackupsHidesSiblings(t *testing.T) {
 	assert.Equal(t, "snap", got[0].Name)
 }
 
+func TestListBackupsOrdersAndAgesBackupsByTheirStartTime(t *testing.T) {
+	client := veleroDynamicFake()
+	older := newBackup("older", kipperLabels())
+	newer := newBackup("newer", kipperLabels())
+	older.Object["metadata"].(map[string]interface{})["creationTimestamp"] = "2026-11-02T11:00:00Z"
+	older.Object["status"] = map[string]interface{}{"phase": "Completed", "startTimestamp": "2026-11-01T03:00:00Z"}
+	newer.Object["metadata"].(map[string]interface{})["creationTimestamp"] = "2026-11-02T10:00:00Z"
+	newer.Object["status"] = map[string]interface{}{"phase": "Completed", "startTimestamp": "2026-11-02T03:00:00Z"}
+	require.NoError(t, client.Tracker().Create(veleroBackupGVR, older, VeleroNamespace))
+	require.NoError(t, client.Tracker().Create(veleroBackupGVR, newer, VeleroNamespace))
+
+	got, err := fastInstaller(client).ListBackups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "newer", got[0].Name, "a backup synced from the bucket later keeps its position in start-time order")
+	assert.Equal(t, time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC), got[1].Started().UTC())
+}
+
 func TestListBackupsFiltersForeignBackups(t *testing.T) {
 	client := veleroDynamicFake()
 	mine := newBackup("mine", kipperLabels())
