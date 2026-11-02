@@ -89,3 +89,60 @@ func TestAPlainHTTPBackupEndpointOnThePublicInternetIsRefused(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "https://")
 }
+
+func readOnlyCommand(t *testing.T, set map[string]string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{}
+	for _, name := range []string{"backup-storage-bucket", "backup-storage-region", "backup-storage-endpoint", "backup-storage-credentials", "backup-storage-profile", "backup-storage-sse-c-key-file"} {
+		cmd.Flags().String(name, "", "")
+	}
+	cmd.Flags().Bool("backup-storage-sse-c", false, "")
+	cmd.Flags().Bool("backup-storage-read-only", false, "")
+	for name, value := range set {
+		require.NoError(t, cmd.Flags().Set(name, value))
+	}
+	return cmd
+}
+
+func TestReadOnlyBackupStorageNeedsAnExternalBucket(t *testing.T) {
+	_, err := resolveBackupStorage(readOnlyCommand(t, map[string]string{"backup-storage-read-only": "true"}))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--backup-storage-bucket")
+}
+
+func TestReadOnlyBackupStorageRefusesANewSSECKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := resolveBackupStorage(readOnlyCommand(t, map[string]string{
+		"backup-storage-read-only": "true", "backup-storage-sse-c": "true",
+		"backup-storage-bucket": "old-backups", "backup-storage-region": "eu-west-1",
+	}))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--backup-storage-sse-c-key-file")
+}
+
+func TestReadOnlyBackupStorageIsKeptInTheConfig(t *testing.T) {
+	creds := filepath.Join(t.TempDir(), "credentials")
+	require.NoError(t, os.WriteFile(creds, []byte("[default]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key = example-secret\n"), 0o600))
+
+	cfg, err := resolveBackupStorage(readOnlyCommand(t, map[string]string{
+		"backup-storage-read-only": "true", "backup-storage-bucket": "old-backups",
+		"backup-storage-region": "eu-west-1", "backup-storage-credentials": creds,
+	}))
+
+	require.NoError(t, err)
+	assert.True(t, cfg.ReadOnly)
+}
+
+func TestReadOnlyBackupStorageNeedsTheRepositoryKey(t *testing.T) {
+	readOnly := &installer.BackupStorageConfig{Bucket: "old-backups", Region: "eu-west-1", ReadOnly: true}
+
+	err := requireRecoveryKey(readOnly, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--backup-repository-key-file")
+	assert.NoError(t, requireRecoveryKey(readOnly, true))
+	assert.NoError(t, requireRecoveryKey(&installer.BackupStorageConfig{Bucket: "backups", Region: "eu-west-1"}, false))
+	assert.NoError(t, requireRecoveryKey(nil, false))
+}

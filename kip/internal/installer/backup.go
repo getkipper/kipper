@@ -413,6 +413,9 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if _, err := client.Run("kubectl create namespace velero --dry-run=client -o yaml | kubectl apply -f -"); err != nil {
 		return fmt.Errorf("creating velero namespace: %w", err)
 	}
+	if err := refuseDuringStorageMove(client); err != nil {
+		return err
+	}
 	live, err := liveBackupLocation(client)
 	if err != nil {
 		return err
@@ -425,6 +428,23 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	// Applying the chart would restart Velero on the partially emptied bucket.
 	if stoppedByReset && !moved {
 		return &unfinishedResetError{bucket: live.bucket}
+	}
+	if moved {
+		endpoint := ""
+		if cfg != nil {
+			endpoint = cfg.Endpoint
+		}
+		if err := refuseRepointAfterMove(client, StorageLocation{Bucket: target.bucket, Endpoint: endpoint}); err != nil {
+			return err
+		}
+	}
+	// A recovery install's read-only location stays read-only, even when this
+	// machine's settings lack the flag, so Velero never expires its backups.
+	if cfg != nil && !cfg.ReadOnly && !moved && live.accessMode == "ReadOnly" {
+		readOnly := *cfg
+		readOnly.ReadOnly = true
+		cfg = &readOnly
+		target.readOnly = true
 	}
 	// The checks run before the credentials are written, so a refused change
 	// leaves the live backups working with their current credentials.
@@ -444,27 +464,10 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if err := installVeleroCredentials(client, cfg, minioPassword); err != nil {
 		return err
 	}
-	host, err := DetectHostOS(client)
-	if err != nil {
-		return err
-	}
-	rhelNode, err := clusterHasRHELNode(client)
-	if err != nil {
-		return err
-	}
 	if err := configureRestoreHelper(client); err != nil {
 		return err
 	}
-	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest(cfg, host.K3sSELinux() || rhelNode))
-	if _, err := client.Run(veleroCmd); err != nil {
-		return fmt.Errorf("applying Velero HelmChart: %w", err)
-	}
-	// Hold the caller's node lease until the asynchronous chart apply finishes.
-	// Otherwise, it could restore one Velero replica during the next reset.
-	if err := checkVeleroChartInputs(client); err != nil {
-		return err
-	}
-	if err := waitForVeleroChart(client); err != nil {
+	if err := applyVeleroChart(client, cfg); err != nil {
 		return err
 	}
 	if moved {
@@ -479,6 +482,30 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	}
 	fmt.Print(notice)
 	return nil
+}
+
+// applyVeleroChart applies the Velero HelmChart for cfg, with privileged file
+// system backups when the server or any node uses a RHEL-family distribution,
+// and waits for the asynchronous chart apply to finish.
+func applyVeleroChart(client CommandRunner, cfg *BackupStorageConfig) error {
+	host, err := DetectHostOS(client)
+	if err != nil {
+		return err
+	}
+	rhelNode, err := clusterHasRHELNode(client)
+	if err != nil {
+		return err
+	}
+	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest(cfg, host.K3sSELinux() || rhelNode))
+	if _, err := client.Run(veleroCmd); err != nil {
+		return fmt.Errorf("applying Velero HelmChart: %w", err)
+	}
+	// Hold the caller's node lease until the asynchronous chart apply finishes.
+	// Otherwise, it could restore one Velero replica during the next reset.
+	if err := checkVeleroChartInputs(client); err != nil {
+		return err
+	}
+	return waitForVeleroChart(client)
 }
 
 // restoreHelperConfig sets the requests of the restore-wait init container that
@@ -704,17 +731,17 @@ spec:
           memory: 512Mi
 %s    schedules:
       daily-apps:
-        disabled: false
+        disabled: %[10]t
         schedule: "0 3 * * *"
         useOwnerReferencesInBackup: false
         template:
           ttl: 168h0m0s
           storageLocation: default
           excludedNamespaces:
-%s
-%s
+%[6]s
+%[7]s
       weekly-system:
-        disabled: false
+        disabled: %[10]t
         schedule: "0 4 * * 0"
         useOwnerReferencesInBackup: false
         template:
@@ -724,8 +751,9 @@ spec:
             - dex
             - cert-manager
             - kipper-system
-%s
-%s`, veleroChartVersion, veleroImageTag, veleroAWSPluginImage, bslBlock, nodeAgentArgs, excludedBlock, scopeBlock, scopeBlock, selinuxValues)
+%[8]s
+%[9]s`, veleroChartVersion, veleroImageTag, veleroAWSPluginImage, bslBlock, nodeAgentArgs, excludedBlock, scopeBlock, scopeBlock, selinuxValues,
+		cfg != nil && cfg.ReadOnly)
 }
 
 // installVeleroCredentials creates the velero namespace and the
@@ -839,10 +867,14 @@ func veleroBSLBlock(cfg *BackupStorageConfig) string {
 	if cfg.SSEC {
 		configLines = append(configLines, fmt.Sprintf(`            customerKeyEncryptionSecret: %s/%s`, sseKeySecret, sseKeyField))
 	}
+	accessMode := ""
+	if cfg.ReadOnly {
+		accessMode = "\n          accessMode: ReadOnly"
+	}
 	return fmt.Sprintf(`      backupStorageLocation:
         - name: default
           provider: aws
-          bucket: %s
+          bucket: %s%s
           config:
-%s`, cfg.Bucket, strings.Join(configLines, "\n"))
+%s`, cfg.Bucket, accessMode, strings.Join(configLines, "\n"))
 }

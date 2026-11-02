@@ -40,28 +40,33 @@ const (
 // the first 128 bytes of a regular file as standard base64, ignoring CR and LF.
 // On systems other than Windows, it rejects group or other permissions.
 func ReadSSECKeyFile(path string) ([]byte, error) {
+	return readSSECKeyFile("--backup-storage-sse-c-key-file", path)
+}
+
+// readSSECKeyFile is ReadSSECKeyFile with errors naming flag.
+func readSSECKeyFile(flag, path string) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("--backup-storage-sse-c-key-file: %w", err)
+		return nil, fmt.Errorf("%s: %w", flag, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("--backup-storage-sse-c-key-file %s is not a regular file", path)
+		return nil, fmt.Errorf("%s %s is not a regular file", flag, path)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("--backup-storage-sse-c-key-file %s grants permissions to other users. Run chmod 600 %s", path, path)
+		return nil, fmt.Errorf("%s %s grants permissions to other users. Run chmod 600 %s", flag, path, path)
 	}
 	f, err := os.Open(path) //nolint:gosec // path comes from a user flag at install time
 	if err != nil {
-		return nil, fmt.Errorf("--backup-storage-sse-c-key-file: %w", err)
+		return nil, fmt.Errorf("%s: %w", flag, err)
 	}
 	defer func() { _ = f.Close() }()
 	text, err := io.ReadAll(io.LimitReader(f, 128))
 	if err != nil {
-		return nil, fmt.Errorf("--backup-storage-sse-c-key-file: %w", err)
+		return nil, fmt.Errorf("%s: %w", flag, err)
 	}
 	key, err := DecodeSSECKey(strings.TrimRight(string(text), "\r\n"))
 	if err != nil {
-		return nil, fmt.Errorf("--backup-storage-sse-c-key-file %s: %w", path, err)
+		return nil, fmt.Errorf("%s %s: %w", flag, path, err)
 	}
 	return key, nil
 }
@@ -242,10 +247,10 @@ func moveUnusedSSECKeyAside(client CommandRunner, key []byte, target backupTarge
 }
 
 // triesSSECAutomatically reports whether automatic activation can be attempted.
-// It requires credentials for an HTTPS store and no live location at the target,
-// where Velero could keep writing plain objects during the checks.
+// It requires credentials for a writable HTTPS store and no live location at
+// the target, where Velero could keep writing plain objects during the checks.
 func triesSSECAutomatically(cfg *BackupStorageConfig, live liveLocation, target backupTarget) bool {
-	return cfg != nil && !cfg.SSECOff && cfg.AccessKeyID != "" && CheckSSECStorage(cfg) == nil &&
+	return cfg != nil && !cfg.SSECOff && !cfg.ReadOnly && cfg.AccessKeyID != "" && CheckSSECStorage(cfg) == nil &&
 		(live.bucket == "" || live.changesFrom(target))
 }
 
@@ -253,7 +258,8 @@ func triesSSECAutomatically(cfg *BackupStorageConfig, live liveLocation, target 
 // or active key. Automatic activation requires credentials, an HTTPS endpoint,
 // an empty bucket, and a successful write test. It reuses the key when keyExists
 // is true and generates one otherwise. Unsupported storage leaves SSE-C off
-// with a warning. Failed checks and key operations stop the install.
+// with a warning, and a read-only location keeps its current setting.
+// Failed checks and key operations stop the install.
 // Native AWS S3 uses SSE-S3 instead. Upgrades without credentials keep their
 // current settings. A live location at the target stays unchanged because
 // Velero could write plain objects while kip tests and switches it.
@@ -267,7 +273,7 @@ func enableSSECWhereSupported(client CommandRunner, cfg *BackupStorageConfig, ta
 	case cfg.SSECOff:
 		return false, sseWarning("SSE-C is off (--backup-storage-sse-c=false), so bucket %s holds Velero's own objects, "+
 			"including every Secret, unencrypted unless the store encrypts them itself", cfg.Bucket), nil
-	case cfg.AccessKeyID == "":
+	case cfg.AccessKeyID == "", cfg.ReadOnly:
 		return false, "", nil
 	case live.bucket != "" && !live.changesFrom(target):
 		return false, sseWarning("SSE-C stays off for bucket %s, because this cluster already writes backups to it without SSE-C. "+
@@ -328,16 +334,18 @@ func sseKeyExists(client CommandRunner) (bool, error) {
 }
 
 // activateSSEC validates an unused key in keySecret with a write test and, for
-// a populated bucket, a check of one backup metadata object. It leaves the
-// Secret in place either way. The supplied flag identifies an imported key in
-// errors.
+// a populated bucket, a check of one backup metadata object. Read-only
+// locations skip the write test. It leaves the Secret in place either way. The
+// supplied flag identifies an imported key in errors.
 func activateSSEC(client CommandRunner, target backupTarget, check *bucketCheck, supplied bool, keySecret string) error {
 	populated, err := check.populated()
 	if err != nil {
 		return fmt.Errorf("SSE-C can only be turned on for a bucket kip has checked for existing backups: %w", err)
 	}
-	if err := runSSEWriteTest(client, target, keySecret); err != nil {
-		return err
+	if !target.readOnly {
+		if err := runSSEWriteTest(client, target, keySecret); err != nil {
+			return err
+		}
 	}
 	if populated {
 		return runSSEKeyCheck(client, target, supplied, keySecret)

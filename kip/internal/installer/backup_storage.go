@@ -28,6 +28,8 @@ import (
 // install with credentials attempts SSE-C on a new or changed location with an
 // empty bucket, unless SSECOff is set. An active SSE-C location stays enabled.
 // Replacing an unused key preserves the old key in a separate Secret.
+// ReadOnly attaches the bucket for restores with both backup schedules off
+// and preserves existing backups by disabling backup creation and expiration.
 type BackupStorageConfig struct {
 	Bucket          string
 	Region          string
@@ -37,6 +39,7 @@ type BackupStorageConfig struct {
 	SSEC            bool
 	SSECKey         []byte
 	SSECOff         bool
+	ReadOnly        bool
 }
 
 // CheckBackupEndpoint returns nil for an empty endpoint (AWS S3), an HTTPS URL,
@@ -171,7 +174,7 @@ func BackupStorageFromRef(ref *config.BackupStorageRef) *BackupStorageConfig {
 	if ref == nil || ref.Mode != "external" {
 		return nil
 	}
-	return &BackupStorageConfig{Bucket: ref.Bucket, Region: ref.Region, Endpoint: ref.Endpoint}
+	return &BackupStorageConfig{Bucket: ref.Bucket, Region: ref.Region, Endpoint: ref.Endpoint, ReadOnly: ref.ReadOnly}
 }
 
 // recordBackupStorage saves ref as the backup location of the local cluster
@@ -196,5 +199,6 @@ func backupStorageRef(cfg *BackupStorageConfig) *config.BackupStorageRef {
 		Bucket:   cfg.Bucket,
 		Region:   cfg.Region,
 		Endpoint: cfg.Endpoint,
+		ReadOnly: cfg.ReadOnly,
 	}
 }

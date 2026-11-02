@@ -458,6 +458,51 @@ flowchart LR
 
 To rotate keys later, run `kip install` again with the updated credentials file pointing at the same host. That replaces the Secret in place. Note it re-runs the rest of the install too, which is not free: see [what an upgrade moves](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not).
 
+## Move backups to another bucket {#move-backup-storage}
+
+`kip backup storage set` sends a cluster's future backups to another external bucket that holds no backups, for example from AWS S3 to Hetzner Object Storage. New backups go to the new bucket under a new repository key. Existing backups stay intact in the old bucket.
+
+```bash
+kip backup storage set --bucket example-new-backups --region hel1 \
+  --endpoint https://objects.example.com --credentials ~/new-bucket-credentials --sse-c \
+  --export-new-key-to ~/example-new-backups.key \
+  --export-previous-key-to ~/example-old-backups.key \
+  --export-sse-c-key-to ~/example-new-backups-sse.key
+```
+
+kip shows both locations and asks for confirmation. Pass `--yes` to skip confirmation. It then checks that the new bucket has no top-level `backups/`, `kopia/` or `restic/` folder. Other objects are allowed. It saves the old and new repository keys to the files you name. With `--sse-c`, it also tests the SSE-C key against the new bucket and saves it. A cluster that already uses SSE-C keeps its key for both the old and new buckets. With `--sse-c`, a cluster without SSE-C gets a new key. All key files are written before Velero switches. New files use mode 0600. An existing non-empty file must hold the same key and pass the key-file permission checks. Empty regular files are replaced so an interrupted export can resume.
+
+Velero then stops for a few minutes. kip refuses to stop it while a backup, restore, repository maintenance job or backup deletion is running. It names the work in progress so you can run the command again once that work has finished. If one starts while Velero is stopping, kip starts Velero again before the switch. During the switch kip deletes the cluster's Backup objects for the old bucket (the backups in the bucket stay), installs the new key and the new bucket's credentials, points Velero at the new bucket and restarts Velero and its node agents. A scheduled backup missed during the pause runs once after the switch.
+
+If the command stops partway, for example because the connection is lost, run it again with the same flags to continue. Until the switch begins, each retry checks that the new bucket still holds no backups. During this phase, `kip backup storage set --abort` cancels the move and keeps backups going to the old bucket. While a move is unfinished, `kip install` and `kip upgrade` refuse to run, and `kip backup storage set` refuses a different bucket.
+
+After the move, `kip upgrade` from any machine uses the new bucket and saves it to that machine's `~/.kip/config.yaml`. `kip backup list` names the old bucket below the list.
+
+### Read the old backups {#read-old-backups}
+
+Each cluster uses one repository key, so the moved cluster cannot restore from the old bucket. To restore from it, install a separate cluster attached to the old bucket read-only, with the previous key file:
+
+```bash
+kip install --host 203.0.113.20 --domain recovery.example.com \
+  --backup-storage-bucket example-old-backups --backup-storage-region eu-west-1 \
+  --backup-storage-credentials ~/old-bucket-credentials \
+  --backup-storage-read-only --backup-repository-key-file ~/example-old-backups.key
+```
+
+Add `--backup-storage-sse-c-key-file` when the old backups use SSE-C. Velero marks the location `ReadOnly`, which blocks new backups, deletion and repository maintenance there, and both backup schedules are off. Restores and drills work as usual. Velero still writes each restore's log and results under `restores/` in the bucket, so the recovery credentials need write access there. Upgrades preserve read-only access even when run from a machine whose kip settings lack the flag, so the recovery cluster stays read-only for that bucket permanently.
+
+### Forget the old bucket
+
+After the move, wait for a backup created in the new bucket to complete, ideally followed by a [drill](#test-a-restore-with-a-drill). Then tell kip to forget the old bucket:
+
+```bash
+kip backup storage retire-previous
+```
+
+kip deletes the cluster's copy of the old repository key, so keep the file saved during the move to read those backups. The bucket and its contents stay intact. Delete the bucket and revoke its credentials at the provider once you no longer need its backups. To keep the last backups for their full retention periods, wait until those periods expire. A cluster has to retire its previous bucket before it can move again.
+
+`kip backup storage set` moves future backups between external buckets. It cannot move backups from in-cluster MinIO.
+
 ## Retention
 
 Default retention is 7 days (`168h`). To create a backup with custom retention:
@@ -471,4 +516,4 @@ kip backup create --ttl 720h  # 30 days
 - **In-cluster mode**: backups are stored inside the cluster, so a host loss or `kip cluster uninstall` takes the backups with it. Configure [external backup storage](#external-s3-compatible-storage) for clusters that hold data you care about.
 - Kipper's backups copy files from volumes mounted by regular containers in running pods. Without such a mount, a backup saves the volume's Kubernetes objects but none of its files. This includes volumes used only by an app stopped with `kip app stop`. [Shared volumes and project shared storage](/en/shared-storage#backups) are the exception, because each has a holder pod that keeps it mounted while backups are configured. When backups exist and it can read the cluster's pods and volumes, `kip backup list` names volumes in user-workload namespaces whose files a backup would omit with the current mounts. It skips volumes explicitly labelled for exclusion from backups. Start the app before the backup runs, or remove a volume you no longer need.
 - Database volumes are copied while the database runs. Postgres services with [consistent backups](#consistent-database-dumps) also include a `pg_dump` per database. MySQL and MongoDB include only the volume copy, so use their native tools alongside Velero when you need a logical dump.
-- Backup storage mode is chosen at install time, and there is no command that migrates a running cluster from one mode to another. **Do not uninstall in order to switch.** In in-cluster mode the backups live on the cluster, so `kip cluster uninstall` removes them along with everything else, and a backup taken just beforehand is gone before you can restore it. Re-running `kip install` with `--backup-storage-bucket` does repoint Velero at external storage, but it leaves your existing backups behind and re-runs the rest of the install, so it is a deliberate change rather than a migration. The route that keeps your data is to install a second cluster with external storage and move workloads onto it. See [One-shot decision](/en/installation#one-shot-decision).
+- Backup storage mode is chosen at install time, and there is no command that migrates a running cluster from one mode to another. **Do not uninstall in order to switch.** In in-cluster mode the backups live on the cluster, so `kip cluster uninstall` removes them along with everything else, and a backup taken just beforehand is gone before you can restore it. Re-running `kip install` with `--backup-storage-bucket` does repoint Velero at external storage, but it leaves your existing backups behind and re-runs the rest of the install, so it is a deliberate change rather than a migration. The route that keeps your data is to install a second cluster with external storage and move workloads onto it. See [One-shot decision](/en/installation#one-shot-decision). To send future backups to another external bucket, use [`kip backup storage set`](#move-backup-storage).

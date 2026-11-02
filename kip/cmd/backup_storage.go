@@ -26,7 +26,7 @@ const (
 
 var backupStorageCmd = &cobra.Command{
 	Use:   "storage",
-	Short: "Manage the in-cluster backup storage",
+	Short: "Manage backup storage",
 }
 
 var backupStorageResizeCmd = &cobra.Command{

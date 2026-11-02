@@ -172,6 +172,7 @@ type BackupStorageRef struct {
 	Bucket   string `mapstructure:"bucket"   yaml:"bucket,omitempty"`
 	Region   string `mapstructure:"region"   yaml:"region,omitempty"`
 	Endpoint string `mapstructure:"endpoint" yaml:"endpoint,omitempty"`
+	ReadOnly bool   `mapstructure:"read_only" yaml:"read_only,omitempty"`
 }
 
 // ConsoleHost returns the custom console domain if set, otherwise the

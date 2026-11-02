@@ -13,6 +13,9 @@ func TestBackupStorageFromRef(t *testing.T) {
 	assert.Nil(t, BackupStorageFromRef(&config.BackupStorageRef{Mode: "in-cluster"}))
 	assert.Equal(t, &BackupStorageConfig{Bucket: "backups", Region: "auto", Endpoint: "https://s3.example.com"},
 		BackupStorageFromRef(&config.BackupStorageRef{Mode: "external", Bucket: "backups", Region: "auto", Endpoint: "https://s3.example.com"}))
+	assert.True(t, BackupStorageFromRef(&config.BackupStorageRef{Mode: "external", Bucket: "backups", Region: "auto", ReadOnly: true}).ReadOnly,
+		"an upgrade keeps a recovery install read-only")
+	assert.True(t, backupStorageRef(&BackupStorageConfig{Bucket: "backups", Region: "auto", ReadOnly: true}).ReadOnly)
 }
 
 // A reinstall without the flags keeps what the cluster was installed with.

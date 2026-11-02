@@ -657,3 +657,39 @@ func TestAnUpgradeWithoutCredentialsStaysQuiet(t *testing.T) {
 	assert.Empty(t, notice, "the install already warned, and an upgrade cannot test the store without credentials")
 	assert.Empty(t, h.sseKey)
 }
+
+func TestAReadOnlyLocationOnlyChecksTheSuppliedKey(t *testing.T) {
+	h := &fakeRepoHost{bucket: "populated", sseCheck: sseKeyMatchMarker}
+	target := sseTarget
+	target.readOnly = true
+	cfg := sseConfig(false, suppliedSSEKey)
+	cfg.ReadOnly = true
+
+	on, _, err := prepareBackupSSEC(h, cfg, target, &bucketCheck{client: h, target: target})
+
+	require.NoError(t, err)
+	assert.True(t, on)
+	assert.NotContains(t, h.lastSSEJob, sseWriteTestScript, "validating a recovery key skips the write test")
+}
+
+func TestAReadOnlyLocationMakesAReadOnlyTarget(t *testing.T) {
+	target, err := newBackupTarget(&BackupStorageConfig{Bucket: "old-backups", Region: "eu-west-1", ReadOnly: true}, "")
+
+	require.NoError(t, err)
+	assert.True(t, target.readOnly)
+}
+
+func TestAReadOnlyLocationGetsNoAutomaticSSEC(t *testing.T) {
+	h := &fakeRepoHost{bucket: "empty", sseWrite: sseWriteOKMarker}
+	cfg := installSSEConfig(sseEndpoint)
+	cfg.ReadOnly = true
+	target := sseTarget
+	target.readOnly = true
+
+	on, _, err := prepareBackupSSEC(h, cfg, target, &bucketCheck{client: h, target: target})
+
+	require.NoError(t, err)
+	assert.False(t, on)
+	assert.Empty(t, h.sseKey)
+	assert.False(t, h.ran("name: "+sseCheckJob), "automatic SSE-C setup skips read-only locations")
+}

@@ -1388,6 +1388,8 @@ kip backup restore weekly-20260413
 kip backup restore weekly-20260413 --namespace blog-prod      # restore one namespace
 kip backup schedules                                                # list scheduled backups
 kip backup storage resize --size 30Gi                               # grow the in-cluster MinIO volume
+kip backup storage set --bucket example-new-backups --region hel1 ...  # send future backups to another empty external bucket
+kip backup storage retire-previous                                  # forget the previous backup location
 kip backup repository-key export --to ~/example-backups.key         # save the key that encrypts the backups
 kip backup repository-key reset                                     # delete every backup and start again with a new key
 kip backup drill blog-prod                                          # restore blog-prod's services and shared volumes into an isolated namespace and count their rows
@@ -1408,6 +1410,23 @@ The `nano` profile blocks `kip backup drill` because running a second copy of a 
 `kip backup repository-key reset` replaces the key. It deletes every backup in the bucket, because the old ones cannot be read with a new key, then takes a full backup from each schedule. It asks for the bucket's name before deleting anything. Use `--yes` to skip the prompt. Like `kip cluster encrypt-secrets`, it requires SSH access to the server. See [The backup repository key](/en/installation#backup-repository-key).
 
 `kip backup storage resize` grows the in-cluster MinIO backup volume and waits up to five minutes for it to report the requested capacity. Run it again with the same size to resume waiting. The size must be at least the volume's current storage request. Manage external backup storage through its provider.
+
+`kip backup storage set` sends future backups to another external bucket that holds no backups, using a new repository key. It saves the old and new keys to files first. Run it again with the same flags to continue an interrupted move, or pass `--abort` to cancel one before Velero switches. `kip backup storage retire-previous` forgets the old bucket. It requires a completed backup created in the new bucket after the move. See [Move backups to another bucket](/en/backups#move-backup-storage).
+
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--bucket` | Yes | — | The new bucket. It must hold no backups |
+| `--region` | Yes | — | The new bucket's region |
+| `--endpoint` | No | — | S3-compatible endpoint URL. Omit for AWS S3 |
+| `--credentials` | No | `~/.aws/credentials` | AWS-style credentials file for the new bucket |
+| `--profile` | No | `default` | Profile in the credentials file |
+| `--sse-c` | If the cluster uses SSE-C | `false` | Encrypt the new bucket's objects with SSE-C. A cluster that already uses SSE-C keeps its key, and a cluster without SSE-C gets a new key |
+| `--export-new-key-to` | Yes | — | File to save the new repository key to |
+| `--export-previous-key-to` | Yes | — | File to save the old bucket's repository key to |
+| `--export-sse-c-key-to` | With `--sse-c` | — | File to save the SSE-C key to |
+| `--ssh-key` | No | — | SSH private key for the server |
+| `--yes` | No | `false` | Move without asking for confirmation |
+| `--abort` | No | `false` | Cancel a move before the switch begins |
 
 A default `kip backup create` excludes system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`). The daily schedule uses the same exclusion. Without it, Velero would try to back up its own MinIO PVC and the backup would hang. Pass `--include-system` if you really want a backup of those namespaces too.
 

@@ -102,16 +102,20 @@ type ResetBackup struct {
 }
 
 // SurveyRepositoryKeyReset inspects the reset's scope without changing the
-// cluster. It returns an error if backups are unconfigured, multiple backup
-// locations exist, the default location has a prefix or invalid endpoint, or
-// Velero is running with an unfinished backup or restore. Read errors are
-// returned. Unsupported Velero chart inputs also return an error. A kip
-// schedule missing transient-resource exclusions returns an error unless an
-// unfinished reset has stopped Velero. In that case, it records OutdatedSchedule
+// cluster. It returns an error if a backup storage move is unfinished, backups
+// are unconfigured, multiple backup locations exist, the default location is
+// read-only or has a prefix or invalid endpoint, or Velero is running with an
+// unfinished backup or restore. Read failures and unsupported Velero chart inputs
+// also return errors. A kip schedule missing transient-resource exclusions returns
+// an error unless an unfinished reset has stopped Velero. In that case, it records
+// OutdatedSchedule
 // so Run applies the exclusions to kip's schedules and skips new backups.
 // When Velero is stopped, unfinished backup and restore records may be stale
 // and are ignored.
 func SurveyRepositoryKeyReset(client CommandRunner) (*RepositoryKeyReset, error) {
+	if err := refuseDuringStorageMove(client); err != nil {
+		return nil, fmt.Errorf("%w. Nothing was changed", err)
+	}
 	live, endpoint, err := resettableLocation(client)
 	if err != nil {
 		return nil, fmt.Errorf("%w. Nothing was changed", err)
@@ -160,8 +164,8 @@ func SurveyRepositoryKeyReset(client CommandRunner) (*RepositoryKeyReset, error)
 }
 
 // resettableLocation reads the default backup location and its endpoint. It
-// returns an error when backups are unconfigured, the location has a prefix or
-// an invalid endpoint, or the cluster has more than one location.
+// returns an error when backups are unconfigured, the location is read-only or
+// has a prefix or invalid endpoint, or the cluster has more than one location.
 func resettableLocation(client CommandRunner) (liveLocation, string, error) {
 	live, err := liveBackupLocation(client)
 	if err != nil {
@@ -173,19 +177,30 @@ func resettableLocation(client CommandRunner) (liveLocation, string, error) {
 	if live.prefix != "" {
 		return liveLocation{}, "", fmt.Errorf("the backup location keeps its objects under the prefix %q, which kip does not set up", live.prefix)
 	}
+	if live.accessMode == "ReadOnly" {
+		return liveLocation{}, "", errors.New("this cluster's backup location is read-only, as on a recovery install. The reset empties the bucket, so it runs only on the cluster that writes these backups")
+	}
 	endpoint, err := cleanupEndpoint(live)
 	if err != nil {
 		return liveLocation{}, "", err
 	}
-	out, err := client.Run("kubectl -n velero get backupstoragelocations.velero.io -o name 2>/dev/null")
+	n, err := countBackupLocations(client)
 	if err != nil {
-		return liveLocation{}, "", fmt.Errorf("listing Velero's backup locations: %w", err)
+		return liveLocation{}, "", err
 	}
-	if n := len(nonEmptyLines(out)); n > 1 {
+	if n > 1 {
 		return liveLocation{}, "", fmt.Errorf("this cluster has %d backup locations. Every location shares the repository key, and the reset empties only the default one, "+
 			"so it handles a cluster with one location", n)
 	}
 	return live, endpoint, nil
+}
+
+func countBackupLocations(client CommandRunner) (int, error) {
+	out, err := client.Run("kubectl -n velero get backupstoragelocations.velero.io -o name 2>/dev/null")
+	if err != nil {
+		return 0, fmt.Errorf("listing Velero's backup locations: %w", err)
+	}
+	return len(nonEmptyLines(out)), nil
 }
 
 // unscopedSchedule names the first schedule of kip's Velero chart whose
