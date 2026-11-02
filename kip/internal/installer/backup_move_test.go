@@ -47,7 +47,7 @@ type fakeMoveHost struct {
 	inFlight     []string // Lines of the in-flight listing, as "Kind/name phase".
 	busyOnStop   []string
 	jobs         string
-	backups      string // The backup listing for retirement, as "phase created" lines.
+	backups      string
 	populated    bool
 	sseWriteFail bool
 	resetStopped bool
@@ -166,7 +166,7 @@ func (h *fakeMoveHost) RunStdin(cmd string, in io.Reader) (string, error) {
 	case strings.Contains(cmd, "get jobs -l velero.io/repo-name"):
 		return h.jobs, nil
 	case strings.Contains(cmd, "get backups.velero.io -o"):
-		return h.backups, nil
+		return h.backupListing(strings.Contains(cmd, ".status.startTimestamp")), nil
 	case strings.Contains(cmd, "scale deploy/velero --replicas=0"):
 		h.velero = 0
 		h.inFlight = append(h.inFlight, h.busyOnStop...)
@@ -206,6 +206,24 @@ func (h *fakeMoveHost) RunStdin(cmd string, in io.Reader) (string, error) {
 		return sseWriteOKMarker, nil
 	}
 	return "", nil
+}
+
+// backupListing formats h.backups, whose lines contain "phase created started",
+// with the timestamp requested by the command. A start time of "-" becomes empty.
+func (h *fakeMoveHost) backupListing(started bool) string {
+	var out strings.Builder
+	for _, line := range strings.Split(strings.TrimSpace(h.backups), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 {
+			continue
+		}
+		at := f[1]
+		if started {
+			at = strings.TrimPrefix(f[2], "-")
+		}
+		out.WriteString(f[0] + " " + at + "\n")
+	}
+	return out.String()
 }
 
 func (h *fakeMoveHost) ran(sub string) bool {
@@ -663,13 +681,15 @@ func TestRetirePreviousBackupStorageNeedsABackupAfterTheMove(t *testing.T) {
 	require.NoError(t, MoveBackupStorage(h, r.opts))
 	confirm := func([]string) error { return nil }
 
-	h.backups = "Completed " + moveNow.Add(-time.Hour).Format(time.RFC3339) + "\nFailed " + moveNow.Add(time.Hour).Format(time.RFC3339) + "\n"
+	before, after := moveNow.Add(-time.Hour).Format(time.RFC3339), moveNow.Add(time.Hour).Format(time.RFC3339)
+	h.backups = "Completed " + before + " " + before + "\nFailed " + after + " " + after + "\n" +
+		"Completed " + after + " " + before + "\nCompleted " + after + " -\n"
 	err := RetirePreviousBackupStorage(h, confirm, io.Discard)
-	require.Error(t, err)
+	require.Error(t, err, "a backup made before the move or with no start time cannot verify that backups work at the new location")
 	assert.Contains(t, err.Error(), "no backup has completed")
 	assert.Contains(t, h.secrets, previousKeySecret)
 
-	h.backups += "Completed " + moveNow.Add(time.Hour).Format(time.RFC3339) + "\n"
+	h.backups += "Completed " + after + " " + after + "\n"
 	require.NoError(t, RetirePreviousBackupStorage(h, confirm, io.Discard))
 	rec := h.storageRecord(t)
 	assert.Nil(t, rec.Previous)

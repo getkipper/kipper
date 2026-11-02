@@ -23,7 +23,7 @@ func dailySchedule(lastBackup time.Time) BackupSchedule {
 }
 
 func dailyRun(name, phase string, created time.Time) BackupRun {
-	return BackupRun{Name: name, Schedule: "velero-daily-apps", Phase: phase, Created: created}
+	return BackupRun{Name: name, Schedule: "velero-daily-apps", Phase: phase, Started: created}
 }
 
 func TestCheckBackups(t *testing.T) {
@@ -76,7 +76,7 @@ func TestCheckBackups(t *testing.T) {
 			state: BackupState{Configured: true, Schedules: []BackupSchedule{
 				{Name: "velero-weekly-system", Cron: "0 4 * * 0", Created: backupNow.AddDate(0, -1, 0), LastBackup: backupNow.Add(-5 * 24 * time.Hour)},
 			}, Runs: []BackupRun{
-				{Name: "velero-weekly-system-20261016040000", Schedule: "velero-weekly-system", Phase: "Completed", Created: backupNow.Add(-5 * 24 * time.Hour)},
+				{Name: "velero-weekly-system-20261016040000", Schedule: "velero-weekly-system", Phase: "Completed", Started: backupNow.Add(-5 * 24 * time.Hour)},
 			}},
 			status: Pass,
 		},
@@ -146,7 +146,7 @@ func TestFetchOverSSHReadsBackups(t *testing.T) {
 	assert.Equal(t, time.Date(2026, 10, 21, 3, 0, 0, 0, time.UTC), snap.Backups.Schedules[0].LastBackup)
 	require.Len(t, snap.Backups.Runs, 1)
 	assert.Equal(t, BackupRun{Name: "velero-daily-apps-20261021030000", Schedule: "velero-daily-apps", Phase: "PartiallyFailed",
-		Created: time.Date(2026, 10, 21, 3, 0, 0, 0, time.UTC), Errors: 3, Warnings: 1}, snap.Backups.Runs[0])
+		Started: time.Date(2026, 10, 21, 3, 0, 0, 0, time.UTC), Errors: 3, Warnings: 1}, snap.Backups.Runs[0])
 }
 
 func TestFetchOverSSHWithoutVelero(t *testing.T) {
@@ -179,6 +179,20 @@ func TestReadBackupsViaAPI(t *testing.T) {
 	assert.Equal(t, "", state.Runs[0].Schedule, "a manual backup belongs to no schedule")
 	require.Len(t, state.Schedules, 1)
 	assert.True(t, state.Schedules[0].Paused)
+}
+
+func TestBackupStartedPrefersTheStartTimeOverASyncedCopysCreationTime(t *testing.T) {
+	synced := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "pre-move", "creationTimestamp": "2026-11-02T10:59:00Z"},
+		"status":   map[string]any{"phase": "Completed", "startTimestamp": "2026-11-02T10:43:00Z"},
+	}}
+	pending := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "queued", "creationTimestamp": "2026-11-02T11:00:00Z"},
+	}}
+
+	assert.Equal(t, time.Date(2026, 11, 2, 10, 43, 0, 0, time.UTC), BackupStarted(synced).UTC())
+	assert.Equal(t, time.Date(2026, 11, 2, 10, 43, 0, 0, time.UTC), backupRunFrom(synced).Started)
+	assert.Equal(t, time.Date(2026, 11, 2, 11, 0, 0, 0, time.UTC), BackupStarted(pending).UTC(), "a backup that has not started yet")
 }
 
 func TestReadBackupsViaAPIWithoutVelero(t *testing.T) {

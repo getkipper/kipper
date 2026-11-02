@@ -33,7 +33,7 @@ type BackupRun struct {
 	Name     string
 	Schedule string
 	Phase    string
-	Created  time.Time
+	Started  time.Time
 	Errors   int64
 	Warnings int64
 }
@@ -51,9 +51,9 @@ type BackupSchedule struct {
 // finishedBackupPhases identifies terminal backup phases.
 var finishedBackupPhases = map[string]bool{"Completed": true, "PartiallyFailed": true, "Failed": true, "FailedValidation": true}
 
-// CheckBackups checks each unpaused schedule's newest terminal backup by creation
+// CheckBackups checks each unpaused schedule's newest terminal backup by start
 // time. Failed and FailedValidation backups fail the check, and PartiallyFailed
-// backups warn. Recognised daily or faster schedules warn after two days without
+// backups warn. Recognized daily or faster schedules warn after two days without
 // a run, and weekly schedules warn after two weeks. Schedules with no recorded
 // run use their creation time for this grace period. Other cadences are checked
 // only for backup failures. Manual backups are excluded.
@@ -117,7 +117,7 @@ func CheckBackups(snap Snapshot, now time.Time) Result {
 }
 
 // latestFinishedRun selects the named schedule's terminal backup with the latest
-// creation time. It returns false when none exists.
+// start time. It returns false when none exists.
 func latestFinishedRun(runs []BackupRun, schedule string) (BackupRun, bool) {
 	var latest BackupRun
 	found := false
@@ -125,7 +125,7 @@ func latestFinishedRun(runs []BackupRun, schedule string) (BackupRun, bool) {
 		if r.Schedule != schedule || !finishedBackupPhases[r.Phase] {
 			continue
 		}
-		if !found || r.Created.After(latest.Created) {
+		if !found || r.Started.After(latest.Started) {
 			latest, found = r, true
 		}
 	}
@@ -209,13 +209,26 @@ func ReadBackupsViaAPI(ctx context.Context, dyn dynamic.Interface) (BackupState,
 	return state, nil
 }
 
+// BackupStarted returns the backup's start time in the local time zone. If the
+// start timestamp is missing or invalid, it returns the object's creation time
+// unchanged. Using the start time preserves the backup's age when syncing from
+// a bucket gives the object a new creation time.
+func BackupStarted(u unstructured.Unstructured) time.Time {
+	if started, found, _ := unstructured.NestedString(u.Object, "status", "startTimestamp"); found {
+		if t, err := time.Parse(time.RFC3339, started); err == nil {
+			return t.Local()
+		}
+	}
+	return u.GetCreationTimestamp().Time
+}
+
 func backupRunFrom(u unstructured.Unstructured) BackupRun {
 	phase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
 	return BackupRun{
 		Name:     u.GetName(),
 		Schedule: u.GetLabels()["velero.io/schedule-name"],
 		Phase:    phase,
-		Created:  u.GetCreationTimestamp().UTC(),
+		Started:  BackupStarted(u).UTC(),
 		Errors:   statusCount(u, "errors"),
 		Warnings: statusCount(u, "warnings"),
 	}
