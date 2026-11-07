@@ -39,7 +39,8 @@ func raiseInotifyLimit(client CommandRunner) error {
 }
 
 // prepareNodeOS configures the host prerequisites shared by servers and workers.
-// Setting longhorn requires the iSCSI module on RHEL hosts.
+// Setting longhorn requires the iSCSI module on RHEL hosts and writes the
+// kubelet image GC drop-in before k3s starts.
 func prepareNodeOS(client CommandRunner, wireGuardOptional, longhorn bool) error {
 	if err := prepareHostForK3s(client, wireGuardOptional, longhorn); err != nil {
 		return err
@@ -51,6 +52,9 @@ func prepareNodeOS(client CommandRunner, wireGuardOptional, longhorn bool) error
 	}
 	if longhorn {
 		if err := DisableNFSDirectoryDelegations(client); err != nil {
+			return err
+		}
+		if err := configureImageGC(client); err != nil {
 			return err
 		}
 	}

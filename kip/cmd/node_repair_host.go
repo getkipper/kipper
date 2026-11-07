@@ -19,10 +19,23 @@ var nodeRepairHostCmd = &cobra.Command{
 	SilenceUsage: true,
 	Long: `Turns off NFS directory delegations to keep Longhorn's shared volumes
 accessible on Linux 7.0 and later. Longhorn 1.7.3's shared volume server rejects
-these requests. On Ubuntu or Debian, it then configures needrestart to defer
-storage-service restarts and records that configuration on each Kubernetes node
-object. Deferring restarts protects Longhorn volumes from disruptions after
-library updates.
+these requests.
+
+It then sets the kubelet's image garbage collection to start at 70% disk use and
+stop at 60%. Longhorn stops placing new replicas on a disk that is 75%
+full, while the kubelet's own default waits until 85%. The kubelet reads these
+settings only when k3s starts. The command compares the k3s start time with the
+settings' modification times and restarts k3s (or k3s-agent on a worker) if it
+started at or before the last change, or its start time cannot be read.
+Running pods keep running, and the server's Kubernetes API pauses until k3s
+is ready. A node with a later start time keeps running without a restart.
+If a restart fails, the command stops and reports the error. Run it again to
+retry if the active unit's start time still requires a restart.
+
+On Ubuntu or Debian, it then configures needrestart to defer storage-service
+restarts and records that configuration on each Kubernetes node object.
+Deferring restarts protects Longhorn volumes from disruptions after library
+updates.
 
 Use this for nodes added by older kip versions. It applies the same configuration
 as kip install and kip node add, using the same connection details, and is safe
@@ -32,7 +45,8 @@ Run it again to finish, starting from the server. With --host only that node
 is updated.
 
 On other OS families, the command prints storage package update guidance.
-Local storage requires no storage-service restart configuration.
+This host configuration is only needed for Longhorn, so the command leaves
+local-storage nodes unchanged.
 
 Examples:
   kip node repair-host
@@ -110,17 +124,27 @@ func repairHostOnNodes(records []installer.NodeRecord, server installer.Firewall
 	})
 }
 
-// repairNodeHost turns off NFS directory delegations on one node, defers its
-// storage-service restarts and records that configuration on its Kubernetes
-// node through master. An empty machineID is read from the node. If that read
-// fails, the configuration is left in place and a warning is printed instead of
-// recording it. OS families that do not use needrestart receive package update
-// guidance instead.
+// repairNodeHost turns off NFS directory delegations on one node, lowers its
+// kubelet image GC thresholds, defers its storage-service restarts and records
+// that configuration on its Kubernetes node through master. ApplyImageGC checks
+// timestamps to decide whether k3s needs a restart. An empty
+// machineID is read from the node. If that read fails, the configuration is
+// left in place and a warning is printed instead of recording it. OS families
+// that do not use needrestart receive package update guidance instead.
 func repairNodeHost(master, node installer.CommandRunner, nodeHost, machineID string) error {
 	if err := installer.DisableNFSDirectoryDelegations(node); err != nil {
 		return fmt.Errorf("repairing %s: %w", nodeHost, err)
 	}
 	fmt.Printf("  ✔  NFS client configured for shared volumes\n")
+
+	restarted, err := installer.ApplyImageGC(node, func(msg string) { fmt.Printf("  ...  %s\n", msg) })
+	if err != nil {
+		return fmt.Errorf("repairing %s: %w", nodeHost, err)
+	}
+	fmt.Printf("  ✔  Kubelet image cleanup starts before Longhorn's replica scheduling limit\n")
+	if restarted {
+		fmt.Printf("  ✔  k3s restarted with the new kubelet settings\n")
+	}
 
 	host, err := installer.DetectHostOS(node)
 	if err != nil {
@@ -165,7 +189,7 @@ func repairHostNotNeeded(master installer.CommandRunner) (bool, error) {
 		return false, err
 	}
 	if mode == installer.StorageLocal {
-		fmt.Printf("\n  ℹ  This cluster uses local storage. Storage-service restart configuration is not needed.\n\n")
+		fmt.Printf("\n  ℹ  This cluster uses local storage. The host settings applied by this command are only needed for Longhorn.\n\n")
 		return true, nil
 	}
 	return false, nil

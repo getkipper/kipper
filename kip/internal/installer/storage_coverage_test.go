@@ -39,6 +39,13 @@ func TestStorageRestartCoverage(t *testing.T) {
 			wantWhy:   "configured with an older version",
 		},
 		{
+			name:      "configured before the image GC drop-in",
+			version:   "1",
+			stampedID: "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d",
+			liveID:    "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d",
+			wantWhy:   "configured with an older version",
+		},
+		{
 			name:      "reimaged under the same node name",
 			version:   StorageRestartConfigVersion,
 			stampedID: "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d",

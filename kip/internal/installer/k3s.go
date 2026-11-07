@@ -665,8 +665,7 @@ func writeAgentKubeletConfig(client CommandRunner) error {
 	if _, err := client.Run("mkdir -p /etc/rancher/k3s/config.yaml.d"); err != nil {
 		return fmt.Errorf("creating k3s config.yaml.d directory: %w", err)
 	}
-	body := "kubelet-arg:\n  - \"protect-kernel-defaults=true\"\n"
-	cmd := fmt.Sprintf("cat > /etc/rancher/k3s/config.yaml.d/kipper-kubelet.yaml << 'KIPEOF'\n%sKIPEOF", body)
+	cmd := fmt.Sprintf("cat > %s/%s << 'KIPEOF'\n%sKIPEOF", k3sConfigDropInDir, agentKubeletDropIn, agentKubeletConfig)
 	if _, err := client.Run(cmd); err != nil {
 		return fmt.Errorf("writing k3s agent kubelet config: %w", err)
 	}
