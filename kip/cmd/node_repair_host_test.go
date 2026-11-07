@@ -49,13 +49,16 @@ func TestRepairHostConnectsAsRoot(t *testing.T) {
 		"writing host configuration needs root, as kip node add does")
 }
 
-// repairHost is an Ubuntu node that logs NFS client and needrestart writes and,
-// on the server, node annotations.
+// repairHost is an Ubuntu node that logs NFS client, image GC, k3s restart
+// and needrestart writes and, on the server, node annotations. stale names the
+// k3s unit whose kubelet started before the image GC drop-in.
 type repairHost struct {
 	eachHost
-	name  string
-	log   *[]string
-	names map[string]string
+	name       string
+	log        *[]string
+	names      map[string]string
+	stale      string
+	restartErr error
 }
 
 func (h *repairHost) Run(command string) (string, error) {
@@ -64,6 +67,13 @@ func (h *repairHost) Run(command string) (string, error) {
 		return "ID=ubuntu\nVERSION_ID=\"24.04\"\n", nil
 	case strings.Contains(command, "/etc/modprobe.d/kipper-nfs.conf"):
 		*h.log = append(*h.log, "nfs "+h.name)
+	case strings.Contains(command, "ExecMainStartTimestamp"):
+		return h.stale, nil
+	case strings.Contains(command, "kipper-image-gc.yaml"):
+		*h.log = append(*h.log, "image-gc "+h.name)
+	case strings.Contains(command, "systemctl restart"):
+		*h.log = append(*h.log, "restart "+h.name)
+		return "", h.restartErr
 	case strings.HasPrefix(command, "mkdir -p /etc/needrestart"):
 		*h.log = append(*h.log, "configure "+h.name)
 	case strings.HasPrefix(command, "kubectl get nodes"):
@@ -90,10 +100,43 @@ func TestRepairHostOnEveryNodeConfiguresEachAndRecordsItFromTheServer(t *testing
 	require.NoError(t, repairHostOnNodes(eachRecords(), server, dial))
 
 	assert.Equal(t, []string{
-		"nfs server", "configure server", "server records 'server'",
-		"nfs worker-a", "configure worker-a", "server records 'worker-a'",
-		"nfs worker-b", "configure worker-b", "server records 'worker-b'",
+		"nfs server", "image-gc server", "configure server", "server records 'server'",
+		"nfs worker-a", "image-gc worker-a", "configure worker-a", "server records 'worker-a'",
+		"nfs worker-b", "image-gc worker-b", "configure worker-b", "server records 'worker-b'",
 	}, log)
+}
+
+// The repair must restart a stale kubelet before recording the host as configured.
+func TestRepairHostRestartsK3sOnlyWhereTheKubeletPredatesTheDropIn(t *testing.T) {
+	var log []string
+	names := map[string]string{eachServerID: "server", eachWorkerA: "worker-a", eachWorkerB: "worker-b"}
+	server := &repairHost{eachHost: eachHost{id: eachServerID}, name: "server", log: &log, names: names}
+	ids := map[string]string{"203.0.113.11": eachWorkerA, "203.0.113.12": eachWorkerB}
+	stale := map[string]string{"203.0.113.11": "k3s-agent\n"}
+	var dial nodeDialer = func(rec installer.NodeRecord) (installer.FirewallRunner, func(), error) {
+		return &repairHost{eachHost: eachHost{id: ids[rec.Host]}, name: rec.Name, log: &log, stale: stale[rec.Host]}, func() {}, nil
+	}
+
+	out := captureStdout(t, func() { require.NoError(t, repairHostOnNodes(eachRecords(), server, dial)) })
+
+	assert.Equal(t, []string{
+		"nfs server", "image-gc server", "configure server", "server records 'server'",
+		"nfs worker-a", "image-gc worker-a", "restart worker-a", "configure worker-a", "server records 'worker-a'",
+		"nfs worker-b", "image-gc worker-b", "configure worker-b", "server records 'worker-b'",
+	}, log)
+	assert.Equal(t, 1, strings.Count(out, "Restarting k3s-agent"), out)
+}
+
+func TestRepairHostStopsWhenTheRestartFails(t *testing.T) {
+	var log []string
+	server := &repairHost{eachHost: eachHost{id: eachServerID}, name: "server", log: &log,
+		names: map[string]string{eachServerID: "server"}, stale: "k3s\n", restartErr: errors.New("exit status 1")}
+
+	err := repairNodeHost(server, server, "203.0.113.10", eachServerID)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "restarting k3s")
+	assert.NotContains(t, log, "server records 'server'", "a node whose kubelet missed the drop-in is not recorded as configured")
 }
 
 // onceID answers the machine id probe once, then fails it.

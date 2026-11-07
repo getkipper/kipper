@@ -20,6 +20,7 @@ func TestPrepareWorkerHostInstallsStorageAndRaisesInotify(t *testing.T) {
 		"systemctl enable --now iscsid",
 		kubeletSysctlPath,
 		"kipper-kubelet.yaml",
+		"kipper-image-gc.yaml",
 		"kipper-dns.yaml",
 		"kipper-selinux.yaml",
 	} {

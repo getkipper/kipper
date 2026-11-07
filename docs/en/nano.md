@@ -52,7 +52,7 @@ A nano cluster grows without moving to a new one. Resize the server to at least 
 kip cluster storage longhorn
 ```
 
-The command prepares the host (kernel modules, iSCSI and NFS packages), installs Longhorn and records Longhorn as the cluster's storage mode. Nothing stops while it runs. Afterwards new volumes get one Longhorn copy, `kip node add` accepts workers, and shared (ReadWriteMany) volumes work. It ends with a list of the service volumes still on local storage and the command that moves each one. If it is interrupted, run it again and it continues.
+The command prepares the host (kernel modules, iSCSI and NFS packages, and earlier image cleanup), installs Longhorn and records Longhorn as the cluster's storage mode. Apps and services keep running during the switch. Host preparation restarts k3s if needed to load the image cleanup settings, and the Kubernetes API pauses briefly during the restart. Afterward new volumes get one Longhorn copy, `kip node add` accepts workers, and shared (ReadWriteMany) volumes work. It ends with a list of the service volumes still on local storage and the command that moves each one. If it is interrupted, run it again and it continues.
 
 The platform's own volumes (the registry, MinIO and Loki) stay on local storage on the server. They keep working, and the server's disk keeps holding images, backups and logs.
 

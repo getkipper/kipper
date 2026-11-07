@@ -166,6 +166,8 @@ kip node repair-host
 kip node repair-host --host <address>
 ```
 
+The same command applies the other host settings Longhorn relies on: the [NFS client setting](/en/shared-storage#shared-volumes) for shared volumes and [early image cleanup](/en/worker-nodes#data-and-availability). The command compares the k3s start time with the image cleanup settings' modification times. It restarts k3s on that node, or k3s-agent on a worker, if the unit started at or before the last change, or its start time cannot be read. Running pods keep running, and on the server the Kubernetes API pauses until k3s is back. If the restart fails, the command stops and names the node. Running it again retries the restart if the active unit's start time still requires it.
+
 On Rocky Linux, AlmaLinux and CentOS Stream, Kipper enables `iscsid` and reads pending restarts from `dnf needs-restarting`. The needrestart drop-in applies only to Ubuntu and Debian. Schedule `iscsi-initiator-utils` updates during planned downtime: package scripts may restart `iscsid` and disrupt mounted volumes.
 
 `kip status` reports services that still need a restart to load updated libraries:

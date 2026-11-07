@@ -52,7 +52,10 @@ var clusterStorageLonghornCmd = &cobra.Command{
 	Use:   "longhorn",
 	Short: "Switch a local-storage cluster to Longhorn in place",
 	Long: `Installs Longhorn on a cluster that uses local storage and records Longhorn as
-its storage mode. Nothing is reinstalled and no service stops.
+its storage mode. Existing components stay installed and services keep running.
+k3s restarts if needed to load settings that start unused image cleanup at 70%
+disk use, before Longhorn stops placing replicas at 75%. Running pods keep
+running, and the Kubernetes API pauses briefly during the restart.
 
 New services and volumes then get one Longhorn copy. The data of existing
 services stays where it is until you move each one with

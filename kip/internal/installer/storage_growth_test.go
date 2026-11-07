@@ -382,3 +382,21 @@ func TestStorageGrowthRestartsConsoleAPIForItsLonghornWatch(t *testing.T) {
 	StorageGrowth{Server: failing, Out: &out}.restartConsoleAPI()
 	assert.Contains(t, out.String(), "kip platform restart console-api")
 }
+
+// A local-storage server has no image GC drop-in, and Longhorn's disk space
+// limit applies as soon as Longhorn is installed, so k3s must restart first.
+func TestStorageGrowthLowersImageGCBeforeInstallingLonghorn(t *testing.T) {
+	host := &routedRunner{routes: []route{
+		{contains: "cat /etc/os-release", out: "ID=debian\nVERSION_ID=\"13\"\n"},
+		{contains: "ExecMainStartTimestamp", out: "k3s\n"},
+	}}
+	hostOS, err := DetectHostOS(host)
+	require.NoError(t, err)
+	var out strings.Builder
+
+	require.NoError(t, StorageGrowth{Server: host, Out: &out}.prepareHost(hostOS))
+
+	assert.True(t, host.ran(imageGCDropIn), strings.Join(host.commands, "\n"))
+	assert.True(t, host.ran("systemctl restart k3s"))
+	assert.Contains(t, out.String(), "Restarting k3s")
+}

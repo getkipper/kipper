@@ -16,7 +16,7 @@ func TestStorageRestartCoverageLeavesRHELNodesOut(t *testing.T) {
 
 	assert.Contains(t, out, "1 node(s) run a distribution without needrestart")
 	assert.NotContains(t, out, "repair-host")
-	assert.NotContains(t, out, "needrestart leaves the storage path alone")
+	assert.NotContains(t, out, "host configuration is current")
 }
 
 func TestStorageRestartCoverageStillChecksDebianNodesBesideRHEL(t *testing.T) {
@@ -41,4 +41,24 @@ func TestNeedrestartApplies(t *testing.T) {
 	} {
 		assert.Equal(t, want, installer.NeedrestartApplies(image), image)
 	}
+}
+
+func TestHostConfigurationStatusCoversEveryHostSetting(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	current := k8s.NodeInfo{Name: "server", OSImage: "Ubuntu 24.04.2 LTS", MachineID: id, Annotations: map[string]string{
+		installer.StorageRestartsVersionAnnotation: installer.StorageRestartConfigVersion,
+		installer.StorageRestartsMachineAnnotation: id,
+	}}
+	older := k8s.NodeInfo{Name: "worker-1", OSImage: "Ubuntu 24.04.2 LTS", MachineID: id, Annotations: map[string]string{
+		installer.StorageRestartsVersionAnnotation: "1",
+		installer.StorageRestartsMachineAnnotation: id,
+	}}
+
+	out := captureStdout(t, func() { reportStorageRestartCoverage([]k8s.NodeInfo{current}) })
+	assert.Contains(t, out, "✔  host configuration is current on every node")
+
+	out = captureStdout(t, func() { reportStorageRestartCoverage([]k8s.NodeInfo{current, older}) })
+	assert.Contains(t, out, "worker-1 (configured with an older version)")
+	assert.Contains(t, out, "image cleanup")
+	assert.Contains(t, out, "kip node repair-host")
 }

@@ -93,17 +93,8 @@ func (g StorageGrowth) Run() error {
 	if err != nil {
 		return err
 	}
-	g.printf("  Preparing the host for Longhorn...\n")
-	if err := ensureKernelModules(g.Server, host, true, true); err != nil {
+	if err := g.prepareHost(host); err != nil {
 		return err
-	}
-	if err := DisableNFSDirectoryDelegations(g.Server); err != nil {
-		return err
-	}
-	if host.UsesNeedrestart() {
-		if err := ConfigureStorageRestarts(g.Server); err != nil {
-			return err
-		}
 	}
 	g.printf("  Installing Longhorn...\n")
 	if err := InstallLonghornThen(g.Server, hardenAfterStoragePackages(harden, g.Server)); err != nil {
@@ -128,6 +119,26 @@ func (g StorageGrowth) Run() error {
 		for _, v := range volumes {
 			g.printf("    %s/%s (%s used): kip service storage longhorn %s%s\n", v.Namespace, v.Service, formatBytes(v.UsedBytes), v.Service, v.Flags)
 		}
+	}
+	return nil
+}
+
+// prepareHost loads the storage modules and writes the host configuration
+// Longhorn depends on. ApplyImageGC checks timestamps to decide whether k3s
+// needs a restart to load the image GC settings.
+func (g StorageGrowth) prepareHost(host HostOS) error {
+	g.printf("  Preparing the host for Longhorn...\n")
+	if err := ensureKernelModules(g.Server, host, true, true); err != nil {
+		return err
+	}
+	if err := DisableNFSDirectoryDelegations(g.Server); err != nil {
+		return err
+	}
+	if _, err := ApplyImageGC(g.Server, func(msg string) { g.printf("  ...  %s\n", msg) }); err != nil {
+		return err
+	}
+	if host.UsesNeedrestart() {
+		return ConfigureStorageRestarts(g.Server)
 	}
 	return nil
 }

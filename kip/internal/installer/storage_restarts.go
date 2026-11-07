@@ -11,11 +11,11 @@ import (
 // puts it after the distribution's own defaults, so it overrides them.
 const needrestartDropIn = "/etc/needrestart/conf.d/50-kipper-storage.conf"
 
-// StorageRestartConfigVersion identifies what a node was last configured with.
-// It is stamped on the Kubernetes node so an operator can find nodes still
-// running an older set without SSHing to each one, and it changes whenever the
-// content below changes.
-const StorageRestartConfigVersion = "1"
+// StorageRestartConfigVersion identifies the needrestart, NFS client, and
+// kubelet image GC settings last applied to a node. Kubernetes node annotations
+// let operators find older configurations without connecting to each host.
+// Increment this version whenever any of these settings changes.
+const StorageRestartConfigVersion = "2"
 
 // storageRestartUnits are the daemons whose restart takes a Longhorn volume
 // down with it.
