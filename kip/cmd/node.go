@@ -736,10 +736,8 @@ func addNode(cmd *cobra.Command, args []string) error {
 	if err := access.load(accessNode{rec: rec, node: worker, base: workerConn}, records, ""); err != nil {
 		return nodeAddRetry(err, workerHost)
 	}
-	if workerOS.UsesNeedrestart() {
-		if err := installer.StampStorageRestarts(server, nodeName, identity.MachineID); err != nil {
-			fmt.Printf("  ⚠  could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n", nodeName, err)
-		}
+	if err := installer.StampStorageRestarts(server, nodeName, identity.MachineID); err != nil {
+		fmt.Printf("  ⚠  could not record host configuration for %s: %v\n      The host is configured. Run 'kip node repair-host' to record it.\n", nodeName, err)
 	}
 
 	fmt.Printf("  Waiting for %s and its storage services...\n", nodeName)

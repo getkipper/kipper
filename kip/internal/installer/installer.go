@@ -767,9 +767,6 @@ func Run(opts Options) (*Result, error) {
 			if err := InstallLonghornThen(client, hardenAfterStoragePackages(opts.Harden, client)); err != nil {
 				return err
 			}
-			if !sysInfo.Host.UsesNeedrestart() {
-				return nil
-			}
 			// Record the host configuration now that the node exists.
 			machineID, err := ReadMachineID(client)
 			if err != nil {

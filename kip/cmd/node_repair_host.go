@@ -33,9 +33,10 @@ If a restart fails, the command stops and reports the error. Run it again to
 retry if the active unit's start time still requires a restart.
 
 On Ubuntu or Debian, it then configures needrestart to defer storage-service
-restarts and records that configuration on each Kubernetes node object.
-Deferring restarts protects Longhorn volumes from disruptions after library
-updates.
+restarts, protecting Longhorn volumes from disruptions after library updates.
+On other OS families, the command prints storage package update guidance.
+On every distribution, it records the applied host configuration on each
+Kubernetes node object.
 
 Use this for nodes added by older kip versions. It applies the same configuration
 as kip install and kip node add, using the same connection details, and is safe
@@ -44,7 +45,6 @@ each worker one at a time, stopping at the first node it cannot reach or repair.
 Run it again to finish, starting from the server. With --host only that node
 is updated.
 
-On other OS families, the command prints storage package update guidance.
 This host configuration is only needed for Longhorn, so the command leaves
 local-storage nodes unchanged.
 
@@ -125,12 +125,13 @@ func repairHostOnNodes(records []installer.NodeRecord, server installer.Firewall
 }
 
 // repairNodeHost turns off NFS directory delegations on one node, lowers its
-// kubelet image GC thresholds, defers its storage-service restarts and records
-// that configuration on its Kubernetes node through master. ApplyImageGC checks
-// timestamps to decide whether k3s needs a restart. An empty
-// machineID is read from the node. If that read fails, the configuration is
-// left in place and a warning is printed instead of recording it. OS families
-// that do not use needrestart receive package update guidance instead.
+// kubelet image GC thresholds, and records the configuration on its Kubernetes
+// node through master. It defers storage-service restarts on hosts that use
+// needrestart and prints package update guidance on other OS families.
+// ApplyImageGC checks timestamps to decide whether k3s needs a restart.
+// If machineID is empty, it reads the ID from the node. If that read fails,
+// it leaves the configuration in place, prints a warning, and returns nil
+// without recording the configuration.
 func repairNodeHost(master, node installer.CommandRunner, nodeHost, machineID string) error {
 	if err := installer.DisableNFSDirectoryDelegations(node); err != nil {
 		return fmt.Errorf("repairing %s: %w", nodeHost, err)
@@ -142,23 +143,23 @@ func repairNodeHost(master, node installer.CommandRunner, nodeHost, machineID st
 		return fmt.Errorf("repairing %s: %w", nodeHost, err)
 	}
 	fmt.Printf("  ✔  Kubelet image cleanup starts before Longhorn's replica scheduling limit\n")
-	if restarted {
-		fmt.Printf("  ✔  k3s restarted with the new kubelet settings\n")
+	if restarted != "" {
+		fmt.Printf("  ✔  %s restarted with the new kubelet settings\n", restarted)
 	}
 
 	host, err := installer.DetectHostOS(node)
 	if err != nil {
 		return fmt.Errorf("reading the OS of %s: %w", nodeHost, err)
 	}
-	if !host.UsesNeedrestart() {
+	if host.UsesNeedrestart() {
+		if err := installer.ConfigureStorageRestarts(node); err != nil {
+			return fmt.Errorf("configuring storage restarts on %s: %w", nodeHost, err)
+		}
+		fmt.Printf("  ✔  Storage-path restarts deferred\n")
+	} else {
 		fmt.Printf("  ℹ  Kipper skips needrestart configuration on %s. Update storage packages\n", nodeHost)
 		fmt.Printf("     during planned downtime: their package scripts may restart iscsid.\n")
-		return nil
 	}
-	if err := installer.ConfigureStorageRestarts(node); err != nil {
-		return fmt.Errorf("configuring storage restarts on %s: %w", nodeHost, err)
-	}
-	fmt.Printf("  ✔  Storage-path restarts deferred\n")
 
 	if machineID == "" {
 		id, err := installer.ReadMachineID(node)

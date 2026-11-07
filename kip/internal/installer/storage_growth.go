@@ -100,9 +100,7 @@ func (g StorageGrowth) Run() error {
 	if err := InstallLonghornThen(g.Server, hardenAfterStoragePackages(harden, g.Server)); err != nil {
 		return err
 	}
-	if host.UsesNeedrestart() {
-		g.stampStorageRestarts()
-	}
+	g.stampStorageRestarts()
 	if floorWarning != "" {
 		if err := RecordMemoryFloorOverride(g.Server, sys.RAMMB); err != nil {
 			return err

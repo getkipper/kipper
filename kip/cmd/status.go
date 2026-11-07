@@ -399,8 +399,8 @@ func reportUFWFailOpen(out io.Writer, targets []hostTarget) {
 	}
 }
 
-// reportStorageRestartCoverage checks configuration annotations for missing
-// settings, older versions, or a replaced host on nodes that use needrestart.
+// reportStorageRestartCoverage checks every node's configuration annotations
+// for missing records, older versions, or a replaced host.
 // Annotations record successful writes. Manual file changes are invisible here.
 func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 	var uncovered []string
@@ -408,7 +408,6 @@ func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 	for _, node := range nodes {
 		if !installer.NeedrestartApplies(node.OSImage) {
 			withoutNeedrestart++
-			continue
 		}
 		covered, why := installer.StorageRestartCoverage(
 			node.Annotations[installer.StorageRestartsVersionAnnotation],
@@ -426,9 +425,7 @@ func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 		fmt.Printf("       may restart iscsid, so update storage packages during planned downtime\n")
 	}
 	if len(uncovered) == 0 {
-		if withoutNeedrestart < len(nodes) {
-			fmt.Printf("    ✔  host configuration is current on every node that uses needrestart, according to node records\n")
-		}
+		fmt.Printf("    ✔  host configuration is current on every node, according to node records\n")
 		fmt.Printf("\n")
 		return
 	}
@@ -436,8 +433,8 @@ func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 	for _, node := range uncovered {
 		fmt.Printf("    ⚠  %s\n", node)
 	}
-	fmt.Printf("       These nodes lack a current record of Longhorn host settings, such as deferred\n")
-	fmt.Printf("       iscsid restarts and image cleanup before Longhorn's replica scheduling\n")
+	fmt.Printf("       These nodes lack a current record of Longhorn host settings, such as the NFS\n")
+	fmt.Printf("       client setting and image cleanup before Longhorn's replica scheduling\n")
 	fmt.Printf("       limit. Fix one with:\n")
 	fmt.Printf("         kip node repair-host --host <address>\n")
 	fmt.Printf("       or every node with:\n")

@@ -29,7 +29,7 @@ func TestStorageRestartCoverage(t *testing.T) {
 			version:   "",
 			stampedID: "",
 			liveID:    "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d",
-			wantWhy:   "never configured",
+			wantWhy:   "no configuration record",
 		},
 		{
 			name:      "an older config version",
