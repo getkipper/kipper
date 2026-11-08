@@ -77,7 +77,8 @@ func TestTickAlertsWhenADumpVolumeIsFaulted(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "kipper-mode", Namespace: "kipper-system"},
 		Data:       map[string]string{"mode": "expert"},
 	})
-	rc := NewResourceController(client, dumpServiceClient(serviceWithDumpVolume(true, time.Now().Add(-time.Minute))))
+	rc := NewResourceController(client, dumpServiceClient(serviceWithDumpVolume(true, time.Now().Add(-time.Hour))))
+	rc.checkDumpVolumes(context.Background(), time.Now().Add(-dumpFaultGrace-time.Minute))
 
 	rc.tick(context.Background())
 
@@ -95,29 +96,42 @@ func TestTickAlertsWhenADumpVolumeIsFaulted(t *testing.T) {
 	}
 }
 
+// later returns a check time beyond the grace period for episodes observed
+// by watched before this call.
+func later() time.Time {
+	return time.Now().Add(dumpFaultGrace + time.Minute)
+}
+
+// watched starts the observation grace period for the current fault episodes.
+func watched(rc *ResourceController) {
+	rc.checkDumpVolumes(context.Background(), time.Now())
+}
+
 func TestCheckDumpVolumesWarnsOncePerEpisode(t *testing.T) {
 	at := time.Now().Add(-time.Minute)
 	rc := NewResourceController(fake.NewClientset(), dumpServiceClient(serviceWithDumpVolume(true, at)))
 	ctx := context.Background()
+	watched(rc)
 
-	batches := rc.checkDumpVolumes(ctx)
+	batches := rc.checkDumpVolumes(ctx, later())
 	if entries := dumpFaultEntries(batches); len(entries) != 1 {
 		t.Fatalf("expected one warning, got %+v", entriesOf(batches))
 	}
-	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx)); len(again) != 1 {
+	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx, later())); len(again) != 1 {
 		t.Fatalf("an alert that was never stored stays due, got %+v", again)
 	}
 	rc.commitBatches(batches)
-	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx)); len(again) != 0 {
+	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx, later())); len(again) != 0 {
 		t.Fatalf("one episode warns once, got %+v", again)
 	}
 
 	setService(t, rc, serviceWithDumpVolume(false, at))
-	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx)); len(again) != 0 {
+	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx, later())); len(again) != 0 {
 		t.Fatalf("a healthy dump volume warns about nothing, got %+v", again)
 	}
 	setService(t, rc, serviceWithDumpVolume(true, time.Now()))
-	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx)); len(again) != 1 {
+	watched(rc)
+	if again := dumpFaultEntries(rc.checkDumpVolumes(ctx, later())); len(again) != 1 {
 		t.Fatalf("recovery ends the episode, so a new fault warns again, got %+v", again)
 	}
 }
@@ -128,10 +142,12 @@ func TestCheckDumpVolumesWarnsOncePerEpisode(t *testing.T) {
 func TestCheckDumpVolumesWarnsAgainForAFaultAfterAnUnseenRecovery(t *testing.T) {
 	rc := NewResourceController(fake.NewClientset(), dumpServiceClient(serviceWithDumpVolume(true, time.Now().Add(-time.Hour))))
 	ctx := context.Background()
-	rc.commitBatches(rc.checkDumpVolumes(ctx))
+	watched(rc)
+	rc.commitBatches(rc.checkDumpVolumes(ctx, later()))
 
 	setService(t, rc, serviceWithDumpVolume(true, time.Now()))
-	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx)); len(entries) != 1 {
+	watched(rc)
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx, later())); len(entries) != 1 {
 		t.Fatalf("a fault with a new transition time is a new episode, got %+v", entries)
 	}
 }
@@ -140,7 +156,8 @@ func TestCheckDumpVolumesTreatsAReplacedServiceAsANewEpisode(t *testing.T) {
 	first := serviceWithDumpVolume(true, time.Now().Add(-time.Hour))
 	rc := NewResourceController(fake.NewClientset(), dumpServiceClient(first))
 	ctx := context.Background()
-	rc.commitBatches(rc.checkDumpVolumes(ctx))
+	watched(rc)
+	rc.commitBatches(rc.checkDumpVolumes(ctx, later()))
 
 	if err := rc.crClient.Delete(ctx, first); err != nil {
 		t.Fatal(err)
@@ -151,7 +168,8 @@ func TestCheckDumpVolumesTreatsAReplacedServiceAsANewEpisode(t *testing.T) {
 		t.Fatal(err)
 	}
 	setService(t, rc, second)
-	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx)); len(entries) != 1 {
+	watched(rc)
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx, later())); len(entries) != 1 {
 		t.Fatalf("a replaced Service is a new episode, got %+v", entries)
 	}
 }
@@ -166,12 +184,61 @@ func TestCheckDumpVolumesDoesNotRepeatAStoredAlert(t *testing.T) {
 		Action: "dump volume faulted", Severity: "warning", Reason: faultedDumpMessage,
 	}
 	rc := NewResourceController(fake.NewClientset(alertStore(t, stored)), dumpServiceClient(serviceWithDumpVolume(true, at)))
-	if entries := dumpFaultEntries(rc.checkDumpVolumes(context.Background())); len(entries) != 0 {
+	watched(rc)
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(context.Background(), later())); len(entries) != 0 {
 		t.Fatalf("an episode the store already holds is not reported again, got %+v", entries)
 	}
 
 	rc = NewResourceController(fake.NewClientset(alertStore(t, stored)), dumpServiceClient(serviceWithDumpVolume(true, at.Add(5*time.Minute))))
-	if entries := dumpFaultEntries(rc.checkDumpVolumes(context.Background())); len(entries) != 1 {
+	watched(rc)
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(context.Background(), later())); len(entries) != 1 {
 		t.Fatalf("an alert from before the episode began does not cover it, got %+v", entries)
+	}
+}
+
+// A node reboot faults a Longhorn volume until its replicas return, which
+// takes a few minutes. The grace period suppresses warnings during recovery.
+func TestCheckDumpVolumesWaitsForAFaultToPersist(t *testing.T) {
+	start := time.Now()
+	rc := NewResourceController(fake.NewClientset(), dumpServiceClient(serviceWithDumpVolume(true, start)))
+	ctx := context.Background()
+
+	for _, after := range []time.Duration{0, time.Minute, dumpFaultGrace - time.Second} {
+		if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx, start.Add(after))); len(entries) != 0 {
+			t.Fatalf("a fault %s old is not reported yet, got %+v", after, entries)
+		}
+	}
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx, start.Add(dumpFaultGrace))); len(entries) != 1 {
+		t.Fatalf("a fault that lasts the grace is reported, got %+v", entries)
+	}
+}
+
+// After console-api restarts, the Service may still carry a condition from
+// before the restart that the service reconciler has not refreshed yet, so the
+// controller waits the grace from its own first sighting too.
+func TestCheckDumpVolumesWaitsAfterARestartBeforeTrustingAnOldFault(t *testing.T) {
+	start := time.Now()
+	rc := NewResourceController(fake.NewClientset(), dumpServiceClient(serviceWithDumpVolume(true, start.Add(-time.Hour))))
+	ctx := context.Background()
+
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx, start)); len(entries) != 0 {
+		t.Fatalf("an old fault seen for the first time is not reported yet, got %+v", entries)
+	}
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx, start.Add(dumpFaultGrace))); len(entries) != 1 {
+		t.Fatalf("an old fault still there after the grace is reported, got %+v", entries)
+	}
+}
+
+func TestCheckDumpVolumesForgetsAFaultThatClearsWithinTheGrace(t *testing.T) {
+	start := time.Now()
+	rc := NewResourceController(fake.NewClientset(), dumpServiceClient(serviceWithDumpVolume(true, start)))
+	ctx := context.Background()
+	rc.checkDumpVolumes(ctx, start)
+
+	setService(t, rc, serviceWithDumpVolume(false, start))
+	rc.checkDumpVolumes(ctx, start.Add(time.Minute))
+	setService(t, rc, serviceWithDumpVolume(true, start.Add(5*time.Minute)))
+	if entries := dumpFaultEntries(rc.checkDumpVolumes(ctx, start.Add(dumpFaultGrace+time.Minute))); len(entries) != 0 {
+		t.Fatalf("a new fault six minutes old is not reported yet, got %+v", entries)
 	}
 }
