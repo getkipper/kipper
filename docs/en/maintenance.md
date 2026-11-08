@@ -21,7 +21,7 @@ On a single-node cluster whose pod network still runs VXLAN, a full upgrade firs
 
 Your apps are not directly touched, but step 3 can briefly disrupt running workloads if a chart upgrade rolls pods. For that reason kip prompts before running step 3 and refuses to proceed in non-interactive contexts without `--yes`.
 
-When a new console-api changes how services run, each affected service restarts once, even with `--skip-system`, and those restarts can overlap. Adding readiness probes to Postgres, MySQL, Redis, MongoDB and RabbitMQ services is one such change. The release notes identify each change, so plan the upgrade for a time when your databases can restart. A restart usually takes seconds, but a database on a node with a host problem, such as a [kernel that blocks signals inside containers](/en/cli-reference#kip-node-kernel), can stay down until the host is fixed.
+When a new console-api changes how services run, each affected service restarts once, even with `--skip-system`, and those restarts can overlap. Adding readiness probes to Postgres, MySQL, Redis, MongoDB and RabbitMQ services is one such change. The release notes identify each change, so plan the upgrade for a time when your databases can restart. A restart usually takes seconds, but a database on a node with a host problem, such as a [kernel that blocks signals inside containers](/en/cli-reference#kip-node-kernel), can stay down until the host is fixed. After the console step, kip waits up to five minutes for the new console-api to update each service that was ready before the upgrade and for that service to be ready again, and names any that are not.
 
 ### Clusters installed before operator login existed {#clusters-installed-before-operator-login-existed}
 

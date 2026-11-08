@@ -131,6 +131,11 @@ const (
 	// the stamp where it is.
 	AnnoConsoleAPIBuild = "kipper.run/console-api-build"
 
+	// AnnoWrittenBy records the controller Lease identity of the last console-api
+	// to write a service's StatefulSet. The identity includes the pod UID so an
+	// upgrade can identify services updated by its console-api rollout.
+	AnnoWrittenBy = "kipper.run/written-by"
+
 	// SourceNamespace records the namespace of the app a build was triggered
 	// for. Builds run in BuildsNamespace rather than beside their app, so this
 	// is what ties a build back to it, and what keeps two projects with an app

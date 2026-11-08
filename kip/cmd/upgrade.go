@@ -299,6 +299,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		{"kipper-authz", kipperSystemNS},
 	}
 
+	// Capture ready services before console-api restarts so the wait covers
+	// services that were healthy before the new console-api could restart them.
+	readyBefore, readyErr := newServiceWait(clientset, "").Ready(ctx)
+
 	for _, comp := range components {
 		fmt.Printf("  ...  %s\n", comp.name)
 
@@ -406,6 +410,18 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// Wait for the new console-api to serve alone: versions predating stops
 	// would restart apps that the repair marks as stopped.
 	repairAutoscaling(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion(), autoscaling, grants.rolled, grants.rolledConsoleAPI)
+
+	// Match this upgrade's rollout so a later rollout or rollback cannot count
+	// services as updated by this upgrade's console-api.
+	switch {
+	case !grants.rolledConsoleAPI:
+	case readyErr != nil:
+		fmt.Printf("\n  ⚠  Services not checked (%v)\n", readyErr)
+	case grants.rolled.hash == "":
+		fmt.Printf("\n  ⚠  Services not checked: this upgrade could not identify its console-api rollout\n")
+	default:
+		newServiceWait(clientset, grants.rolled.hash).Wait(ctx, os.Stdout, readyBefore)
+	}
 
 	// Which namespaces their projects have not recorded taking. The console
 	// publishes those records as it reconciles and the next release resolves

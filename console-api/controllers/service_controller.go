@@ -37,6 +37,7 @@ import (
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/console-api/uisession"
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
@@ -56,6 +57,8 @@ type ServiceReconciler struct {
 	// a missing permission never starts a cache that cannot sync.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
+	// Writer is the controller Lease identity recorded on service StatefulSets.
+	Writer string
 	// Domain is the cluster's base domain (e.g. "example.com"). Used
 	// to build per-service UI hostnames as <svc>-<namespace>.<Domain>.
 	// Empty disables UI ingress reconciliation — services still come
@@ -692,6 +695,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 			return errAwaitingCertificate
 		}
 		r.reportTLSRollout(ctx, svc, certHash, nil)
+		stampWriter(desired, r.Writer)
 		if err := r.Create(ctx, desired); err != nil {
 			return err
 		}
@@ -760,6 +764,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	syncPostgresTLSTemplate(&existing.Spec.Template, &desired.Spec.Template)
 	syncDumpTemplate(&existing.Spec.Template, &desired.Spec.Template, svc.Name)
 	existing.Labels = desired.Labels
+	stampWriter(&existing, r.Writer)
 	// Accepted is not adopted. A workload from before these records existed has
 	// no owner, and without one garbage collection has nothing to follow when
 	// the service goes, so an ordinary delete would leave it running against the
@@ -1597,6 +1602,20 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			envVars: func(_ string) []corev1.EnvVar { return nil },
 		}
 	}
+}
+
+// stampWriter records on obj the console-api controller that writes it. An
+// empty writer leaves obj as it is.
+func stampWriter(obj metav1.Object, writer string) {
+	if writer == "" {
+		return
+	}
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[kipperlabels.AnnoWrittenBy] = writer
+	obj.SetAnnotations(annotations)
 }
 
 // readinessProbe returns a probe that runs check, or nil for a nil check.
