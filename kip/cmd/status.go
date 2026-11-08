@@ -347,12 +347,22 @@ func reportHostChecks(out io.Writer, cluster *config.Cluster, nodes []k8s.NodeIn
 	}
 	say(out, "\n")
 
-	say(out, "  Pending restarts:\n")
-	for _, t := range targets {
+	say(out, "  Kernel:\n")
+	kernels := make([]*installer.KernelState, len(targets))
+	for i, t := range targets {
 		if t.notChecked(out, false) {
 			continue
 		}
-		reportPendingRestarts(out, t)
+		kernels[i] = reportKernel(out, t)
+	}
+	say(out, "\n")
+
+	say(out, "  Pending restarts:\n")
+	for i, t := range targets {
+		if t.notChecked(out, false) {
+			continue
+		}
+		reportPendingRestarts(out, t, kernels[i])
 	}
 	say(out, "\n")
 
@@ -509,11 +519,16 @@ func nodeIsHost(node k8s.NodeInfo, host string, all []k8s.NodeInfo) bool {
 // reportPendingRestarts surfaces updates that still need a service restart or reboot.
 // Storage service restarts can disrupt Longhorn volumes, so operators need
 // to schedule downtime to load updated libraries.
-func reportPendingRestarts(out io.Writer, t hostTarget) {
+// Running the pinned kernel suppresses the pending kernel update warning.
+// A nil kernel means the kernel state could not be read.
+func reportPendingRestarts(out io.Writer, t hostTarget, kernel *installer.KernelState) {
 	pending, err := installer.PendingRestarts(t.runner)
 	if err != nil {
 		say(out, "    ⚠  %snot checked (%v)\n", t.prefix, err)
 		return
+	}
+	if pending.KernelOutdated && kernel != nil && kernel.RunsPinned() {
+		pending.KernelOutdated = false
 	}
 	if !pending.Any() {
 		say(out, "    ✔  %snothing waiting on a restart\n", t.prefix)
@@ -536,6 +551,32 @@ func reportPendingRestarts(out io.Writer, t hostTarget) {
 	if pending.RebootRequired {
 		say(out, "    ⚠  %supdates require a reboot. Run '%s'\n", t.prefix, t.reboot)
 	}
+}
+
+// reportKernel shows the running kernel and warns when it blocks signals inside
+// containers, which can make the Postgres image hang at startup. It returns the
+// state it read, or nil if reading the kernel state fails.
+func reportKernel(out io.Writer, t hostTarget) *installer.KernelState {
+	state, err := installer.ReadKernelState(t.runner)
+	if err != nil {
+		say(out, "    ⚠  %snot checked (%v)\n", t.prefix, err)
+		return nil
+	}
+	hint := kernelHint(state, t.nodeArg, t.reboot, false)
+	switch {
+	case state.BlocksContainerSignals():
+		say(out, "    ⚠  %skernel %s blocks signals inside containers (%d AppArmor %s since boot)\n",
+			t.prefix, state.Running, state.SignalDenials, plural(state.SignalDenials, "denial", "denials"))
+		say(out, "       Container programs can hang, and Postgres services may never start.\n")
+		say(out, "       %s. Installed: %s\n", hint, strings.Join(state.Installed, ", "))
+	case hint != "":
+		say(out, "    ⚠  %srunning %s. %s\n", t.prefix, state.Running, hint)
+	case state.Pinned != "":
+		say(out, "    ✔  %s%s, pinned with 'kip node kernel pin'\n", t.prefix, state.Running)
+	default:
+		say(out, "    ✔  %s%s\n", t.prefix, state.Running)
+	}
+	return &state
 }
 
 // checkHostDNSResolvers checks resolver validity, configuration, and reachability.

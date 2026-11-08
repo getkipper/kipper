@@ -43,6 +43,7 @@ var hostCheckCommands = []string{
 	liveDNSProbeCommand,
 	accessStateCommand(""),
 	opsStateCommand(""),
+	kernelStateCheck,
 }
 
 // CaptureHostChecks runs every host check command on client as one remote

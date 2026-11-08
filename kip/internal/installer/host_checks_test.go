@@ -101,6 +101,7 @@ func TestHostCheckBatchCoversEveryWorkerCheck(t *testing.T) {
 			machineIDCommand:     "0123456789abcdef0123456789abcdef\n",
 			k3sResolvConfCommand: "nameserver 192.0.2.53\nnameserver 198.51.100.53\n",
 			liveDNSProbeCommand:  "192.0.2.53 ok\n198.51.100.53 unreachable\n",
+			kernelStateCheck:     "running=7.0.0-38-generic\ndenials=0\n",
 		}
 		results := map[string]commandResult{}
 		for _, c := range hostCheckCommands {
@@ -125,6 +126,9 @@ func TestHostCheckBatchCoversEveryWorkerCheck(t *testing.T) {
 		}
 		if _, err := ReadOpsState(replay); err != nil {
 			t.Errorf("operator interface: %v", err)
+		}
+		if _, err := ReadKernelState(replay); err != nil {
+			t.Errorf("kernel: %v", err)
 		}
 		body, err := ReadResolvConf(replay)
 		if err != nil {

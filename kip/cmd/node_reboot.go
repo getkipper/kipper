@@ -89,6 +89,9 @@ type nodeReboot struct {
 	Report           func(io.Writer, ssh.Config)
 	ServingApps      func() ([]appRef, error)
 	NotServing       func(apps []appRef, since time.Time, within time.Duration) ([]string, error)
+	Kernel           func(ssh.Config) (installer.KernelState, error)
+	NotReadyServices func(within time.Duration) ([]string, error)
+	WorkerHost       string
 	Sleep            func(time.Duration)
 	Now              func() time.Time
 	Interval         time.Duration
@@ -207,10 +210,11 @@ func (r *nodeReboot) run(host string, yes, skipBackup bool) error {
 		}
 	}
 	say(r.Out, "  ✔  Every node and component is ready\n")
+	blocking := r.warnAboutKernel()
 
 	if r.Settle != nil {
 		if err := r.Settle(max(remaining(), 0)); err != nil {
-			return err
+			return fmt.Errorf("%w%s", err, r.likelyCause(blocking))
 		}
 	}
 
@@ -225,9 +229,9 @@ func (r *nodeReboot) run(host string, yes, skipBackup bool) error {
 				say(r.Out, "\n")
 				r.Report(r.Out, r.SSH)
 				if err != nil {
-					return fmt.Errorf("could not confirm app readiness within %s after reboot: %w. Check progress with 'kip app list'", r.Timeout, err)
+					return fmt.Errorf("could not confirm app readiness within %s after reboot: %w. Check progress with 'kip app list'%s", r.Timeout, err, r.likelyCause(blocking))
 				}
-				return fmt.Errorf("apps still waiting for readiness %s after reboot: %s. Check progress with 'kip app list'", r.Timeout, strings.Join(waiting, ", "))
+				return fmt.Errorf("apps still waiting for readiness %s after reboot: %s. Check progress with 'kip app list'%s", r.Timeout, strings.Join(waiting, ", "), r.likelyCause(blocking))
 			}
 			r.Sleep(r.Interval)
 		}
@@ -236,6 +240,74 @@ func (r *nodeReboot) run(host string, yes, skipBackup bool) error {
 	say(r.Out, "\n")
 	r.Report(r.Out, r.SSH)
 	return nil
+}
+
+// warnAboutKernel reports blocked container signals, ineffective pins, pins
+// for uninstalled kernels, and read failures after reboot. It returns the running kernel
+// version when blocked signals are detected, or "" otherwise.
+func (r *nodeReboot) warnAboutKernel() string {
+	if r.Kernel == nil {
+		return ""
+	}
+	state, err := r.Kernel(r.SSH)
+	if err != nil {
+		say(r.Out, "  ⚠  Kernel not checked (%v)\n", err)
+		return ""
+	}
+	hint := kernelHint(state, r.hostArg(), r.rebootCommand(), true)
+	if !state.BlocksContainerSignals() {
+		if hint != "" {
+			say(r.Out, "  ⚠  %s.\n", hint)
+		}
+		return ""
+	}
+	say(r.Out, "  ⚠  Kernel %s blocks signals inside containers (%d AppArmor %s since boot).\n",
+		state.Running, state.SignalDenials, plural(state.SignalDenials, "denial", "denials"))
+	say(r.Out, "     Container programs can hang, and Postgres services may never start.\n")
+	say(r.Out, "     %s.\n", hint)
+	say(r.Out, "     Installed: %s\n", strings.Join(state.Installed, ", "))
+	return state.Running
+}
+
+// likelyCause names the database services that are not ready, and the kernel
+// when it blocks container signals, for workload recovery errors.
+func (r *nodeReboot) likelyCause(blockingKernel string) string {
+	var cause string
+	if r.NotReadyServices != nil {
+		if services, err := r.NotReadyServices(r.Probe); err == nil && len(services) > 0 {
+			cause += fmt.Sprintf(". Services not ready: %s", strings.Join(services, ", "))
+		}
+	}
+	if blockingKernel == "" && r.Kernel != nil {
+		// A container may first trigger a signal denial after the initial
+		// post-reboot check, so check again when workload recovery fails.
+		if state, err := r.Kernel(r.SSH); err == nil && state.BlocksContainerSignals() {
+			blockingKernel = state.Running
+		}
+	}
+	if blockingKernel != "" {
+		cause += fmt.Sprintf(". Kernel %s blocks signals inside containers. Pin a kernel that worked before with '%s', then run '%s'", blockingKernel, r.pinCommand(), r.rebootCommand())
+	}
+	return cause
+}
+
+func (r *nodeReboot) pinCommand() string {
+	return "kip node kernel pin <version>" + r.hostArg()
+}
+
+// hostArg returns the --host flag for the rebooted worker, or "" for the server.
+func (r *nodeReboot) hostArg() string {
+	if r.WorkerHost != "" {
+		return " --host " + r.WorkerHost
+	}
+	return ""
+}
+
+func (r *nodeReboot) rebootCommand() string {
+	if r.WorkerHost != "" {
+		return "kip node reboot " + r.WorkerHost
+	}
+	return "kip node reboot"
 }
 
 func runNodeReboot(cmd *cobra.Command, args []string) error {
@@ -306,6 +378,24 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 			}
 			return appsNotServingSince(apps, pods.Items, since, unaffected), nil
 		},
+		Kernel: func(cfg ssh.Config) (installer.KernelState, error) {
+			var state installer.KernelState
+			_, err := onHost(cfg, func(c *ssh.Client) (string, error) {
+				var err error
+				state, err = installer.ReadKernelState(c)
+				return "", err
+			})
+			return state, err
+		},
+		NotReadyServices: func(within time.Duration) ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), within)
+			defer cancel()
+			pods, err := client.Clientset().CoreV1().Pods("").List(ctx, metav1.ListOptions{LabelSelector: serviceTypeLabel})
+			if err != nil {
+				return nil, err
+			}
+			return servicesNotReady(pods.Items), nil
+		},
 		Sleep:            time.Sleep,
 		Now:              time.Now,
 		Interval:         10 * time.Second,
@@ -370,6 +460,7 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	r.Impact = "Its pods are drained first; evicted pods lose their emptyDir data."
+	r.WorkerHost = rec.Host
 	r.ServingApps = nil
 	r.Prepare = w.prepare
 	r.Settle = w.settle
@@ -692,7 +783,11 @@ func reportWorkerAfterReboot(out io.Writer, cfg ssh.Config, node string, server 
 	}
 	defer func() { _ = c.Close() }()
 	say(out, "  Pending restarts:\n")
-	reportPendingRestarts(out, hostTarget{runner: c, reboot: "kip node reboot " + node})
+	var kernel *installer.KernelState
+	if state, err := installer.ReadKernelState(c); err == nil {
+		kernel = &state
+	}
+	reportPendingRestarts(out, hostTarget{runner: c, reboot: "kip node reboot " + node}, kernel)
 	say(out, "\n")
 	reportAccessGuard(out, server, c)
 }
@@ -865,6 +960,38 @@ func scheduledAt(out string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("the server time is missing from the reboot output %q", strings.TrimSpace(out))
+}
+
+// serviceTypeLabel marks the pods of Kipper services such as databases.
+const serviceTypeLabel = "kipper.run/service-type"
+
+// servicesNotReady lists services with no ready, non-terminating pod as
+// namespace/service, ordered by their first occurrence in pods.
+func servicesNotReady(pods []corev1.Pod) []string {
+	ready := map[string]bool{}
+	var order []string
+	for _, pod := range pods {
+		name := pod.Namespace + "/" + pod.Labels["app"]
+		if _, seen := ready[name]; !seen {
+			order = append(order, name)
+			ready[name] = false
+		}
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		for _, c := range pod.Status.Conditions {
+			if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+				ready[name] = true
+			}
+		}
+	}
+	var waiting []string
+	for _, name := range order {
+		if !ready[name] {
+			waiting = append(waiting, name)
+		}
+	}
+	return waiting
 }
 
 type appRef struct{ Namespace, Name string }
