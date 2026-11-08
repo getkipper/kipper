@@ -49,9 +49,10 @@ func TestRepairHostConnectsAsRoot(t *testing.T) {
 		"writing host configuration needs root, as kip node add does")
 }
 
-// repairHost is an Ubuntu node that logs NFS client, image GC, k3s restart
-// and needrestart writes and, on the server, node annotations. stale names the
-// k3s unit whose kubelet started before the image GC drop-in.
+// repairHost simulates a node, defaulting to Ubuntu. It logs NFS client,
+// image GC, and needrestart configuration, k3s restarts, and server-side
+// node annotations.
+// stale names the k3s unit whose kubelet started before the image GC drop-in.
 type repairHost struct {
 	eachHost
 	name       string
@@ -59,11 +60,15 @@ type repairHost struct {
 	names      map[string]string
 	stale      string
 	restartErr error
+	osRelease  string
 }
 
 func (h *repairHost) Run(command string) (string, error) {
 	switch {
 	case command == "cat /etc/os-release":
+		if h.osRelease != "" {
+			return h.osRelease, nil
+		}
 		return "ID=ubuntu\nVERSION_ID=\"24.04\"\n", nil
 	case strings.Contains(command, "/etc/modprobe.d/kipper-nfs.conf"):
 		*h.log = append(*h.log, "nfs "+h.name)
@@ -125,6 +130,31 @@ func TestRepairHostRestartsK3sOnlyWhereTheKubeletPredatesTheDropIn(t *testing.T)
 		"nfs worker-b", "image-gc worker-b", "configure worker-b", "server records 'worker-b'",
 	}, log)
 	assert.Equal(t, 1, strings.Count(out, "Restarting k3s-agent"), out)
+	assert.Contains(t, out, "✔  k3s-agent restarted with the new kubelet settings", "a worker runs k3s-agent, and the message names the unit that restarted")
+	assert.NotContains(t, out, "✔  k3s restarted")
+}
+
+// TestRepairHostRecordsARHELNodeWithoutConfiguringNeedrestart verifies that
+// RHEL nodes record configuration because they receive NFS client and image
+// cleanup settings even though they skip needrestart configuration.
+func TestRepairHostRecordsARHELNodeWithoutConfiguringNeedrestart(t *testing.T) {
+	var log []string
+	names := map[string]string{eachServerID: "server", eachWorkerA: "worker-a", eachWorkerB: "worker-b"}
+	rocky := "ID=rocky\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"10.0\"\n"
+	server := &repairHost{eachHost: eachHost{id: eachServerID}, name: "server", log: &log, names: names, osRelease: rocky}
+	ids := map[string]string{"203.0.113.11": eachWorkerA, "203.0.113.12": eachWorkerB}
+	var dial nodeDialer = func(rec installer.NodeRecord) (installer.FirewallRunner, func(), error) {
+		return &repairHost{eachHost: eachHost{id: ids[rec.Host]}, name: rec.Name, log: &log, osRelease: rocky}, func() {}, nil
+	}
+
+	out := captureStdout(t, func() { require.NoError(t, repairHostOnNodes(eachRecords(), server, dial)) })
+
+	assert.Equal(t, []string{
+		"nfs server", "image-gc server", "server records 'server'",
+		"nfs worker-a", "image-gc worker-a", "server records 'worker-a'",
+		"nfs worker-b", "image-gc worker-b", "server records 'worker-b'",
+	}, log)
+	assert.Contains(t, out, "Kipper skips needrestart configuration on 203.0.113.11")
 }
 
 func TestRepairHostStopsWhenTheRestartFails(t *testing.T) {

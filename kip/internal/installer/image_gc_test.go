@@ -161,7 +161,7 @@ func TestApplyImageGCRestartsOnlyAStaleK3s(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.True(t, host.ran(imageGCDropIn))
-			assert.Equal(t, tc.restarts != "", restarted)
+			assert.Equal(t, strings.TrimSpace(tc.stale), restarted, "the restarted unit is named for the operator")
 			if tc.restarts == "" {
 				assert.False(t, host.ran("systemctl restart"), "nothing changed since k3s started")
 				assert.Empty(t, notices)

@@ -79,23 +79,22 @@ func ConfigureStorageRestarts(runner CommandRunner) error {
 	return nil
 }
 
-// The stamp says what a node was last configured with, so `kip status` can name
-// the nodes still running an older set without SSHing to each one.
-//
-// It is a record that a write once succeeded, not a live audit: a file deleted
-// or edited by hand afterwards leaves the stamp saying the node is covered. The
-// docs say so, because reading it as an audit is the way it misleads.
+// These annotations record the last successful host configuration write so
+// kip status can identify outdated records without connecting to each host.
+// Manual file edits or deletions leave the record unchanged. User documentation
+// explains this limit so operators can interpret coverage correctly.
 const (
 	StorageRestartsVersionAnnotation = "kipper.run/storage-restarts-version"
 	StorageRestartsMachineAnnotation = "kipper.run/storage-restarts-machine"
 )
 
-// rhelFamilyOSImages contains kubelet OS image prefixes excluded from
-// Kipper's needrestart configuration checks.
+// rhelFamilyOSImages contains kubelet OS image prefixes that identify
+// distributions where Kipper skips needrestart configuration.
 var rhelFamilyOSImages = []string{"Rocky Linux", "AlmaLinux", "CentOS Stream", "Red Hat Enterprise Linux"}
 
-// NeedrestartApplies reports whether to check a node for the needrestart drop-in.
-// Unknown or empty OS images require the check to avoid hiding missing coverage.
+// NeedrestartApplies reports whether Kipper treats a node's OS image as using
+// needrestart. It returns false for known RHEL-family prefixes and true for
+// other images, including unknown or empty values.
 func NeedrestartApplies(osImage string) bool {
 	for _, prefix := range rhelFamilyOSImages {
 		if strings.HasPrefix(osImage, prefix) {
@@ -491,23 +490,19 @@ func mountedReadOnly(options string) bool {
 	return false
 }
 
-// StorageRestartCoverage reads a node's stamp back and says whether the host
-// configuration written to it still applies, and what is wrong when it does not.
-//
-// It compares the machine identity as well as the version, because a node
-// reimaged under the same name keeps its annotation, and a stamp that survived
-// its host would report a green node with nothing on it.
-//
-// This is a record that a write once succeeded, not an audit. A file deleted or
-// edited by hand afterwards is invisible here, which the docs say plainly.
+// StorageRestartCoverage reports whether a node's recorded configuration
+// matches the current version and live machine ID. It returns true and an empty
+// reason on success, or false and a reason for missing records, a missing live
+// machine ID, or a mismatch. Comparing machine IDs prevents annotations retained after
+// reimaging a host under the same node name from implying coverage.
+// Records confirm successful writes. Later manual file edits or deletions
+// are invisible to this check.
 func StorageRestartCoverage(stampedVersion, stampedMachineID, liveMachineID string) (bool, string) {
 	if stampedVersion == "" || stampedMachineID == "" {
-		return false, "never configured"
+		return false, "no configuration record"
 	}
 	if liveMachineID == "" {
-		// Without the node's own identity there is nothing to compare against,
-		// and answering "covered" from the stamp alone is the false green the
-		// identity was stamped to prevent.
+		// Confirming coverage requires the node's identity to detect a replaced host.
 		return false, "cannot be confirmed"
 	}
 	if stampedMachineID != liveMachineID {

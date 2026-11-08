@@ -9,14 +9,24 @@ import (
 	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
-func TestStorageRestartCoverageLeavesRHELNodesOut(t *testing.T) {
-	rocky := k8s.NodeInfo{Name: "worker-1", OSImage: "Rocky Linux 10.0 (Red Quartz)", MachineID: "0123456789abcdef0123456789abcdef"}
+// TestStorageRestartCoverageChecksRHELNodes verifies coverage of NFS client
+// and image cleanup settings alongside the notice about package-triggered restarts.
+func TestStorageRestartCoverageChecksRHELNodes(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	rocky := k8s.NodeInfo{Name: "worker-1", OSImage: "Rocky Linux 10.0 (Red Quartz)", MachineID: id}
 
 	out := captureStdout(t, func() { reportStorageRestartCoverage([]k8s.NodeInfo{rocky}) })
 
 	assert.Contains(t, out, "1 node(s) run a distribution without needrestart")
-	assert.NotContains(t, out, "repair-host")
-	assert.NotContains(t, out, "host configuration is current")
+	assert.Contains(t, out, "worker-1 (no configuration record)")
+	assert.Contains(t, out, "repair-host")
+
+	rocky.Annotations = map[string]string{
+		installer.StorageRestartsVersionAnnotation: installer.StorageRestartConfigVersion,
+		installer.StorageRestartsMachineAnnotation: id,
+	}
+	out = captureStdout(t, func() { reportStorageRestartCoverage([]k8s.NodeInfo{rocky}) })
+	assert.Contains(t, out, "✔  host configuration is current on every node")
 }
 
 func TestStorageRestartCoverageStillChecksDebianNodesBesideRHEL(t *testing.T) {
@@ -25,7 +35,7 @@ func TestStorageRestartCoverageStillChecksDebianNodesBesideRHEL(t *testing.T) {
 
 	out := captureStdout(t, func() { reportStorageRestartCoverage([]k8s.NodeInfo{rocky, debian}) })
 
-	assert.Contains(t, out, "server (never configured)")
+	assert.Contains(t, out, "server (no configuration record)")
 	assert.Contains(t, out, "repair-host")
 }
 

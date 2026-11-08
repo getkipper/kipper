@@ -86,41 +86,43 @@ func configureImageGC(client CommandRunner) error {
 // time, or is unreadable, because the kubelet loads these flags at startup.
 // notify must be non-nil and runs before a restart.
 //
-// It returns true only after a successful restart and, on servers, an API
-// readiness check. Errors leave written settings in place. Running pods keep
-// running while the server's API pauses during its restart. A host running
-// neither unit loads the settings at its next k3s start. After a failed restart,
-// a later call retries if the active unit's start time still requires it.
-func ApplyImageGC(client CommandRunner, notify func(string)) (bool, error) {
+// It returns "k3s" or "k3s-agent" after a successful restart and, on servers,
+// a successful API readiness check. It returns "" if no restart is needed or an
+// error occurs. Errors leave any settings already written in place. Running
+// pods keep running while the server's API pauses during its restart. A host
+// with both units inactive loads the settings at its next k3s start. After a
+// failed restart, a later call retries if the active unit's start time still
+// requires it.
+func ApplyImageGC(client CommandRunner, notify func(string)) (string, error) {
 	if err := configureImageGC(client); err != nil {
-		return false, err
+		return "", err
 	}
 	out, err := client.Run(imageGCStaleUnitCommand(k3sConfigDropInDir))
 	if err != nil {
-		return false, fmt.Errorf("checking whether k3s loaded the kubelet image cleanup settings: %w", err)
+		return "", fmt.Errorf("checking whether k3s loaded the kubelet image cleanup settings: %w", err)
 	}
 	unit := strings.TrimSpace(out)
 	var restart func(CommandRunner) error
 	switch unit {
 	case "":
-		return false, nil
+		return "", nil
 	case RoleServer.k3sUnit():
 		restart = restartK3s
 	case RoleWorker.k3sUnit():
 		restart = restartK3sAgent
 	default:
-		return false, fmt.Errorf("checking whether k3s loaded the kubelet image cleanup settings: unexpected output %q", unit)
+		return "", fmt.Errorf("checking whether k3s loaded the kubelet image cleanup settings: unexpected output %q", unit)
 	}
 	notify(fmt.Sprintf("Restarting %s so the kubelet loads the image cleanup settings. Running pods keep running.", unit))
 	// systemd before 248 reports start times in whole seconds, so a restart in
 	// the second of the write would still read as stale on the next check.
 	if _, err := client.Run("sleep 1"); err != nil {
-		return false, fmt.Errorf("waiting before restarting %s: %w", unit, err)
+		return "", fmt.Errorf("waiting before restarting %s: %w", unit, err)
 	}
 	if err := restart(client); err != nil {
-		return false, fmt.Errorf("%w. The kubelet image cleanup settings are written. Check 'journalctl -u %s' on the node, then run the command again", err, unit)
+		return "", fmt.Errorf("%w. The kubelet image cleanup settings are written. Check 'journalctl -u %s' on the node, then run the command again", err, unit)
 	}
-	return true, nil
+	return unit, nil
 }
 
 // restartK3sAgent waits up to 300 seconds for systemctl to restart k3s-agent.
