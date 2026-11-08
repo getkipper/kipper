@@ -527,6 +527,19 @@ func TestRebootStaysQuietAboutAKernelThatLetsContainersSignal(t *testing.T) {
 	assert.NotContains(t, out.String(), "blocks signals")
 }
 
+func TestRebootSaysWhenAppReadinessCouldNotBeChecked(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true, apps: []appRef{{Namespace: "shop", Name: "web"}}}
+	r, _ := h.reboot(t)
+	r.NotServing = func([]appRef, time.Time, time.Duration) ([]string, error) {
+		return nil, errors.New("listing pods: timeout")
+	}
+
+	err := r.run("example.com", true, true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not confirm app readiness within 20m0s after the reboot: listing pods: timeout. Check the apps with 'kip app list'")
+}
+
 func TestRebootNamesUnreadyServicesAndTheKernelWhenAppsStayDown(t *testing.T) {
 	h := &rebootingHost{bootID: "old-boot", confirm: true, apps: []appRef{{Namespace: "shop", Name: "web"}}, startingReads: 1000}
 	r, _ := h.reboot(t)
@@ -538,7 +551,7 @@ func TestRebootNamesUnreadyServicesAndTheKernelWhenAppsStayDown(t *testing.T) {
 	err := r.run("example.com", true, true)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "apps still waiting for readiness 20m0s after reboot: shop/web.")
+	assert.Contains(t, err.Error(), "apps have not become ready again within 20m0s after the reboot: shop/web. Check them with 'kip app list'.")
 	assert.Contains(t, err.Error(), ". Services not ready: shop/db.")
 	assert.Contains(t, err.Error(), "Kernel 7.0.0-42-generic blocks signals inside containers. Pin a kernel that worked before with 'kip node kernel pin <version>', then run 'kip node reboot'")
 }
