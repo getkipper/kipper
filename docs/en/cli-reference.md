@@ -247,7 +247,9 @@ The Backups section reports the health of the newest finished backup of each act
 
 It also audits the DNS resolvers your cluster forwards external queries to. Those live in a file on the server, so `kip status` makes a best-effort SSH connection as the cluster's SSH user (reusing the key from install, then your SSH agent or `~/.ssh/id_ed25519`) to read it. Three things are checked: the file is still a safe set (IPv4 entries only, at most three), the entries still match the resolvers the cluster was configured with (`dns_resolvers` in `~/.kip/config.yaml`, or the default public set), and each resolver actually accepts connections from the server. Each problem gets its own warning, and drift or an unsafe hand-edit is fixed with `kip cluster dns repair`. If the server can't be reached over SSH, the section reports that the check could not run, and the rest of the status still prints.
 
-On a cluster with workers, the host checks (DNS resolvers, pending restarts, read-only volume mounts, attempts to switch UFW off after a failed firewall rollback, and operator access) cover the server and every recorded worker. Results identify each node by its recorded name. kip finds workers in node records read through the Kubernetes API. If those records are missing, unreadable or invalid, it uses the local copy and warns when the read or validation fails. It runs all of a worker's checks as one SSH command to reduce connections against the worker's firewall rate limit. Each worker's resolvers are probed from that worker. `kip cluster dns repair` restores the resolver file on the server and every worker. Before reporting a worker's results, kip confirms that the address still answers with the worker's recorded machine ID. A worker that cannot be reached, or that answers as another machine, is listed as not checked and the rest of the status still prints. Operator access checks require an SSH connection to the server to read the cluster's access record. On a single-node cluster, results retain their layout without node-name prefixes.
+On a cluster with workers, the host checks (DNS resolvers, kernel, pending restarts, read-only volume mounts, attempts to switch UFW off after a failed firewall rollback, and operator access) cover the server and every recorded worker. Results identify each node by its recorded name. kip finds workers in node records read through the Kubernetes API. If those records are missing, unreadable or invalid, it uses the local copy and warns when the read or validation fails. It runs all of a worker's checks as one SSH command to reduce connections against the worker's firewall rate limit. Each worker's resolvers are probed from that worker. `kip cluster dns repair` restores the resolver file on the server and every worker. Before reporting a worker's results, kip confirms that the address still answers with the worker's recorded machine ID. A worker that cannot be reached, or that answers as another machine, is listed as not checked and the rest of the status still prints. Operator access checks require an SSH connection to the server to read the cluster's access record. On a single-node cluster, results retain their layout without node-name prefixes.
+
+The Kernel section shows each node's running kernel and counts the AppArmor denials of signals sent inside containers since the node booted. Some kernels, including Ubuntu 26.04's 7.0.0-42 and 7.0.0-43, deny these signals, causing programs that signal their own threads to hang. This affects the Postgres image's startup helper, preventing Postgres services from starting. A node with such denials gets a warning that lists its installed kernels and says how to pin one that worked before with [`kip node kernel pin`](#kip-node-kernel). A node running the kernel it is pinned to does not report newer installed kernels under Pending restarts, and a node pinned to a kernel it has not booted yet is asked to reboot. If the pinned kernel is no longer installed, the warning names it and gives commands to pin another kernel or remove the pin. The denial count comes from the kernel log. If an audit daemon such as auditd captures the AppArmor messages instead, the kernel log shows no denials. Check the daemon's log in that case.
 
 On a cluster with Longhorn storage, a Storage section appears when the server's roomiest eligible disk has less than 5Gi available for scheduling new volumes. This is the default volume size for `kip volume create`.
 
@@ -473,6 +475,34 @@ Lists all nodes in the cluster with role, status, version, and IP. When a worker
 kip node list
 ```
 
+## kip node kernel {#kip-node-kernel}
+
+Shows the running kernel, the pinned kernel and the installed kernels of every recorded node, or of one node with `--host`, and counts the AppArmor denials of signals sent inside containers since each node booted. Denials mean the running kernel can make container programs hang, as described under [`kip status`](#kip-status). A worker that cannot be reached is reported, and the listing continues with the other nodes.
+
+```bash
+kip node kernel
+kip node kernel pin 7.0.0-38-generic
+kip node kernel unpin
+```
+
+```
+  Node server-1 (203.0.113.10)
+    Running:    7.0.0-42-generic
+    Pinned:     none
+    Installed:  7.0.0-38-generic, 7.0.0-42-generic
+  ⚠  7.0.0-42-generic blocks signals inside containers (226 AppArmor denials since boot).
+     Pin a kernel that worked before with 'kip node kernel pin <version>', then run 'kip node reboot'.
+```
+
+`kip node kernel pin <version>` makes the server, or the node given with `--host`, boot that installed kernel from its next reboot on. It writes the GRUB drop-in `/etc/default/grub.d/99-kipper-kernel.cfg`, regenerates the GRUB configuration, checks that GRUB now boots that kernel by default, and holds the kernel's package so automatic updates keep it installed. Newer kernels can still be installed but do not boot. A one-time selection made with `grub-reboot` would boot first, so pinning clears it. If applying the pin fails because `update-grub` fails or another file in `/etc/default/grub.d` overrides the default, the command restores the earlier pin and tries to regenerate the previous boot configuration before returning an error. A failed `update-grub` can leave `/boot/grub/grub.cfg` incomplete, so when regenerating it fails again, or fails before anything was pinned, the command asks you to run `update-grub` and check that file before rebooting. Pinning needs Ubuntu or Debian with GRUB. Pinning again replaces the earlier pin and, once the new kernel is held, releases the hold the earlier pin placed. A package you held yourself stays held. When `apt-mark` cannot release a hold, the command says so and the next pin or unpin tries again. The running kernel changes at reboot, so run [`kip node reboot`](#kip-node-reboot) afterward.
+
+`kip node kernel unpin` removes the pin and releases the hold the pin placed, so the node boots the kernel the rest of its GRUB configuration selects, normally the newest, from its next reboot on. When `update-grub` fails, the pin stays and the command fails. Before unpinning, check a newer kernel on a test machine: `kip node kernel` on it should report no denials and a Postgres service should start.
+
+| Flag | Required | Description |
+|---|---|---|
+| `--host` | No | Address of a single node. Without it, `kip node kernel` shows every recorded node, and `pin` and `unpin` act on the server |
+| `--ssh-key` | No | SSH private key for the nodes |
+
 ## kip node reboot {#kip-node-reboot}
 
 Reboots a server or worker and waits for the cluster and previously ready apps or workloads to be ready again. Use it to apply a new kernel or service updates listed under Pending restarts in `kip status`.
@@ -499,8 +529,8 @@ Apps on a single-server cluster are unavailable during the reboot. For a server,
 3. Unless `--skip-backup` is set, takes a backup using the defaults from `kip backup create` and waits up to 30 minutes for completion. A failed or timed-out backup cancels the reboot.
 4. Records apps with at least one ready replica, then reboots the server. If listing apps fails, it warns and skips the app readiness checks. If console-api uses `:latest`, it may start with a newer image. Before rebooting, run `kip upgrade --check` to check for required data updates.
 5. Waits until the server reports a new boot ID. If it still reports the old ID after three minutes, the command stops with instructions for investigating the cause.
-6. Waits for Kubernetes to report the new boot ID and for every node and component from `kip status` to pass two consecutive readiness checks.
-7. Waits for each app recorded in step 4 to have a non-terminating pod that became ready after the reboot was scheduled. Ready, non-terminating pods on workers also count, even if they became ready before the server reboot. If time runs out, it lists apps still waiting for readiness or reports an error if readiness could not be checked.
+6. Waits for Kubernetes to report the new boot ID and for every node and component from `kip status` to pass two consecutive readiness checks. Then it reads the kernel log and warns at once when the kernel it booted blocks signals inside containers (see [`kip node kernel`](#kip-node-kernel)). It also warns if the node booted a different kernel than the pinned one, indicating that the pin did not take effect. If the kernel log could not be read, it reports that too.
+7. Waits for each app recorded in step 4 to have a non-terminating pod that became ready after the reboot was scheduled. Ready, non-terminating pods on workers also count, even if they became ready before the server reboot. If time runs out, it lists apps still waiting for readiness or reports an error if readiness could not be checked, and names the database services that are not ready and a kernel that blocks container signals.
 8. Runs the host checks from `kip status` over SSH, including Pending restarts. These checks also run if cluster or app readiness times out, even when the API server is unavailable.
 
 On a cluster with workers, the server reboot checks volume health before confirmation and again before rebooting, as described below. A single-server cluster skips this check.
@@ -517,7 +547,7 @@ To reboot a worker, name it by its node name or address. Without an argument, or
 4. Records fully ready Deployments, StatefulSets and DaemonSets with at least one desired pod and checks volume health again, since it can change during the confirmation and backup. Then it cordons and drains the worker. Controllers can recreate evicted pods on other nodes; DaemonSet and mirror pods stay. Evicted pods lose their `emptyDir` data. Longhorn copies volumes with their last healthy replica on the worker to another node before the drain finishes.
 5. Checks that every volume with a healthy replica still on the worker also has a healthy copy elsewhere. If draining or this check fails, the command reports the error, attempts to lift any cordon it set, and cancels the reboot. Unmanaged pods block the drain; `--drain-timeout` limits the wait.
 6. Reboots the worker and waits for its new boot ID.
-7. Lifts any cordon it set, then waits for every node and component to be ready and for the recorded workloads to be fully ready again. A worker that was already cordoned stays cordoned.
+7. Lifts any cordon it set, then waits for every node and component to be ready and for the recorded workloads to be fully ready again. A worker that was already cordoned stays cordoned. As for the server, it warns when the worker's kernel blocks signals inside containers, and a timeout names the database services that are not ready.
 8. Lists attached volumes still reporting unhealthy, without waiting for recovery. A volume requesting more replicas than the cluster has nodes allows the next reboot with a warning if every node holds a healthy copy.
 9. Runs the Pending restarts check on the worker.
 

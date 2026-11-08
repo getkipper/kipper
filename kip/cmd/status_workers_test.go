@@ -22,6 +22,7 @@ type statusHost struct {
 	pending   string
 	mounts    string
 	failOpen  string
+	kernel    string
 }
 
 func (h statusHost) Run(cmd string) (string, error) {
@@ -30,6 +31,11 @@ func (h statusHost) Run(cmd string) (string, error) {
 		return h.machineID + "\n", nil
 	case cmd == "cat /etc/os-release":
 		return "ID=debian\n", nil
+	case strings.Contains(cmd, "uname -r"):
+		if h.kernel == "" {
+			return "running=7.0.0-38-generic\ninstalled=7.0.0-38-generic\ndenials=0\n", nil
+		}
+		return h.kernel, nil
 	case strings.Contains(cmd, "needrestart -b"):
 		return h.pending, nil
 	case cmd == "cat /proc/mounts":
@@ -89,6 +95,8 @@ func TestHostChecksOnAnUnreachableSingleServer(t *testing.T) {
 
 	assert.Equal(t, "  DNS resolvers:\n"+
 		"    ⚠  not checked (could not reach the host over SSH: connection refused)\n\n"+
+		"  Kernel:\n"+
+		"    ⚠  not checked (could not reach the host over SSH)\n\n"+
 		"  Pending restarts:\n"+
 		"    ⚠  not checked (could not reach the host over SSH)\n\n"+
 		"  Volume mounts:\n"+
@@ -222,4 +230,101 @@ func TestWorkersAreCheckedWhenTheServerIsUnreachable(t *testing.T) {
 	assert.Contains(t, got, "    ⚠  203.0.113.10: not checked (could not reach the host over SSH: connection refused)\n")
 	assert.Contains(t, got, "    ✔  worker-2: nothing waiting on a restart\n")
 	assert.Contains(t, got, "    ⚠  not checked on stray")
+}
+
+func TestHostChecksWarnWhenTheKernelBlocksContainerSignals(t *testing.T) {
+	var out bytes.Buffer
+	cluster := &config.Cluster{Host: "203.0.113.10"}
+	server := serverTarget(cluster, statusHost{machineID: statusServerID,
+		kernel: "running=7.0.0-42-generic\ninstalled=7.0.0-38-generic\ninstalled=7.0.0-42-generic\ndenials=460\n"}, nil, nil)
+
+	reportHostChecks(&out, cluster, []k8s.NodeInfo{{Name: "server-1"}}, server, nil)
+
+	assert.Contains(t, out.String(), "  Kernel:\n"+
+		"    ⚠  kernel 7.0.0-42-generic blocks signals inside containers (460 AppArmor denials since boot)\n"+
+		"       Container programs can hang, and Postgres services may never start.\n"+
+		"       Pin a kernel that worked before with 'kip node kernel pin <version>', then run 'kip node reboot'. Installed: 7.0.0-38-generic, 7.0.0-42-generic\n\n")
+}
+
+// An installed pin that differs from the running kernel calls for a reboot.
+func TestHostChecksAskForTheRebootAfterAPinOnABlockingKernel(t *testing.T) {
+	var out bytes.Buffer
+	cluster := &config.Cluster{Host: "203.0.113.10"}
+	server := serverTarget(cluster, statusHost{machineID: statusServerID,
+		kernel: "running=7.0.0-42-generic\npinned=7.0.0-38-generic\ninstalled=7.0.0-38-generic\ninstalled=7.0.0-42-generic\ndenials=460\n"}, nil, nil)
+
+	reportHostChecks(&out, cluster, []k8s.NodeInfo{{Name: "server-1"}}, server, nil)
+
+	assert.Contains(t, out.String(), "       Kernel 7.0.0-38-generic is pinned. Run 'kip node reboot' to boot it. Installed: 7.0.0-38-generic, 7.0.0-42-generic\n")
+	assert.NotContains(t, out.String(), "Pin a kernel")
+}
+
+func TestHostChecksNameAPinnedKernelThatIsGone(t *testing.T) {
+	var out bytes.Buffer
+	cluster := &config.Cluster{Host: "203.0.113.10"}
+	server := serverTarget(cluster, statusHost{machineID: statusServerID,
+		kernel: "running=7.0.0-43-generic\npinned=7.0.0-38-generic\ninstalled=7.0.0-43-generic\ndenials=0\n"}, nil, nil)
+
+	reportHostChecks(&out, cluster, []k8s.NodeInfo{{Name: "server-1"}}, server, nil)
+
+	assert.Contains(t, out.String(), "    ⚠  running 7.0.0-43-generic. Pinned kernel 7.0.0-38-generic is no longer installed. Pin an installed kernel with 'kip node kernel pin <version>', or run 'kip node kernel unpin'\n")
+}
+
+func TestAPinnedKernelIsNotAPendingUpdate(t *testing.T) {
+	var out bytes.Buffer
+	cluster := &config.Cluster{Host: "203.0.113.10"}
+	server := serverTarget(cluster, statusHost{machineID: statusServerID, pending: "NEEDRESTART-KSTA: 3\n",
+		kernel: "running=7.0.0-38-generic\npinned=7.0.0-38-generic\ninstalled=7.0.0-38-generic\ninstalled=7.0.0-42-generic\ndenials=0\n"}, nil, nil)
+
+	reportHostChecks(&out, cluster, []k8s.NodeInfo{{Name: "server-1"}}, server, nil)
+
+	got := out.String()
+	assert.Contains(t, got, "  Kernel:\n    ✔  7.0.0-38-generic, pinned with 'kip node kernel pin'\n\n")
+	assert.Contains(t, got, "  Pending restarts:\n    ✔  nothing waiting on a restart\n\n",
+		"the newer kernel stays installed while the pin holds")
+}
+
+func TestAPinThatHasNotBootedYetAsksForAReboot(t *testing.T) {
+	var out bytes.Buffer
+	cluster := &config.Cluster{Host: "203.0.113.10"}
+	server := serverTarget(cluster, statusHost{machineID: statusServerID,
+		kernel: "running=7.0.0-42-generic\npinned=7.0.0-38-generic\ninstalled=7.0.0-38-generic\ninstalled=7.0.0-42-generic\ndenials=0\n"}, nil, nil)
+
+	reportHostChecks(&out, cluster, []k8s.NodeInfo{{Name: "server-1"}}, server, nil)
+
+	assert.Contains(t, out.String(), "    ⚠  running 7.0.0-42-generic. Kernel 7.0.0-38-generic is pinned. Run 'kip node reboot' to boot it\n")
+}
+
+// kernelCountingHost counts how often a host is asked for its kernel state.
+type kernelCountingHost struct {
+	statusHost
+	reads *int
+}
+
+func (h kernelCountingHost) Run(cmd string) (string, error) {
+	if strings.Contains(cmd, "uname -r") {
+		*h.reads++
+	}
+	return h.statusHost.Run(cmd)
+}
+
+func (h kernelCountingHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+// Each host's kernel log is scanned once, though both the Kernel and the
+// Pending restarts sections use the result.
+func TestHostChecksReadEachKernelOnce(t *testing.T) {
+	var out bytes.Buffer
+	cluster := &config.Cluster{Host: "203.0.113.10"}
+	records := statusRecords()[:2]
+	pinned := "running=7.0.0-38-generic\npinned=7.0.0-38-generic\ninstalled=7.0.0-38-generic\ninstalled=7.0.0-42-generic\ndenials=0\n"
+	var serverReads, workerReads int
+	server := serverTarget(cluster, kernelCountingHost{statusHost{machineID: statusServerID, pending: "NEEDRESTART-KSTA: 3\n", kernel: pinned}, &serverReads}, nil, records)
+	worker := kernelCountingHost{statusHost{machineID: statusWorker1ID, pending: "NEEDRESTART-KSTA: 3\n", kernel: pinned}, &workerReads}
+	workers := inspectWorkers(records, func(installer.NodeRecord) (installer.CommandRunner, error) { return worker, nil })
+
+	reportHostChecks(&out, cluster, []k8s.NodeInfo{{Name: "server-1", IP: "203.0.113.10"}, {Name: "worker-1"}}, server, workers)
+
+	assert.Equal(t, 1, serverReads, "server kernel reads")
+	assert.Equal(t, 1, workerReads, "worker kernel reads")
+	assert.Contains(t, out.String(), "    ✔  worker-1: nothing waiting on a restart\n", "the pin still hides the newer kernel")
 }

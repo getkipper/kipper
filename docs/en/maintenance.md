@@ -19,7 +19,9 @@ On a cluster that uses a `*.kipper.run` name, the upgrade also records that name
 
 On a single-node cluster whose pod network still runs VXLAN, a full upgrade first moves it to WireGuard, which `kip node add` needs. This is a one-time change. kip saves the k3s configuration, restarts k3s on the new backend, and waits up to five minutes each for the network and for the workloads that were ready before. If either check fails, it attempts to restore the previous configuration and restart k3s again. The restart leaves running containers alone; the Kubernetes API, kip commands, console actions and any app that calls the API are unavailable meanwhile (usually 10 to 30 seconds, longer on small or busy servers), and the whole change takes about a minute. If a check fails, kip waits up to five minutes per step and then attempts to restore the previous configuration. Review the migration prompt before using `--yes` to approve it in unattended upgrades. `--skip-system` skips migration but still recovers interrupted network changes. A server whose kernel cannot load the `wireguard` module keeps VXLAN with a warning, and the rest of the upgrade runs.
 
-Your apps and services are not directly touched, but step 3 can briefly disrupt running workloads if a chart upgrade rolls pods. For that reason kip prompts before running step 3 and refuses to proceed in non-interactive contexts without `--yes`.
+Your apps are not directly touched, but step 3 can briefly disrupt running workloads if a chart upgrade rolls pods. For that reason kip prompts before running step 3 and refuses to proceed in non-interactive contexts without `--yes`.
+
+When a new console-api changes how services run, each affected service restarts once, even with `--skip-system`, and those restarts can overlap. Adding readiness probes to Postgres, MySQL, Redis, MongoDB and RabbitMQ services is one such change. The release notes identify each change, so plan the upgrade for a time when your databases can restart. A restart usually takes seconds, but a database on a node with a host problem, such as a [kernel that blocks signals inside containers](/en/cli-reference#kip-node-kernel), can stay down until the host is fixed. After the console step, kip waits up to five minutes for the new console-api to update each service that was ready before the upgrade and for that service to be ready again, and names any that are not.
 
 ### Clusters installed before operator login existed {#clusters-installed-before-operator-login-existed}
 
@@ -64,8 +66,8 @@ kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without a
 
 | Flag | Default | Description |
 |---|---|---|
-| `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material are still updated, and Traefik is restarted when its copy of the hop certificate changes. Use this in production to avoid touching component versions. |
-| `--yes` | `false` | Confirm cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
+| `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material are still updated, and Traefik is restarted when its copy of the hop certificate changes. Services still restart when the new console-api changes how they run (see above). Use this in production to avoid touching component versions. |
+| `--yes` | `false` | Confirm recovery of an interrupted pod network change, cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
 | `--k3s` | `false` | Also upgrade k3s to the release pinned by this kip version, before the CRDs and console: the server first, then each ready worker. Stops before upgrading k3s when the server is more than one Kubernetes minor behind the pin, a node runs a newer release, or a worker would cross the limit of three minor versions behind. With `--check`, reports the planned upgrade. See [k3s upgrades](#k3s-upgrades) |
 | `--longhorn` | `false` | Also upgrade Longhorn to the release pinned by this kip version, one minor at a time. Needs external backup storage. Before each step it checks every volume, takes a Velero backup and saves Longhorn's objects, then waits for every volume to settle. Running it again resumes a step that did not finish. Cannot be combined with `--skip-system`. See [Longhorn upgrades](#longhorn-upgrades) |
 | `--check` | `false` | Run the upgrade's data checks and report what it would fix, without changing anything. Needs no SSH key. Exits non-zero when something needs a decision. See [Checking before an upgrade](#checking-before-an-upgrade) |
@@ -111,7 +113,7 @@ The last two findings are advisory. After renaming conflicting apps or services,
 
 #### What the upgrade does with the findings
 
-`kip upgrade` checks autoscaling settings before its first change and prints the proposed fixes. If there are autoscaling repairs to apply, it asks:
+After recovering any interrupted pod network change, `kip upgrade` checks autoscaling settings and prints the proposed fixes before upgrading anything. If there are autoscaling repairs to apply, it asks:
 
 ```
   Apply these fixes? [y/N]
@@ -662,6 +664,7 @@ During crash recovery, Postgres uses its write-ahead log to restore committed tr
 - [Host hardening](/en/security#host-hardening) applies firewall and service defaults.
 - [Node repair](/en/alerts#what-causes-the-session-to-drop) updates storage-related host settings.
 - [Node reboot](/en/cli-reference#kip-node-reboot) backs up and reboots the server to apply kernel or service updates, then waits for healthy nodes and components and for previously ready apps to become ready again.
+- [Kernel pin](/en/cli-reference#kip-node-kernel) makes a node boot a previously working installed kernel when a newer kernel blocks signals inside containers and prevents databases from starting.
 - [Worker rejoin](/en/cli-reference#kip-node-add): a worker that shows NotReady while `k3s-agent` logs `not authorized` can have missing or expired agent certificates. Run `kip node add <host>` again with the original join options; it rejoins the worker with a fresh token and keeps its name and data. If that fails, follow the cause it reports.
 - [Domain changes](/en/domains#custom-console-domain) move the cluster’s serving identity.
 - [Cluster removal](/en/cli-reference#kip-cluster-uninstall) removes the installation and cluster data.

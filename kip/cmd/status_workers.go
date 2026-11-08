@@ -20,6 +20,7 @@ type hostTarget struct {
 	name           string
 	where          string
 	reboot         string
+	nodeArg        string
 	firewallRepair string
 	prefix         string
 	runner         installer.CommandRunner
@@ -94,6 +95,7 @@ func inspectWorker(rec installer.NodeRecord, capture func(installer.NodeRecord) 
 		name:           rec.Name,
 		where:          rec.Name,
 		reboot:         "kip node reboot " + rec.Name,
+		nodeArg:        " --host " + rec.Host,
 		firewallRepair: fmt.Sprintf("Run 'kip node add %s' again with the original options to turn the firewall back on", rec.Host),
 	}
 	runner, err := capture(rec)

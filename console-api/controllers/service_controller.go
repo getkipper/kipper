@@ -37,9 +37,11 @@ import (
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/console-api/uisession"
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
+	"github.com/getkipper/kipper/controller/pkg/stranded"
 )
 
 // ServiceFinalizer holds a deleting Service until its cleanup has finished. The
@@ -55,6 +57,8 @@ type ServiceReconciler struct {
 	// a missing permission never starts a cache that cannot sync.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
+	// Writer is the controller Lease identity recorded on service StatefulSets.
+	Writer string
 	// Domain is the cluster's base domain (e.g. "example.com"). Used
 	// to build per-service UI hostnames as <svc>-<namespace>.<Domain>.
 	// Empty disables UI ingress reconciliation — services still come
@@ -170,9 +174,9 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reporting the dump volume: %w", err)
 	}
-	lookAgain, err := r.replaceUnschedulablePod(ctx, &svc)
+	lookAgain, err := r.replaceStuckPod(ctx, &svc)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("replacing the waiting pod: %w", err)
+		return ctrl.Result{}, fmt.Errorf("replacing the pod that is not ready: %w", err)
 	}
 
 	after := serviceRouteNameRetry(&svc)
@@ -559,6 +563,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: catalog.dataPath},
 		},
+		ReadinessProbe: readinessProbe(catalog.readiness),
 	}
 
 	// Start from the type's default profile, then honour any explicit CR
@@ -690,6 +695,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 			return errAwaitingCertificate
 		}
 		r.reportTLSRollout(ctx, svc, certHash, nil)
+		stampWriter(desired, r.Writer)
 		if err := r.Create(ctx, desired); err != nil {
 			return err
 		}
@@ -758,6 +764,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	syncPostgresTLSTemplate(&existing.Spec.Template, &desired.Spec.Template)
 	syncDumpTemplate(&existing.Spec.Template, &desired.Spec.Template, svc.Name)
 	existing.Labels = desired.Labels
+	stampWriter(&existing, r.Writer)
 	// Accepted is not adopted. A workload from before these records existed has
 	// no owner, and without one garbage collection has nothing to follow when
 	// the service goes, so an ordinary delete would leave it running against the
@@ -774,12 +781,15 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	return r.removeDumpClaim(ctx, svc)
 }
 
-// replaceUnschedulablePod deletes an owned, pending pod with no assigned node
-// when its revision differs from the StatefulSet's non-empty update revision
-// and the StatefulSet status reflects its current generation. This lets template
-// changes reach a pod whose readiness blocks a rolling update.
+// replaceStuckPod deletes an owned pod that is pending with no assigned node,
+// or running on a Ready, unfenced node with both the pod and service container
+// unready, when its revision differs from the StatefulSet's non-empty update
+// revision and the StatefulSet status reflects its current generation.
+// Terminating pods are left alone.
+// This lets template changes, including restarts, reach a hung database whose
+// readiness blocks the StatefulSet rollout.
 // It returns lookAgain on a deletion conflict so the caller can retry.
-func (r *ServiceReconciler) replaceUnschedulablePod(ctx context.Context, svc *kipperv1.Service) (lookAgain bool, err error) {
+func (r *ServiceReconciler) replaceStuckPod(ctx context.Context, svc *kipperv1.Service) (lookAgain bool, err error) {
 	// Read fresh state and wait for the controller to observe the latest spec
 	// so an outdated revision cannot trigger deletion of an up-to-date pod.
 	var sts appsv1.StatefulSet
@@ -804,11 +814,26 @@ func (r *ServiceReconciler) replaceUnschedulablePod(ctx context.Context, svc *ki
 	if owner == nil || owner.UID != sts.UID {
 		return false, nil
 	}
-	if pod.Spec.NodeName != "" || pod.Status.Phase != corev1.PodPending ||
-		pod.Labels[appsv1.ControllerRevisionHashLabelKey] == sts.Status.UpdateRevision {
+	if pod.DeletionTimestamp != nil || pod.Labels[appsv1.ControllerRevisionHashLabelKey] == sts.Status.UpdateRevision {
 		return false, nil
 	}
-	log.FromContext(ctx).Info("Replacing an unscheduled pod to apply the updated template.", "service", svc.Name, "pod", pod.Name)
+	unscheduled := pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == ""
+	// A lost node can leave the pod unready while its last container status is
+	// still ready. Require the container to be unready too, so a node outage
+	// alone cannot trigger deletion and leave the pod waiting for termination.
+	unready := pod.Status.Phase == corev1.PodRunning && !podReady(&pod) && !containerReported(&pod, svc.Name)
+	if !unscheduled && !unready {
+		return false, nil
+	}
+	if unready {
+		// Leave recovery on lost or fenced nodes to the fencing workflow,
+		// which establishes that the old database has stopped before replacement.
+		healthy, err := r.nodeReady(ctx, pod.Spec.NodeName)
+		if err != nil || !healthy {
+			return false, err
+		}
+	}
+	log.FromContext(ctx).Info("Replacing a pod that is not ready to apply the updated template.", "service", svc.Name, "pod", pod.Name)
 	// Preconditions protect a pod replaced or scheduled since the read.
 	uid, version := pod.UID, pod.ResourceVersion
 	err = r.Delete(ctx, &pod, client.Preconditions{UID: &uid, ResourceVersion: &version})
@@ -819,6 +844,29 @@ func (r *ServiceReconciler) replaceUnschedulablePod(ctx context.Context, svc *ki
 		return true, nil
 	}
 	return false, err
+}
+
+// nodeReady reports whether the named node exists, is Ready and is not fenced.
+func (r *ServiceReconciler) nodeReady(ctx context.Context, name string) (bool, error) {
+	var node corev1.Node
+	if err := r.hostReader().Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return stranded.Ready(&node), nil
+}
+
+// containerReported reports whether the kubelet last reported the named
+// container as ready.
+func containerReported(pod *corev1.Pod, name string) bool {
+	for _, c := range pod.Status.ContainerStatuses {
+		if c.Name == name {
+			return c.Ready
+		}
+	}
+	return false
 }
 
 // pendingPodRetry limits the delay before retrying a deletion conflict.
@@ -1419,6 +1467,7 @@ type serviceCatalogEntry struct {
 	envVars         func(name string) []corev1.EnvVar
 	command         []string
 	args            []string
+	readiness       *corev1.ProbeHandler
 }
 
 // serviceCatalogUI describes the browseable UI a service ships.
@@ -1432,11 +1481,15 @@ type serviceCatalogUI struct {
 }
 
 func serviceCatalog(svcType string) serviceCatalogEntry {
+	// Probes distinguish process startup from database readiness. TCP probes
+	// wait for the Postgres and MySQL images to finish socket-only initialization
+	// of an empty data directory.
 	switch svcType {
 	case "postgres":
 		return serviceCatalogEntry{
 			image: "postgres", defaultVersion: "16-alpine", port: 5432, resourceProfile: "database",
 			dataPath: "/var/lib/postgresql/data", defaultStorage: "5Gi",
+			readiness: execCheck("pg_isready", "-U", "kipper", "-h", "127.0.0.1", "-p", "5432"),
 			envVars: func(name string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "POSTGRES_USER", Value: "kipper"},
@@ -1450,6 +1503,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		return serviceCatalogEntry{
 			image: "mysql", defaultVersion: "8-oracle", port: 3306, resourceProfile: "database",
 			dataPath: "/var/lib/mysql", defaultStorage: "5Gi",
+			readiness: execCheck("mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp"),
 			envVars: func(name string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "MYSQL_USER", Value: "kipper"},
@@ -1463,12 +1517,18 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		return serviceCatalogEntry{
 			image: "redis", defaultVersion: "7-alpine", port: 6379, resourceProfile: "standard",
 			dataPath: "/data", defaultStorage: "1Gi",
-			envVars: func(_ string) []corev1.EnvVar { return nil },
+			// redis-cli exits 0 on an error reply such as LOADING, so the
+			// probe checks for the reply itself.
+			readiness: execCheck("sh", "-c", "redis-cli ping | grep -q PONG"),
+			envVars:   func(_ string) []corev1.EnvVar { return nil },
 		}
 	case "mongodb":
 		return serviceCatalogEntry{
 			image: "mongo", defaultVersion: "7", port: 27017, resourceProfile: "database",
 			dataPath: "/data/db", defaultStorage: "5Gi",
+			// The image listens only on loopback while it initializes an empty
+			// data directory, so probing the pod's address waits for initialization.
+			readiness: tcpCheck(27017),
 			envVars: func(name string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "MONGO_INITDB_ROOT_USERNAME", Value: "kipper"},
@@ -1480,6 +1540,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		return serviceCatalogEntry{
 			image: "rabbitmq", defaultVersion: "3-management-alpine", port: 5672, resourceProfile: "memory-heavy",
 			dataPath: "/var/lib/rabbitmq", defaultStorage: "1Gi",
+			readiness: tcpCheck(5672),
 			envVars: func(name string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "RABBITMQ_DEFAULT_USER", Value: "kipper"},
@@ -1541,6 +1602,45 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			envVars: func(_ string) []corev1.EnvVar { return nil },
 		}
 	}
+}
+
+// stampWriter records on obj the console-api controller that writes it. An
+// empty writer leaves obj as it is.
+func stampWriter(obj metav1.Object, writer string) {
+	if writer == "" {
+		return
+	}
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[kipperlabels.AnnoWrittenBy] = writer
+	obj.SetAnnotations(annotations)
+}
+
+// readinessProbe returns a probe that runs check, or nil for a nil check.
+// Explicit timing and threshold values keep API server defaults from causing
+// repeated template updates.
+func readinessProbe(check *corev1.ProbeHandler) *corev1.Probe {
+	if check == nil {
+		return nil
+	}
+	return &corev1.Probe{
+		ProbeHandler:        *check,
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      5,
+		SuccessThreshold:    1,
+		FailureThreshold:    3,
+	}
+}
+
+func execCheck(command ...string) *corev1.ProbeHandler {
+	return &corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: command}}
+}
+
+func tcpCheck(port int32) *corev1.ProbeHandler {
+	return &corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)}}
 }
 
 func secretEnvPassword(envName, secretName string) corev1.EnvVar {

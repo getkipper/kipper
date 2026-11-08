@@ -52,7 +52,7 @@ When a node is not Ready, or is fenced, the controller raises a critical alert o
 
 ### Faulted dump volumes
 
-When Longhorn reports the dump volume of a Postgres service with [consistent backups](/en/backups#consistent-database-dumps) as faulted, the controller raises a **dump volume faulted** warning with the command that replaces the dump volume. Consistent dumps fail while the dump volume is faulted, and the database pod cannot start again until the dump volume is replaced. The warning fires once per fault and can fire for a new fault after the dump volume has recovered or been replaced. After a console-api restart, the controller uses the 50 stored alerts to avoid repeating warnings for faults already reported.
+When Longhorn reports the dump volume of a Postgres service with [consistent backups](/en/backups#consistent-database-dumps) as faulted for 10 minutes, the controller raises a **dump volume faulted** warning with the command that replaces the dump volume. A node reboot faults Longhorn volumes until their copies are back, which usually takes a few minutes, so faults that clear sooner raise no warning. After a console-api restart, the 10-minute wait starts again from the first check because the service may still report a fault that has since cleared. Consistent dumps fail while the dump volume is faulted, and the database pod cannot start again until the dump volume is replaced. The warning fires once per fault and can fire for a new fault after the dump volume has recovered or been replaced. After a console-api restart, the controller uses the 50 stored alerts to avoid repeating warnings for faults already reported.
 
 ### Autoscaling
 

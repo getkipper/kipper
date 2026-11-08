@@ -410,11 +410,30 @@ reason:
 
 `kip service info` shows the same reason after `Pod node: not scheduled`.
 
-When a pending pod has no assigned node and its revision differs from the
+Postgres, MySQL and Redis services count as ready once the database answers
+on its port (`pg_isready`, `mysqladmin ping` or `redis-cli ping` inside the
+container), so a database that hangs while starting shows `0/1` rather than
+`1/1`. The probes connect over TCP because the Postgres and MySQL images
+answer only on a local socket while they initialize a new data directory.
+MongoDB and RabbitMQ services count as ready once their port accepts
+connections on the pod's address. The MongoDB image listens only on loopback
+while it initializes a new data directory, so the check also waits for
+initialization to finish.
+
+When a pod is pending with no assigned node, or running with both the pod and
+service container marked as not ready, and its revision differs from the
 StatefulSet's update revision, Kipper deletes it so the StatefulSet can create
-one from the updated template. This lets changes from
-`kip service update <name> --cpu <cpu>` or `kip service restart <name>` reach
-a pod whose readiness would otherwise block the update.
+one from the updated template. Kipper waits for the StatefulSet to observe its
+current configuration and skips pods already being deleted. Recovery of a running
+pod on a node that is not ready or is fenced belongs to the
+[node fencing workflow](/en/worker-nodes#when-a-node-dies), so Kipper skips those
+pods too. This lets changes from `kip service update <name> --cpu <cpu>` or
+`kip service restart <name>` reach a database that hangs or keeps crashing and
+whose readiness blocks the rollout.
+
+A database that is still starting, such as Postgres replaying its log after an
+unclean shutdown, is also unready. Restarting it then replaces the pod and starts
+the startup process over. Wait for it to become ready before restarting it.
 
 An app bound to it keeps its own status, because the app really is running. Its
 broken dependency is named under `kip app list`:

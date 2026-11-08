@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/deployer"
+	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
@@ -452,4 +454,136 @@ func TestRebootCommandUsesAUnitNameOfItsOwn(t *testing.T) {
 	second := rebootCommand(time.Unix(2000, 0))
 	assert.NotEqual(t, first, second, "a failed earlier unit must not block the next reboot")
 	assert.Contains(t, first, "systemd-run --on-active=3 --unit=kip-node-reboot-1000 systemctl reboot")
+}
+
+func TestRebootWarnsAtOnceWhenTheNewKernelBlocksContainerSignals(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true}
+	r, out := h.reboot(t)
+	r.Kernel = func(ssh.Config) (installer.KernelState, error) {
+		return installer.KernelState{Running: "7.0.0-42-generic", Installed: []string{"7.0.0-38-generic", "7.0.0-42-generic"}, SignalDenials: 460}, nil
+	}
+
+	require.NoError(t, r.run("example.com", true, true))
+
+	assert.Contains(t, out.String(), "  ✔  Every node and component is ready\n"+
+		"  ⚠  Kernel 7.0.0-42-generic blocks signals inside containers (460 AppArmor denials since boot).\n"+
+		"     Container programs can hang, and Postgres services may never start.\n"+
+		"     Pin a kernel that worked before with 'kip node kernel pin <version>', then run 'kip node reboot'.\n"+
+		"     Installed: 7.0.0-38-generic, 7.0.0-42-generic\n")
+}
+
+func TestRebootSaysWhenThePinnedKernelDidNotBoot(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true}
+	r, out := h.reboot(t)
+	r.Kernel = func(ssh.Config) (installer.KernelState, error) {
+		return installer.KernelState{Running: "7.0.0-42-generic", Pinned: "7.0.0-38-generic", Installed: []string{"7.0.0-38-generic", "7.0.0-42-generic"}}, nil
+	}
+
+	require.NoError(t, r.run("example.com", true, true))
+
+	assert.Contains(t, out.String(), "  ⚠  Kernel 7.0.0-38-generic is pinned, but the node booted 7.0.0-42-generic. Check that no other file in /etc/default/grub.d sets GRUB_DEFAULT, then run 'kip node kernel pin 7.0.0-38-generic' again.\n")
+}
+
+// Denials appear once a container signals, which can be after the first read.
+func TestRebootTimeoutReadsTheKernelAgain(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true, apps: []appRef{{Namespace: "shop", Name: "web"}}, startingReads: 1000}
+	r, _ := h.reboot(t)
+	reads := 0
+	r.Kernel = func(ssh.Config) (installer.KernelState, error) {
+		reads++
+		if reads == 1 {
+			return installer.KernelState{Running: "7.0.0-42-generic"}, nil
+		}
+		return installer.KernelState{Running: "7.0.0-42-generic", SignalDenials: 3}, nil
+	}
+
+	err := r.run("example.com", true, true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Kernel 7.0.0-42-generic blocks signals inside containers.")
+}
+
+func TestRebootSaysWhenTheKernelWasNotChecked(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true}
+	r, out := h.reboot(t)
+	r.Kernel = func(ssh.Config) (installer.KernelState, error) {
+		return installer.KernelState{}, fmt.Errorf("the kernel log could not be read")
+	}
+
+	require.NoError(t, r.run("example.com", true, true))
+
+	assert.Contains(t, out.String(), "  ⚠  Kernel not checked (the kernel log could not be read)\n")
+}
+
+func TestRebootStaysQuietAboutAKernelThatLetsContainersSignal(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true}
+	r, out := h.reboot(t)
+	r.Kernel = func(ssh.Config) (installer.KernelState, error) {
+		return installer.KernelState{Running: "7.0.0-38-generic"}, nil
+	}
+
+	require.NoError(t, r.run("example.com", true, true))
+
+	assert.NotContains(t, out.String(), "blocks signals")
+}
+
+func TestRebootNamesUnreadyServicesAndTheKernelWhenAppsStayDown(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true, apps: []appRef{{Namespace: "shop", Name: "web"}}, startingReads: 1000}
+	r, _ := h.reboot(t)
+	r.Kernel = func(ssh.Config) (installer.KernelState, error) {
+		return installer.KernelState{Running: "7.0.0-42-generic", SignalDenials: 3}, nil
+	}
+	r.NotReadyServices = func(time.Duration) ([]string, error) { return []string{"shop/db"}, nil }
+
+	err := r.run("example.com", true, true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "apps still waiting for readiness 20m0s after reboot: shop/web.")
+	assert.Contains(t, err.Error(), ". Services not ready: shop/db.")
+	assert.Contains(t, err.Error(), "Kernel 7.0.0-42-generic blocks signals inside containers. Pin a kernel that worked before with 'kip node kernel pin <version>', then run 'kip node reboot'")
+}
+
+// Following the hint after a worker reboot must change that worker, not the server.
+func TestRebootHintsTargetTheWorkerThatWasRebooted(t *testing.T) {
+	h := &rebootingHost{bootID: "old-boot", confirm: true}
+	r, out := h.reboot(t)
+	r.WorkerHost = "203.0.113.11"
+	r.Kernel = func(ssh.Config) (installer.KernelState, error) {
+		return installer.KernelState{Running: "7.0.0-42-generic", SignalDenials: 3}, nil
+	}
+
+	require.NoError(t, r.run("worker-1", true, true))
+
+	assert.Contains(t, out.String(), "'kip node kernel pin <version> --host 203.0.113.11', then run 'kip node reboot 203.0.113.11'")
+	assert.Contains(t, r.likelyCause("7.0.0-42-generic"), "'kip node kernel pin <version> --host 203.0.113.11'")
+}
+
+func TestShowKernelHintsTargetTheNodeShown(t *testing.T) {
+	var out bytes.Buffer
+	host := statusHost{kernel: "running=7.0.0-42-generic\ninstalled=7.0.0-42-generic\ndenials=4\n"}
+
+	require.NoError(t, showKernel(&out, "worker-1 (203.0.113.11)", nodeTarget(&config.Cluster{Host: "203.0.113.10"}, "203.0.113.11"), host))
+
+	assert.Contains(t, out.String(), "'kip node kernel pin <version> --host 203.0.113.11', then run 'kip node reboot 203.0.113.11'")
+
+	out.Reset()
+	require.NoError(t, showKernel(&out, "server-1 (203.0.113.10)", nodeTarget(&config.Cluster{Host: "203.0.113.10"}, "203.0.113.10"), host))
+	assert.Contains(t, out.String(), "'kip node kernel pin <version>', then run 'kip node reboot'.")
+}
+
+func TestServicesNotReady(t *testing.T) {
+	pod := func(ns, app string, ready bool) corev1.Pod {
+		status := corev1.ConditionFalse
+		if ready {
+			status = corev1.ConditionTrue
+		}
+		return corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Labels: map[string]string{"app": app}},
+			Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}}},
+		}
+	}
+
+	got := servicesNotReady([]corev1.Pod{pod("shop", "db", false), pod("shop", "cache", true), pod("blog", "db", false)})
+
+	assert.Equal(t, []string{"shop/db", "blog/db"}, got)
 }

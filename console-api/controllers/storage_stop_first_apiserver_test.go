@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -89,7 +90,7 @@ func TestAServiceReductionRunsEndToEndOnARealAPIServer(t *testing.T) {
 	claim.Spec.Resources.Requests = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}
 	objs = append(objs, claim)
 	for _, o := range objs {
-		require.NoError(t, c.Create(ctx, o), o.GetName())
+		createServed(ctx, t, c, o)
 	}
 	labels := map[string]string{"app": "db"}
 	sts := &appsv1.StatefulSet{
@@ -163,4 +164,22 @@ func TestAServiceReductionRunsEndToEndOnARealAPIServer(t *testing.T) {
 	longhorn("Volume", "pvc-1", "touched", "metadata", "annotations", "example.com/by")
 	err = sc.patchLonghorn(ctx, longhornVolumeKind, "pvc-1", stale.GetResourceVersion(), map[string]interface{}{"numberOfReplicas": 3})
 	assert.True(t, apierrors.IsConflict(err), "a stale resourceVersion is refused: %v", err)
+}
+
+// createServed creates o, retrying discovery mapping errors while newly created
+// CRDs become discoverable. It fails the test on other errors or when a retry
+// fails after the 30-second deadline.
+func createServed(ctx context.Context, t *testing.T, c crclient.Client, o crclient.Object) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := c.Create(ctx, o)
+		if err == nil {
+			return
+		}
+		if !meta.IsNoMatchError(err) || time.Now().After(deadline) {
+			require.NoError(t, err, o.GetName())
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }

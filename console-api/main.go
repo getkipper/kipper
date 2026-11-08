@@ -1088,7 +1088,8 @@ func startControllerManager(ctx context.Context, cfg *rest.Config, direct crclie
 	// its generation is bootstrapped.
 	routeNameGate := controllers.NewRouteNameGate()
 
-	lock, err := controllerLease(cfg, controllerLeaseIdentity(podName, os.Getenv("POD_UID")), controllerLeaseTiming)
+	identity := controllerLeaseIdentity(podName, os.Getenv("POD_UID"))
+	lock, err := controllerLease(cfg, identity, controllerLeaseTiming)
 	if err != nil {
 		log.Printf("controller manager failed to start: %v (CRD reconcilers disabled)", err)
 		return
@@ -1111,6 +1112,7 @@ func startControllerManager(ctx context.Context, cfg *rest.Config, direct crclie
 			Client:              mgr.GetClient(),
 			APIReader:           mgr.GetAPIReader(),
 			Scheme:              mgr.GetScheme(),
+			Writer:              identity,
 			Domain:              os.Getenv("CLUSTER_DOMAIN"),
 			ConsoleAuthCheckURL: serviceUIAuthCheckURL(),
 			ShareGrants:         shareGrantStoreFor(cfg),

@@ -53,7 +53,8 @@ is set, or resumes applying a recorded upgrade target.
 By default, system component upgrades require explicit confirmation
 because a chart upgrade can fail mid-rollout and disrupt running
 workloads. Pass --yes to skip the prompt (e.g. for automation), or
---skip-system to upgrade only the Kipper console layer.
+--skip-system to upgrade only the Kipper console layer. The new console-api
+still restarts each service whose configuration it changes.
 
 On a cluster old enough to hold shared git credentials with no
 allow-list, the upgrade prints which apps reference each one and asks
@@ -66,7 +67,8 @@ server verifies logins against are reconciled over SSH on every run,
 including with --skip-system, because they are this cluster's identity
 rather than a component version.
 
-Before it changes anything, the upgrade checks the apps' autoscaling
+After recovering any interrupted pod network change and before it
+upgrades anything, the upgrade checks the apps' autoscaling
 settings against the rules of this kip build. It lists what it would
 fix and asks for confirmation. --repair-autoscaling answers yes. A run with no terminal
 and fixes to apply stops unless that flag is given, and so does any app
@@ -109,8 +111,8 @@ Examples:
 }
 
 func init() {
-	upgradeCmd.Flags().Bool("skip-system", false, "skip system component upgrades (Traefik, Longhorn, KEDA, etc.). Still update Kipper CRDs, console and trust material (restarting Traefik when its copy of the hop certificate changes), check node records, pin single-copy volumes to the server, and recover interrupted network changes")
-	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompts before upgrading system components and before removing app routes that collide with Kipper's own routes; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
+	upgradeCmd.Flags().Bool("skip-system", false, "skip system component upgrades (Traefik, Longhorn, KEDA, etc.). Still update Kipper CRDs, console and trust material, restart Traefik when its copy of the hop certificate changes, check node records, pin single-copy volumes to the server, and recover interrupted network changes. Services still restart when the new console-api changes how they run")
+	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompts before recovering an interrupted pod network change, before upgrading system components and before removing app routes that collide with Kipper's own routes. Autoscaling fixes require separate confirmation with --repair-autoscaling when there is no terminal")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
 	upgradeCmd.Flags().String("image-tag", "", "test a commit's console, instance proxy and data mover images (full 40-character SHA); requires --skip-system; apps using the instance proxy roll out when its image changes; omit on the next upgrade to restore released images")
 	upgradeCmd.Flags().Bool("check", false, "run the upgrade's data checks and report what it would fix, without changing anything; exits non-zero when something needs a decision")
@@ -298,6 +300,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		{"kipper-authz", kipperSystemNS},
 	}
 
+	// Capture ready services before console-api restarts so the wait covers
+	// services that were healthy before the new console-api could restart them.
+	readyBefore, readyErr := newServiceWait(clientset, "").Ready(ctx)
+
 	for _, comp := range components {
 		fmt.Printf("  ...  %s\n", comp.name)
 
@@ -405,6 +411,18 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// Wait for the new console-api to serve alone: versions predating stops
 	// would restart apps that the repair marks as stopped.
 	repairAutoscaling(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion(), autoscaling, grants.rolled, grants.rolledConsoleAPI)
+
+	// Match this upgrade's rollout so a later rollout or rollback cannot count
+	// services as updated by this upgrade's console-api.
+	switch {
+	case !grants.rolledConsoleAPI:
+	case readyErr != nil:
+		fmt.Printf("\n  ⚠  Services not checked (%v)\n", readyErr)
+	case grants.rolled.hash == "":
+		fmt.Printf("\n  ⚠  Services not checked: this upgrade could not identify its console-api rollout\n")
+	default:
+		newServiceWait(clientset, grants.rolled.hash).Wait(ctx, os.Stdout, readyBefore)
+	}
 
 	// Which namespaces their projects have not recorded taking. The console
 	// publishes those records as it reconciles and the next release resolves
