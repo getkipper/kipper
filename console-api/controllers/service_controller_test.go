@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -111,6 +112,53 @@ func TestReconcileStatefulSet_DefaultsResourcesPerProfile(t *testing.T) {
 			// controller can re-default the pod through a different preset.
 			assert.Equal(t, tc.wantProfile, sts.Labels["kipper.run/resource-profile"],
 				"resource-profile label must match the catalog profile")
+		})
+	}
+}
+
+// Database pods become ready after an application check or TCP connection
+// succeeds, so a database that hangs before accepting connections stays unready.
+func TestReconcileStatefulSet_ProbesReadinessOfDatabases(t *testing.T) {
+	exec := func(command ...string) corev1.ProbeHandler {
+		return corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: command}}
+	}
+	tcp := func(port int32) corev1.ProbeHandler {
+		return corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)}}
+	}
+	cases := map[string]corev1.ProbeHandler{
+		"postgres": exec("pg_isready", "-U", "kipper", "-h", "127.0.0.1", "-p", "5432"),
+		"mysql":    exec("mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp"),
+		"redis":    exec("sh", "-c", "redis-cli ping | grep -q PONG"),
+		"mongodb":  tcp(27017),
+		"rabbitmq": tcp(5672),
+	}
+	for svcType, want := range cases {
+		t.Run(svcType, func(t *testing.T) {
+			svc := bareService(svcType)
+			r := &ServiceReconciler{
+				Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+				Scheme: testScheme(),
+			}
+			require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+			probe := statefulSetContainer(t, r).ReadinessProbe
+			require.NotNil(t, probe)
+			assert.Equal(t, want, probe.ProbeHandler)
+			assert.Equal(t, int32(5), probe.TimeoutSeconds, "a busy database must not flap on the one-second default")
+		})
+	}
+}
+
+func TestReconcileStatefulSet_LeavesOtherServicesUnprobed(t *testing.T) {
+	for _, svcType := range []string{"minio", "mailhog"} {
+		t.Run(svcType, func(t *testing.T) {
+			svc := bareService(svcType)
+			r := &ServiceReconciler{
+				Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+				Scheme: testScheme(),
+			}
+			require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+			assert.Nil(t, statefulSetContainer(t, r).ReadinessProbe)
 		})
 	}
 }

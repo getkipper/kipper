@@ -53,7 +53,8 @@ is set, or resumes applying a recorded upgrade target.
 By default, system component upgrades require explicit confirmation
 because a chart upgrade can fail mid-rollout and disrupt running
 workloads. Pass --yes to skip the prompt (e.g. for automation), or
---skip-system to upgrade only the Kipper console layer.
+--skip-system to upgrade only the Kipper console layer. The new console-api
+still restarts each service whose configuration it changes.
 
 On a cluster old enough to hold shared git credentials with no
 allow-list, the upgrade prints which apps reference each one and asks
@@ -109,7 +110,7 @@ Examples:
 }
 
 func init() {
-	upgradeCmd.Flags().Bool("skip-system", false, "skip system component upgrades (Traefik, Longhorn, KEDA, etc.). Still update Kipper CRDs, console and trust material (restarting Traefik when its copy of the hop certificate changes), check node records, pin single-copy volumes to the server, and recover interrupted network changes")
+	upgradeCmd.Flags().Bool("skip-system", false, "skip system component upgrades (Traefik, Longhorn, KEDA, etc.). Still update Kipper CRDs, console and trust material, restart Traefik when its copy of the hop certificate changes, check node records, pin single-copy volumes to the server, and recover interrupted network changes. Services still restart when the new console-api changes how they run")
 	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompts before upgrading system components and before removing app routes that collide with Kipper's own routes; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
 	upgradeCmd.Flags().String("image-tag", "", "test a commit's console, instance proxy and data mover images (full 40-character SHA); requires --skip-system; apps using the instance proxy roll out when its image changes; omit on the next upgrade to restore released images")

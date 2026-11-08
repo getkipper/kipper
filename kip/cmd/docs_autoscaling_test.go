@@ -251,8 +251,6 @@ func TestDocsExplainThatOffIgnoresTheSettingFlags(t *testing.T) {
 	assert.Contains(t, appAutoscaleCmd.Long, "--off and --remove ignore --min, --max, --cpu and --memory")
 }
 
-// --yes confirms the component upgrade only; a non-interactive autoscaling
-// repair needs --repair-autoscaling.
 func TestDocsSayYesDoesNotConfirmAutoscalingFixes(t *testing.T) {
 	flags := docSection(t, "maintenance.md", "### Flags")
 	var yesRow string
@@ -266,7 +264,8 @@ func TestDocsSayYesDoesNotConfirmAutoscalingFixes(t *testing.T) {
 
 	skill, err := os.ReadFile("../../skills/kipper/SKILL.md")
 	require.NoError(t, err)
-	assert.True(t, strings.Contains(string(skill), "`--yes` skips the component confirm only"), "SKILL.md does not say what --yes leaves out")
+	assert.True(t, strings.Contains(string(skill), "`--yes` confirms component upgrades"), "SKILL.md must explain that --yes confirms component upgrades.")
+	assert.True(t, strings.Contains(string(skill), "Autoscaling fixes require separate confirmation, so a run without a terminal also needs `--repair-autoscaling`"), "SKILL.md must explain that autoscaling fixes need separate confirmation and require --repair-autoscaling when there is no terminal.")
 }
 
 // Every badge label the capacity panel can show appears in the console docs,
