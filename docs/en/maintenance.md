@@ -67,7 +67,7 @@ kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without a
 | Flag | Default | Description |
 |---|---|---|
 | `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material are still updated, and Traefik is restarted when its copy of the hop certificate changes. Services still restart when the new console-api changes how they run (see above). Use this in production to avoid touching component versions. |
-| `--yes` | `false` | Confirm cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
+| `--yes` | `false` | Confirm recovery of an interrupted pod network change, cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
 | `--k3s` | `false` | Also upgrade k3s to the release pinned by this kip version, before the CRDs and console: the server first, then each ready worker. Stops before upgrading k3s when the server is more than one Kubernetes minor behind the pin, a node runs a newer release, or a worker would cross the limit of three minor versions behind. With `--check`, reports the planned upgrade. See [k3s upgrades](#k3s-upgrades) |
 | `--longhorn` | `false` | Also upgrade Longhorn to the release pinned by this kip version, one minor at a time. Needs external backup storage. Before each step it checks every volume, takes a Velero backup and saves Longhorn's objects, then waits for every volume to settle. Running it again resumes a step that did not finish. Cannot be combined with `--skip-system`. See [Longhorn upgrades](#longhorn-upgrades) |
 | `--check` | `false` | Run the upgrade's data checks and report what it would fix, without changing anything. Needs no SSH key. Exits non-zero when something needs a decision. See [Checking before an upgrade](#checking-before-an-upgrade) |
@@ -113,7 +113,7 @@ The last two findings are advisory. After renaming conflicting apps or services,
 
 #### What the upgrade does with the findings
 
-`kip upgrade` checks autoscaling settings before its first change and prints the proposed fixes. If there are autoscaling repairs to apply, it asks:
+After recovering any interrupted pod network change, `kip upgrade` checks autoscaling settings and prints the proposed fixes before upgrading anything. If there are autoscaling repairs to apply, it asks:
 
 ```
   Apply these fixes? [y/N]
