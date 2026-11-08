@@ -229,9 +229,9 @@ func (r *nodeReboot) run(host string, yes, skipBackup bool) error {
 				say(r.Out, "\n")
 				r.Report(r.Out, r.SSH)
 				if err != nil {
-					return fmt.Errorf("could not confirm app readiness within %s after reboot: %w. Check progress with 'kip app list'%s", r.Timeout, err, r.likelyCause(blocking))
+					return fmt.Errorf("could not confirm app readiness within %s after the reboot: %w. Check the apps with 'kip app list'%s", r.Timeout, err, r.likelyCause(blocking))
 				}
-				return fmt.Errorf("apps still waiting for readiness %s after reboot: %s. Check progress with 'kip app list'%s", r.Timeout, strings.Join(waiting, ", "), r.likelyCause(blocking))
+				return fmt.Errorf("apps have not become ready again within %s after the reboot: %s. Check them with 'kip app list'%s", r.Timeout, strings.Join(waiting, ", "), r.likelyCause(blocking))
 			}
 			r.Sleep(r.Interval)
 		}
