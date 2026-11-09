@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,8 @@ type fakeLonghorn struct {
 	imCPUSetting     string
 	imCPUOverride    int64
 	imImage          string
+	leaderless       bool
+	leaseRenewals    int
 }
 
 type fakeVolume struct {
@@ -107,6 +110,14 @@ func (f *fakeLonghorn) Run(cmd string) (string, error) {
 		return "", nil
 	case cmd == longhornWorkloadQuery:
 		return f.workloads(), nil
+	case cmd == globalManagerLeaseQuery:
+		if f.leaderless {
+			return "", errors.New(`leases.coordination.k8s.io "longhorn-global-manager" not found`)
+		}
+		f.leaseRenewals++
+		return fmt.Sprintf(`{"spec":{"holderIdentity":"longhorn-global-manager-a","renewTime":"2026-11-09T18:00:%02d.000000Z"}}`, f.leaseRenewals%60), nil
+	case cmd == globalManagerPodQuery:
+		return `{"items":[{"metadata":{"name":"longhorn-global-manager-a"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}`, nil
 	case cmd == longhornSettingQuery:
 		extra := ""
 		if f.imCPUSetting != "" {
@@ -156,7 +167,11 @@ func (f *fakeLonghorn) RunStdin(cmd string, stdin io.Reader) (string, error) {
 
 func (f *fakeLonghorn) workloads() string {
 	var items []string
-	for _, name := range longhornSettledWorkloads {
+	names := longhornSettledWorkloads
+	if runsGlobalManager(f.applied) {
+		names = append(slices.Clone(names), longhornGlobalManager)
+	}
+	for _, name := range names {
 		kind, n, _ := strings.Cut(name, "/")
 		image := "x"
 		if n == "longhorn-manager" {
@@ -296,13 +311,13 @@ func TestLonghornUpgradeHopsOneMinorAtATimeWithABackupBeforeEach(t *testing.T) {
 
 	require.NoError(t, run.upgrade.Apply(f), run.out.String())
 
-	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3"}, f.applies)
-	assert.Equal(t, []string{"before-longhorn-v1.8.2", "before-longhorn-v1.9.2", "before-longhorn-v1.10.2", "before-longhorn-v1.11.3"}, run.backups)
-	assert.Equal(t, "v1.11.3", f.running)
+	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3", "v1.12.2"}, f.applies)
+	assert.Equal(t, []string{"before-longhorn-v1.8.2", "before-longhorn-v1.9.2", "before-longhorn-v1.10.2", "before-longhorn-v1.11.3", "before-longhorn-v1.12.2"}, run.backups)
+	assert.Equal(t, "v1.12.2", f.running)
 	assert.Nil(t, f.record, "the record is removed once the last hop settled")
 	assert.Equal(t, "0", f.engineLimit, "engine upgrades are off when kip is done")
 	for _, v := range f.volumes {
-		assert.Equal(t, "v1.11.3", v.engine, v.name)
+		assert.Equal(t, "v1.12.2", v.engine, v.name)
 	}
 	assert.True(t, f.ran("get crd --request-timeout=30s -o json"), "the stored versions are checked before the 1.10 hop")
 }
@@ -342,17 +357,17 @@ func TestLonghornUpgradeRecordsTheHopBeforeApplyingIt(t *testing.T) {
 // Once the new manifest reached the cluster, the next run finishes the hop
 // under the backup taken when it started.
 func TestLonghornUpgradeResumesAnInterruptedHopWithoutANewBackup(t *testing.T) {
-	f := newFakeLonghorn("v1.10.2")
-	f.applied = "v1.11.3"
-	f.record = map[string]string{"from": "v1.10.2", "to": "v1.11.3", "backup": "before-longhorn-v1.11.3", "export": "/home/op/.kip/x"}
+	f := newFakeLonghorn("v1.11.3")
+	f.applied = "v1.12.2"
+	f.record = map[string]string{"from": "v1.11.3", "to": "v1.12.2", "backup": "before-longhorn-v1.12.2", "export": "/home/op/.kip/x"}
 	run := newUpgradeRun(t)
 
 	require.NoError(t, run.upgrade.Apply(f), run.out.String())
 
-	assert.Equal(t, []string{"v1.11.3"}, f.applies)
+	assert.Equal(t, []string{"v1.12.2"}, f.applies)
 	assert.Empty(t, run.backups, "the hop's backup was taken when it started")
 	assert.Nil(t, f.record)
-	assert.Contains(t, run.out.String(), "resuming the unfinished Longhorn step from v1.10.2 to v1.11.3")
+	assert.Contains(t, run.out.String(), "resuming the unfinished Longhorn step from v1.11.3 to v1.12.2")
 }
 
 // A later kip can carry another patch of the same minor. It finishes the
@@ -365,7 +380,7 @@ func TestLonghornUpgradeFinishesAHopAnEarlierKipStarted(t *testing.T) {
 
 	require.NoError(t, run.upgrade.Apply(f), run.out.String())
 
-	assert.Equal(t, []string{"v1.10.1", "v1.10.2", "v1.11.3"}, f.applies)
+	assert.Equal(t, []string{"v1.10.1", "v1.10.2", "v1.11.3", "v1.12.2"}, f.applies)
 	assert.Contains(t, run.out.String(), "Longhorn v1.9.2 → v1.10.1: settled")
 }
 
@@ -377,21 +392,21 @@ func TestLonghornUpgradeFinishesAnInterruptedPatchStep(t *testing.T) {
 
 	require.NoError(t, run.upgrade.Apply(f), run.out.String())
 
-	assert.Equal(t, []string{"v1.10.2", "v1.11.3"}, f.applies)
-	assert.Equal(t, []string{"before-longhorn-v1.11.3"}, run.backups)
+	assert.Equal(t, []string{"v1.10.2", "v1.11.3", "v1.12.2"}, f.applies)
+	assert.Equal(t, []string{"before-longhorn-v1.11.3", "before-longhorn-v1.12.2"}, run.backups)
 }
 
 // A hop recorded but never applied changed nothing in Longhorn, so the next
 // run starts it again with every check and a fresh backup.
 func TestLonghornUpgradeStartsAHopThatWasNeverAppliedAgain(t *testing.T) {
-	f := newFakeLonghorn("v1.10.2")
-	f.record = map[string]string{"from": "v1.10.2", "to": "v1.11.3", "backup": "before-longhorn-v1.11.3-old", "export": "/home/op/.kip/x"}
+	f := newFakeLonghorn("v1.11.3")
+	f.record = map[string]string{"from": "v1.11.3", "to": "v1.12.2", "backup": "before-longhorn-v1.12.2-old", "export": "/home/op/.kip/x"}
 	run := newUpgradeRun(t)
 
 	require.NoError(t, run.upgrade.Apply(f), run.out.String())
 
-	assert.Equal(t, []string{"v1.11.3"}, f.applies)
-	assert.Equal(t, []string{"before-longhorn-v1.11.3"}, run.backups)
+	assert.Equal(t, []string{"v1.12.2"}, f.applies)
+	assert.Equal(t, []string{"before-longhorn-v1.12.2"}, run.backups)
 	assert.Nil(t, f.record)
 	assert.Contains(t, run.out.String(), "was recorded but never applied")
 }
@@ -495,12 +510,12 @@ func TestLonghornUpgradeRefusesAHopWithoutCPUForAnotherInstanceManager(t *testin
 }
 
 func TestLonghornUpgradeHopsWhenEachNodeHasCPUForAnotherInstanceManager(t *testing.T) {
-	f := newFakeLonghorn("v1.10.2")
+	f := newFakeLonghorn("v1.11.3")
 	f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), shopDBPod("1500m")}
 	run := newUpgradeRun(t)
 
 	require.NoError(t, run.upgrade.Apply(f), run.out.String())
-	assert.Equal(t, []string{"v1.11.3"}, f.applies)
+	assert.Equal(t, []string{"v1.12.2"}, f.applies)
 }
 
 // Without a readable setting, the check estimates the new instance manager's
@@ -575,9 +590,9 @@ func TestLonghornUpgradeNeedsNoCPUForACatchUpOrAResumedHop(t *testing.T) {
 	require.NoError(t, run.upgrade.Apply(catchUp), run.out.String())
 	assert.Equal(t, longhornVersion, catchUp.volumes[1].engine)
 
-	resumed := newFakeLonghorn("v1.10.2")
-	resumed.applied = "v1.11.3"
-	resumed.record = map[string]string{"from": "v1.10.2", "to": "v1.11.3", "backup": "before-longhorn-v1.11.3", "export": "/home/op/.kip/x"}
+	resumed := newFakeLonghorn("v1.11.3")
+	resumed.applied = "v1.12.2"
+	resumed.record = map[string]string{"from": "v1.11.3", "to": "v1.12.2", "backup": "before-longhorn-v1.12.2", "export": "/home/op/.kip/x"}
 	resumed.fillServer()
 	run = newUpgradeRun(t)
 	require.NoError(t, run.upgrade.Apply(resumed), run.out.String())
@@ -714,13 +729,13 @@ func TestLonghornUpgradeLetsAByDesignDegradedVolumeKeepItsEngine(t *testing.T) {
 // Each step leaves its engine image deployed on every node. Once nothing
 // uses one, kip removes it.
 func TestLonghornUpgradeRemovesEngineImagesNothingUses(t *testing.T) {
-	f := newFakeLonghorn("v1.10.2")
+	f := newFakeLonghorn("v1.11.3")
 	f.images = map[string]bool{"v1.8.2": true}
 	run := newUpgradeRun(t)
 
 	require.NoError(t, run.upgrade.Apply(f), run.out.String())
 
-	assert.ElementsMatch(t, []string{"ei-v1.8.2", "ei-v1.10.2"}, f.deleted)
+	assert.ElementsMatch(t, []string{"ei-v1.8.2", "ei-v1.11.3"}, f.deleted)
 	assert.Contains(t, run.out.String(), "removed the unused engine image longhornio/longhorn-engine:v1.8.2")
 }
 
@@ -840,4 +855,146 @@ func TestLonghornHopRefusesToStrandAVolumeOnAnEngineTheNextReleaseRefuses(t *tes
 	assert.Contains(t, problems, "shop/data-db-0 runs the engine image "+engine173)
 	assert.Contains(t, problems, "Longhorn v1.9.2 accepts")
 	assert.Contains(t, problems, "Detach it")
+}
+
+// From 1.13 the components wait also needs an elected global manager that
+// renews its lease. Earlier releases have none, so kip never reads one there.
+func TestLonghornComponentsWaitForTheGlobalManagerFrom113(t *testing.T) {
+	f := newFakeLonghorn("v1.12.2")
+	_, err := newUpgradeRun(t).upgrade.withDefaults().waitForComponents(f, "v1.12.2")
+	require.NoError(t, err)
+	assert.False(t, f.ran("leases.coordination.k8s.io"))
+
+	f = newFakeLonghorn("v1.13.1")
+	run := newUpgradeRun(t)
+	run.upgrade.StepTimeout = time.Second
+	_, err = run.upgrade.withDefaults().waitForComponents(f, "v1.13.1")
+	require.NoError(t, err, run.out.String())
+	assert.GreaterOrEqual(t, f.leaseRenewals, 2, "the lease was seen renewed")
+
+	f = newFakeLonghorn("v1.13.1")
+	f.leaderless = true
+	_, err = newUpgradeRun(t).upgrade.withDefaults().waitForComponents(f, "v1.13.1")
+	assert.ErrorContains(t, err, "global manager")
+}
+
+// The export written once a step has settled shows the engine each volume
+// now runs, which recovery from a raw replica needs. The export before the
+// step shows the engines it replaced.
+func TestLonghornUpgradeSavesLonghornsObjectsOnceEachStepSettled(t *testing.T) {
+	for name, f := range map[string]*fakeLonghorn{
+		"hop": newFakeLonghorn("v1.11.3"),
+		"resumed hop": func() *fakeLonghorn {
+			f := newFakeLonghorn("v1.11.3")
+			f.applied = "v1.12.2"
+			f.record = map[string]string{"from": "v1.11.3", "to": "v1.12.2", "backup": "before-longhorn-v1.12.2", "export": "/home/op/.kip/x"}
+			return f
+		}(),
+		"catch-up": func() *fakeLonghorn {
+			f := newFakeLonghorn(longhornVersion)
+			f.volumes[1].engine = "v1.11.3"
+			return f
+		}(),
+	} {
+		run := newUpgradeRun(t)
+		require.NoError(t, run.upgrade.Apply(f), name+": "+run.out.String())
+		dirs, err := filepath.Glob(filepath.Join(run.upgrade.ExportDir, "*-"+longhornVersion+"-settled"))
+		require.NoError(t, err)
+		require.Len(t, dirs, 1, name)
+		for _, kind := range longhornExportKinds {
+			fi, err := os.Stat(filepath.Join(dirs[0], kind+".yaml"))
+			require.NoError(t, err, name+" "+kind)
+			assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm(), name+" "+kind)
+		}
+		assert.Contains(t, run.out.String(), "saved to "+dirs[0], name)
+	}
+}
+
+// The step counts as done only once the settled export is written, so a
+// failed write leaves the record for the next run to resume.
+func TestLonghornUpgradeKeepsTheRecordWhenTheSettledExportFails(t *testing.T) {
+	f := newFakeLonghorn("v1.11.3")
+	f.applied = "v1.12.2"
+	f.record = map[string]string{"from": "v1.11.3", "to": "v1.12.2", "backup": "before-longhorn-v1.12.2", "export": "/home/op/.kip/x"}
+	run := newUpgradeRun(t)
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+	run.upgrade.ExportDir = blocker
+
+	assert.Error(t, run.upgrade.Apply(f))
+	assert.NotNil(t, f.record)
+}
+
+// A catch-up retains its record until its settled export is saved. The next
+// run saves the export even if all engines are current, then removes the record.
+func TestLonghornUpgradeFinishesACatchUpsSettledExportOnTheNextRun(t *testing.T) {
+	f := newFakeLonghorn(longhornVersion)
+	f.record = map[string]string{"from": longhornVersion, "to": longhornVersion, "backup": "before-catch-up", "export": "/home/op/.kip/x"}
+	run := newUpgradeRun(t)
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+	run.upgrade.ExportDir = blocker
+	assert.Error(t, run.upgrade.Apply(f))
+	assert.NotNil(t, f.record, "the export is still owed")
+
+	run = newUpgradeRun(t)
+	require.NoError(t, run.upgrade.Apply(f), run.out.String())
+	dirs, err := filepath.Glob(filepath.Join(run.upgrade.ExportDir, "*-"+longhornVersion+"-settled"))
+	require.NoError(t, err)
+	assert.Len(t, dirs, 1)
+	assert.Nil(t, f.record)
+	assert.Empty(t, run.backups, "nothing lags, so no new step runs")
+}
+
+// An export that fails partway never appears under its final name, since the
+// recovery procedure picks the newest directory ending in -settled.
+func TestLonghornExportIsPublishedOnlyWhenComplete(t *testing.T) {
+	f := &failingExportRunner{failOn: "engines.longhorn.io"}
+	u := newUpgradeRun(t).upgrade.withDefaults()
+	assert.Error(t, u.exportSettled(f, longhornVersion))
+	entries, err := os.ReadDir(u.ExportDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing is left behind")
+
+	f.failOn = ""
+	require.NoError(t, u.exportSettled(f, longhornVersion))
+	dirs, err := filepath.Glob(filepath.Join(u.ExportDir, "*-"+longhornVersion+"-settled"))
+	require.NoError(t, err)
+	require.Len(t, dirs, 1)
+	for _, kind := range longhornExportKinds {
+		assert.FileExists(t, filepath.Join(dirs[0], kind+".yaml"))
+	}
+}
+
+// failingExportRunner answers export reads and fails the one naming failOn.
+type failingExportRunner struct{ failOn string }
+
+func (r *failingExportRunner) Run(cmd string) (string, error) {
+	if r.failOn != "" && strings.Contains(cmd, r.failOn) {
+		return "", errors.New("connection reset")
+	}
+	return "items: []\n", nil
+}
+
+func (r *failingExportRunner) RunStdin(cmd string, _ io.Reader) (string, error) { return r.Run(cmd) }
+
+// A second export within the same second gets its own directory and leaves
+// the first one as it was.
+func TestLonghornExportNeverReplacesAnEarlierOne(t *testing.T) {
+	u := newUpgradeRun(t).upgrade.withDefaults()
+	at := time.Date(2026, 11, 9, 17, 11, 41, 0, time.UTC)
+	u.now = func() time.Time { return at }
+	first, err := u.saveObjects(&failingExportRunner{}, longhornVersion+"-settled", "after the upgrade")
+	require.NoError(t, err)
+	marker := filepath.Join(first, "volumes.yaml")
+	require.NoError(t, os.WriteFile(marker, []byte("first\n"), 0o600))
+
+	second, err := u.saveObjects(&failingExportRunner{}, longhornVersion+"-settled", "after the upgrade")
+	require.NoError(t, err)
+	assert.NotEqual(t, first, second)
+	assert.True(t, strings.HasSuffix(second, "-"+longhornVersion+"-settled"), second)
+	assert.Greater(t, filepath.Base(second), filepath.Base(first), "the later export sorts last")
+	got, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	assert.Equal(t, "first\n", string(got))
 }

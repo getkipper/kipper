@@ -50,7 +50,7 @@ func TestLonghornVersionToApplyRefusesWhatWouldDowngradeOrGuess(t *testing.T) {
 		"manifest ahead of record":  {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.8.2", To: "v1.9.2", Backup: "b", Export: "e"}, Applied: "v1.10.2", Running: "v1.9.2", CRDs: true}, "DaemonSet shows v1.10.2"},
 		"unreadable record":         {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.8.2", To: "soon", Backup: "b", Export: "e"}, CRDs: true}, "cannot read"},
 		"record skips a minor":      {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.7.3", To: "v1.11.3", Backup: "b", Export: "e"}, Applied: "v1.7.3", CRDs: true}, "not a step kip takes"},
-		"record past the target":    {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.11.3", To: "v1.12.0", Backup: "b", Export: "e"}, Applied: "v1.11.3", CRDs: true}, "not a step kip takes"},
+		"record past the target":    {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.12.2", To: "v1.13.0", Backup: "b", Export: "e"}, Applied: "v1.12.2", CRDs: true}, "not a step kip takes"},
 		"patch step backwards":      {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.10.2", To: "v1.10.1", Backup: "b", Export: "e"}, Applied: "v1.10.2", CRDs: true}, "not a step kip takes"},
 		"record goes backwards":     {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.9.2", To: "v1.8.2", Backup: "b", Export: "e"}, Applied: "v1.9.2", CRDs: true}, "not a step kip takes"},
 		"record without a backup":   {LonghornMarkers{Record: &LonghornHopRecord{From: "v1.8.2", To: "v1.9.2"}, Applied: "v1.8.2", CRDs: true}, "without the backup and export"},

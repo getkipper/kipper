@@ -124,11 +124,11 @@ func TestLonghornReportPlansTheHopsFromTheInstalledRelease(t *testing.T) {
 
 	assert.True(t, r.Longhorn)
 	assert.Empty(t, r.Problems)
-	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3"}, r.Plan.Hops)
+	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3", "v1.12.2"}, r.Plan.Hops)
 
 	var out bytes.Buffer
 	require.NoError(t, r.print(&out, true))
-	assert.Contains(t, out.String(), "✔  Longhorn: kip upgrade --longhorn moves it v1.7.3 → v1.8.2 → v1.9.2 → v1.10.2 → v1.11.3")
+	assert.Contains(t, out.String(), "✔  Longhorn: kip upgrade --longhorn moves it v1.7.3 → v1.8.2 → v1.9.2 → v1.10.2 → v1.11.3 → v1.12.2")
 }
 
 func TestLonghornReportAtTheTarget(t *testing.T) {

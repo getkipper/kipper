@@ -10,7 +10,7 @@ import (
 // longhornVersion is the Longhorn release kip installs on new clusters and
 // moves existing clusters to with kip upgrade --longhorn. Moving it to a later
 // minor needs a longhornPath entry for every minor in between.
-const longhornVersion = "v1.11.3"
+const longhornVersion = "v1.12.2"
 
 // longhornRelease is one stop on the Longhorn upgrade path: the latest patch
 // of its minor, the oldest Kubernetes its release notes accept, and the
@@ -31,6 +31,7 @@ var longhornPath = []longhornRelease{
 	{Version: "v1.9.2", MinKubernetes: "v1.25", EngineCLIAPIMin: 8, EngineControllerAPIMin: 4},
 	{Version: "v1.10.2", MinKubernetes: "v1.25", EngineCLIAPIMin: 8, EngineControllerAPIMin: 4},
 	{Version: "v1.11.3", MinKubernetes: "v1.34", EngineCLIAPIMin: 8, EngineControllerAPIMin: 4},
+	{Version: "v1.12.2", MinKubernetes: "v1.25", EngineCLIAPIMin: 8, EngineControllerAPIMin: 4},
 }
 
 // LonghornTarget returns the Longhorn release this kip installs and upgrades to.

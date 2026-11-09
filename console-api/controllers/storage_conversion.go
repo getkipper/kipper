@@ -488,14 +488,14 @@ func lowered(v *lhVolume, target int64) bool {
 	return v.Held && v.Count == target && v.Locality == "best-effort"
 }
 
-// longhornKeepsAll returns the replicas of v, sorted by name, among which
-// Longhorn's locality cleanup picks the copy to remove when every one of them
-// is on the engine's node, so that it removes none while they stay, and where
-// they are. Status messages use it to name these copies. It follows
-// getPreferredReplicaCandidatesForDeletion in
-// longhorn-manager 1.11.3: the largest group of replicas on one disk if it has
-// two or more, else the largest on one node. Replicas of every state count,
-// as there. It returns nil when Longhorn may pick a copy elsewhere.
+// longhornKeepsAll returns a replica group blocked from locality cleanup and
+// describes its location for status messages. It follows
+// getPreferredReplicaCandidatesForDeletion in longhorn-manager 1.11.3 to
+// 1.13.0: prefer the largest groups sharing a disk if they contain at least
+// two replicas, otherwise the largest groups sharing a node. Every replica
+// state counts. If all candidate groups are on the engine's node, locality
+// cleanup preserves them and this returns one group sorted by replica name.
+// It returns nil if Longhorn can select a copy elsewhere or no group qualifies.
 func longhornKeepsAll(v *lhVolume) (stuck []lhReplica, where string) {
 	byDisk, byNode := map[string][]lhReplica{}, map[string][]lhReplica{}
 	for _, r := range v.Replicas {

@@ -7,8 +7,9 @@ import (
 )
 
 // longhornRHEL97Hold explains why kip keeps RHEL 9.7-level hosts out of
-// Longhorn storage. It lifts when kip adopts a Longhorn release whose notes
-// list the fix for issue 13606.
+// Longhorn storage. It lifts when kip adopts a Longhorn release whose engine
+// source contains the fix for issue 13606. Verify the engine source because
+// 1.12.2 lists the fix in its release notes but omits it from the engine.
 const longhornRHEL97Hold = "Longhorn issue 13606: on Rocky Linux 9.7 Longhorn's v1 volumes stop attaching, and no Longhorn release carries a fix yet. " +
 	"kip holds every host at that level or later (Rocky Linux or AlmaLinux 9.7 or a later 9.x, and any EL9 kernel from 5.14.0-611), because what triggers it is unknown"
 
