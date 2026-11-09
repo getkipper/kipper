@@ -14,8 +14,9 @@ const (
 
 	BootIDUnknown = "unknown"
 
-	FenceStopStale    = "stale"
-	FenceStopOnlyCopy = "only-copy"
+	FenceStopStale      = "stale"
+	FenceStopOnlyCopy   = "only-copy"
+	FenceStopUnverified = "unverified"
 )
 
 // fenceMethodPattern keeps the method an open set, so a later automatic
@@ -75,7 +76,7 @@ func validateFenceStop(node string, s config.FenceStop) error {
 	if !kubeNamePattern.MatchString(s.Namespace) || !kubeNamePattern.MatchString(s.StatefulSet) {
 		return fmt.Errorf("node record %s lists an invalid stopped service %q/%q", node, s.Namespace, s.StatefulSet)
 	}
-	if s.Reason != FenceStopStale && s.Reason != FenceStopOnlyCopy {
+	if s.Reason != FenceStopStale && s.Reason != FenceStopOnlyCopy && s.Reason != FenceStopUnverified {
 		return fmt.Errorf("node record %s has invalid stop reason %q for %s/%s", node, s.Reason, s.Namespace, s.StatefulSet)
 	}
 	return nil

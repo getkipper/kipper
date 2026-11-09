@@ -66,6 +66,14 @@ func TestFenceRecordRefusesUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestFenceRecordAcceptsEveryStopReason(t *testing.T) {
+	for _, reason := range []string{FenceStopStale, FenceStopOnlyCopy, FenceStopUnverified} {
+		f := validFence()
+		f.Stopped = []config.FenceStop{{Namespace: "shop", StatefulSet: "db", Reason: reason}}
+		assert.NoError(t, validateNodeRecord(fencedWorker(NodeStateFenced, f)), reason)
+	}
+}
+
 func TestFenceRecordRoundTripsThroughTheConfigMap(t *testing.T) {
 	f := validFence()
 	f.Stopped = []config.FenceStop{{Namespace: "shop", StatefulSet: "db", Reason: FenceStopStale,

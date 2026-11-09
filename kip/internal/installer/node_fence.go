@@ -24,11 +24,14 @@ import (
 const FenceStopAnnotation = stranded.FenceStopAnnotation
 
 // FenceStopMark is the value of FenceStopAnnotation.
+// MayLackWrites preserves uncertainty about writes made through Node even when
+// Reason identifies a more severe problem with another volume.
 type FenceStopMark struct {
-	Node     string   `json:"node"`
-	Replicas int32    `json:"replicas"`
-	Reason   string   `json:"reason"`
-	Volumes  []string `json:"volumes"`
+	Node          string   `json:"node"`
+	Replicas      int32    `json:"replicas"`
+	Reason        string   `json:"reason"`
+	Volumes       []string `json:"volumes"`
+	MayLackWrites bool     `json:"mayLackWrites,omitempty"`
 }
 
 // FenceNode captures a Node's readiness, taint and boot ID. NotReadyFor uses
@@ -185,11 +188,13 @@ func (s FenceService) Label() string { return fmt.Sprintf("%s (%s)", s.StatefulS
 // Unmanaged lists pods with such claims that lack the
 // app.kubernetes.io/managed-by=kipper label, using namespace/name entries.
 // These pods are listed for warnings because fencing checks only Kipper workloads.
+// Copies counts each Longhorn volume's copies across all nodes.
 type FenceView struct {
 	Services  []FenceService
 	Holders   []PodHolder
 	Unmanaged []string
 	Replicas  []stranded.Replica
+	Copies    map[string]VolumeCopies
 }
 
 // Kinds of PodHolder that kip knows how to stop.
@@ -305,6 +310,9 @@ func ReadFenceView(master CommandRunner, node string) (FenceView, error) {
 	}
 	view, err := buildFenceView(node, stranded.Find(node, pods.Items, claims.Items, pvs.Items), pods.Items, sets.Items, replicas)
 	if err != nil {
+		return FenceView{}, err
+	}
+	if view.Copies, err = ReadVolumeCopies(master, replicas); err != nil {
 		return FenceView{}, err
 	}
 	for _, s := range stranded.FindUnmanaged(node, pods.Items, claims.Items, pvs.Items) {
@@ -467,14 +475,88 @@ func appendUnique(list []string, v string) []string {
 	return append(list, v)
 }
 
-// Freshness describes whether every volume has a current replica on another
-// node. Reason is empty when Current is true, only-copy if any volume has no
-// replica elsewhere, or stale otherwise. Stamps identify the replicas and
+// Freshness describes whether every volume has a replica that JudgeFreshness
+// accepts as current. Reason is empty when Current is true. Otherwise it is the worst of
+// only-copy (a volume has no replica elsewhere), stale (no replica elsewhere is
+// current) and unverified (a current replica elsewhere may still lack writes
+// made through the node). MayLackWrites is true when any volume is
+// unverified, whatever Reason says. Stamps identify the replicas and
 // timestamps to which consent applies.
 type Freshness struct {
-	Current bool
-	Reason  string
-	Stamps  []config.ReplicaStamp
+	Current       bool
+	Reason        string
+	MayLackWrites bool
+	Stamps        []config.ReplicaStamp
+}
+
+// KeepDoubt changes a current result to unverified if mark records potentially
+// missing writes, either in MayLackWrites or as an unverified Reason. This
+// preserves the need for consent even if health markers or copy counts later
+// change. It returns f unchanged for other results or a nil mark.
+func (f Freshness) KeepDoubt(mark *FenceStopMark) Freshness {
+	if f.Current && mark != nil && (mark.MayLackWrites || mark.Reason == FenceStopUnverified) {
+		f.Current, f.Reason, f.MayLackWrites = false, FenceStopUnverified, true
+	}
+	return f
+}
+
+// NeedsConsent reports whether a service stopped for reason may start on the
+// copies elsewhere once the operator accepts that they may lack writes.
+func NeedsConsent(reason string) bool {
+	return reason == FenceStopStale || reason == FenceStopUnverified
+}
+
+// VolumeCopies pairs Longhorn's spec.numberOfReplicas (Wanted) with the number
+// of replicas assigned to nodes (Placed), regardless of node state.
+type VolumeCopies struct {
+	Wanted int
+	Placed int
+}
+
+// single requires both the requested and placed counts to be one, since a
+// removed replica or an unfinished count change can make either count misleading.
+func (c VolumeCopies) single() bool { return c.Wanted == 1 && c.Placed == 1 }
+
+// CountVolumeCopies pairs each volume's wanted replica count with the number of
+// its replicas placed on a node. Pass every replica, unfiltered by node state.
+// Volumes absent from wanted are left out.
+func CountVolumeCopies(wanted map[string]int, replicas []stranded.Replica) map[string]VolumeCopies {
+	out := make(map[string]VolumeCopies, len(wanted))
+	for v, n := range wanted {
+		out[v] = VolumeCopies{Wanted: n}
+	}
+	for _, r := range replicas {
+		if c, ok := out[r.Volume]; ok && r.Node != "" {
+			c.Placed++
+			out[r.Volume] = c
+		}
+	}
+	return out
+}
+
+// ReadVolumeCopies reads every Longhorn volume's requested replica count and
+// counts its placed replicas in replicas, which must be unfiltered by node state.
+// It returns an empty map when no volumes exist and an error if the query or
+// JSON decoding fails. Replicas of volumes absent from the query are omitted.
+func ReadVolumeCopies(master CommandRunner, replicas []stranded.Replica) (map[string]VolumeCopies, error) {
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				NumberOfReplicas int `json:"numberOfReplicas"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := kubectlJSON(master, "Longhorn volumes", "kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o json", &list); err != nil {
+		return nil, err
+	}
+	wanted := map[string]int{}
+	for _, v := range list.Items {
+		wanted[v.Metadata.Name] = v.Spec.NumberOfReplicas
+	}
+	return CountVolumeCopies(wanted, replicas), nil
 }
 
 // AvailableReplicas returns replicas in input order from nodes recorded as
@@ -501,10 +583,22 @@ func AvailableReplicas(replicas []stranded.Replica, records []NodeRecord, keep s
 }
 
 // JudgeFreshness checks each volume for a current replica on a node other
-// than node. Pass an empty node to consider all placed replicas. An empty
-// volume list is current. Stamps are sorted by volume and replica name.
-func JudgeFreshness(node string, volumes []string, replicas []stranded.Replica) Freshness {
+// than node, the node the service wrote through. A current replica there
+// counts only when copies shows the volume has that one copy alone, because
+// Longhorn's markers cannot show writes the engine on node made after it lost
+// contact with the cluster. Pass an empty node to consider all placed replicas
+// without the single-copy requirement. When node is non-empty, missing copy
+// counts make an otherwise current volume unverified. An empty volume list is
+// current. Stamps are sorted by volume and replica name.
+func JudgeFreshness(node string, volumes []string, replicas []stranded.Replica, copies map[string]VolumeCopies) Freshness {
 	f := Freshness{Current: true}
+	rank := map[string]int{FenceStopUnverified: 1, FenceStopStale: 2, FenceStopOnlyCopy: 3}
+	worse := func(reason string) {
+		f.Current = false
+		if rank[reason] > rank[f.Reason] {
+			f.Reason = reason
+		}
+	}
 	for _, v := range volumes {
 		elsewhere := stranded.Elsewhere(v, node, replicas)
 		current := false
@@ -515,12 +609,12 @@ func JudgeFreshness(node string, volumes []string, replicas []stranded.Replica) 
 		}
 		switch {
 		case len(elsewhere) == 0:
-			f.Current, f.Reason = false, FenceStopOnlyCopy
+			worse(FenceStopOnlyCopy)
 		case !current:
-			f.Current = false
-			if f.Reason == "" {
-				f.Reason = FenceStopStale
-			}
+			worse(FenceStopStale)
+		case node != "" && !copies[v].single():
+			worse(FenceStopUnverified)
+			f.MayLackWrites = true
 		}
 	}
 	if len(volumes) == 0 {
@@ -608,6 +702,40 @@ func StopForFence(master CommandRunner, ns, name string, mark FenceStopMark) err
 		"spec":     map[string]any{"replicas": 0},
 	}); err != nil {
 		return fmt.Errorf("stopping %s/%s: %w", ns, name, err)
+	}
+	return nil
+}
+
+// MarkMayLackWrites records potentially missing writes in a StatefulSet's fence
+// stop mark with a patch guarded by the resource version. It preserves every
+// other field and leaves a mark with MayLackWrites already set unchanged.
+// Read, decoding and patch failures return errors. A missing mark also returns
+// an error because the uncertainty about writes would otherwise be lost.
+func MarkMayLackWrites(master CommandRunner, ns, name string) error {
+	head, err := readStatefulSet(master, ns, name)
+	if err != nil {
+		return err
+	}
+	raw, stopped := head.Metadata.Annotations[FenceStopAnnotation]
+	if !stopped {
+		return fmt.Errorf("%s/%s lost its %s annotation while kip was checking its copies. Run the command again", ns, name, FenceStopAnnotation)
+	}
+	var mark map[string]any
+	if err := json.Unmarshal([]byte(raw), &mark); err != nil {
+		return fmt.Errorf("reading the %s annotation of %s/%s: %w", FenceStopAnnotation, ns, name, err)
+	}
+	if doubt, _ := mark["mayLackWrites"].(bool); doubt {
+		return nil
+	}
+	mark["mayLackWrites"] = true
+	value, err := json.Marshal(mark)
+	if err != nil {
+		return err
+	}
+	if err := patchStatefulSet(master, ns, name, map[string]any{
+		"metadata": map[string]any{"resourceVersion": head.Metadata.ResourceVersion, "annotations": map[string]string{FenceStopAnnotation: string(value)}},
+	}); err != nil {
+		return fmt.Errorf("recording on %s/%s that its copies may lack writes: %w", ns, name, err)
 	}
 	return nil
 }

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/term"
 
+	"github.com/getkipper/kipper/controller/pkg/stranded"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
@@ -51,6 +53,8 @@ type nodeRejoin struct {
 	Poll        time.Duration
 	BootWait    time.Duration
 	ReadyWait   time.Duration
+	// consented records consent before release, keyed by namespace/StatefulSet name.
+	consented map[string]bool
 }
 
 // fenceBlocksJoin refuses a join of a worker whose fence is unfinished, or
@@ -123,6 +127,9 @@ func (r *nodeRejoin) run(rec installer.NodeRecord) error {
 		return fmt.Errorf("the cluster has no node %s any more. Remove it with 'kip node remove %s --force', then add the host again", rec.Name, rec.Name)
 	}
 	if node.OutOfService {
+		if err := r.consentBeforeRelease(rec); err != nil {
+			return err
+		}
 		if err := r.stopAndReboot(&rec); err != nil {
 			return err
 		}
@@ -251,10 +258,70 @@ func (r *nodeRejoin) release(rec installer.NodeRecord) error {
 	return r.Cluster.RemoveTaint(rec.Name)
 }
 
-// startServices starts each service the fence stopped when every one of its
-// volumes has a current copy on this worker or a node that is not fenced, or
-// after consent to older copies. The others stay stopped for
-// 'kip service start'.
+// rejoinRefusal signals that the operator must consent before the rejoin can
+// proceed. nodeAddRetry returns it without advice for a partially completed join.
+type rejoinRefusal struct{ msg string }
+
+func (e *rejoinRefusal) Error() string { return e.msg }
+
+// consentBeforeRelease requires consent when a stopped service has a replica
+// on another node, regardless of replica health or node availability. Rejoining
+// lets Longhorn rebuild from that replica and lose writes unique to the worker
+// before startServices can ask. It checks the latest replicas because a copy may
+// have returned since fencing. Consent comes from AcceptStale or an interactive
+// prompt and also covers restarting these services. Without consent, it returns
+// a *rejoinRefusal, leaving the fence in place.
+func (r *nodeRejoin) consentBeforeRelease(rec installer.NodeRecord) error {
+	view, err := r.Cluster.View(rec.Name)
+	if err != nil {
+		return err
+	}
+	var doubt []installer.FenceService
+	for _, svc := range view.Services {
+		if svc.Stop == nil {
+			continue
+		}
+		competing := false
+		for _, v := range svc.Volumes {
+			competing = competing || len(stranded.Elsewhere(v, rec.Name, view.Replicas)) > 0
+		}
+		if competing {
+			doubt = append(doubt, svc)
+		}
+	}
+	if len(doubt) == 0 {
+		return nil
+	}
+	labels := make([]string, len(doubt))
+	for i, svc := range doubt {
+		labels[i] = svc.Label()
+	}
+	names := strings.Join(labels, ", ")
+	ok := r.AcceptStale
+	if ok {
+		say(r.Out, "  ⚠  --accept-stale-data gives up any write that exists only on %s for %s\n", rec.Name, names)
+	}
+	if !ok && r.Interactive {
+		say(r.Out, "\n  The copies of %s on other nodes are older or may lack writes made through %s. Once %s rejoins, Longhorn can rebuild the copies on %s from them, so any write that exists only on %s is lost. kip cannot preserve those writes yet\n", names, rec.Name, rec.Name, rec.Name, rec.Name)
+		if ok, err = r.Confirm(fmt.Sprintf("  Rejoin %s and give up those writes? [y/N] ", rec.Name)); err != nil {
+			return err
+		}
+	}
+	if !ok {
+		return &rejoinRefusal{fmt.Sprintf("%s stays fenced: rejoining it lets Longhorn rebuild its copies of %s from the other nodes' copies, which are older or may lack writes made through %s. kip cannot preserve those writes yet. To rejoin it and give them up, run 'kip node add %s --accept-stale-data'", rec.Name, names, rec.Name, rec.Host)}
+	}
+	r.consented = map[string]bool{}
+	for _, svc := range doubt {
+		r.consented[svc.Namespace+"/"+svc.StatefulSet] = true
+	}
+	return nil
+}
+
+// startServices restarts services stopped by the fence when every volume has
+// a current copy on this worker or another available node and the stop mark
+// records no potentially missing writes. Older or unverified copies require
+// consent, including consent given before releasing the fence. Other services
+// stay stopped for 'kip service start'.
 func (r *nodeRejoin) startServices(rec installer.NodeRecord) error {
 	view, err := r.Cluster.View(rec.Name)
 	if err != nil {
@@ -269,14 +336,18 @@ func (r *nodeRejoin) startServices(rec installer.NodeRecord) error {
 		if svc.Stop == nil {
 			continue
 		}
-		fresh := installer.JudgeFreshness("", svc.Volumes, replicas)
+		fresh := installer.JudgeFreshness("", svc.Volumes, replicas, nil).KeepDoubt(svc.Stop)
 		ok := fresh.Current
-		if !ok && fresh.Reason == installer.FenceStopStale {
-			if ok = r.AcceptStale; !ok && r.Interactive {
+		if !ok && installer.NeedsConsent(fresh.Reason) {
+			if ok = r.AcceptStale || r.consented[svc.Namespace+"/"+svc.StatefulSet]; !ok && r.Interactive {
 				if ok, err = askStaleConsent(r.Out, r.Confirm, rec.Name, svc, fresh); err != nil {
 					return err
 				}
 			}
+		}
+		if !ok && fresh.Reason == installer.FenceStopUnverified {
+			say(r.Out, "  ⚠  %s stays stopped: it wrote through %s, and kip cannot tell whether its copies hold every write %s made after it lost contact with the cluster. Start it with 'kip service start %s --accept-stale-data', which gives up any write that is missing\n", svc.Label(), rec.Name, rec.Name, svc.StatefulSet)
+			continue
 		}
 		if !ok {
 			say(r.Out, "  ⚠  %s stays stopped: no copy of its data is known to be current. Start it with 'kip service start %s' once Longhorn has rebuilt a copy, or accept the older data with --accept-stale-data\n", svc.Label(), svc.StatefulSet)

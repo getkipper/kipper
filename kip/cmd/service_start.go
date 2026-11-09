@@ -21,16 +21,20 @@ var serviceStartCmd = &cobra.Command{
 	Use:   "start <name>",
 	Short: "Start a service that kip node fence left stopped",
 	Long: `Starts a service that 'kip node fence' stopped because no other node held a
-current copy of its data.
+copy of its data known to hold every write.
 
-The service starts at once when every one of its volumes now has a current
-copy on a node that is not fenced. When its copies may be older than the
-data on the fenced worker, kip shows each copy with its timestamps and asks
-whether to start on them anyway. Writes made since those copies were current
-are lost. Use --accept-stale-data to answer yes without a prompt. A service
-whose only copy is on the fenced worker cannot start until the worker rejoins
-with 'kip node add'. Once its volumes no longer exist, kip says how to restore
-it from a backup and, on a terminal, offers to clear the fence's stop mark.`,
+The service starts at once when every volume has a single current copy on
+an available node and its stop mark records no potentially missing writes.
+After the fenced worker rejoins, each volume needs a current copy on an
+available node, regardless of copy count. Any uncertainty about writes
+recorded in the stop mark still requires consent. When its copies may be
+older than the data on the fenced worker, or may lack writes made through
+it, kip shows each copy with its timestamps and asks whether to start on
+them anyway. Writes missing from those copies are lost. Use
+--accept-stale-data to answer yes without a prompt. A service whose only
+copy is on the fenced worker cannot start until the worker rejoins with
+'kip node add'. Once its volumes no longer exist, kip says how to restore it
+from a backup and, on a terminal, offers to clear the fence's stop mark.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runServiceStart,
@@ -39,7 +43,7 @@ it from a backup and, on a terminal, offers to clear the fence's stop mark.`,
 func init() {
 	serviceStartCmd.Flags().String("project", "default", "project namespace")
 	serviceStartCmd.Flags().String("environment", "", "target environment")
-	serviceStartCmd.Flags().Bool("accept-stale-data", false, "start the service even when no copy of its data is known to be current")
+	serviceStartCmd.Flags().Bool("accept-stale-data", false, "start the service on copies that may lack writes made on the fenced worker")
 	serviceStartCmd.Flags().String("ssh-key", "", "path to SSH private key")
 	serviceCmd.AddCommand(serviceStartCmd)
 }
@@ -51,6 +55,8 @@ type serviceStarter interface {
 	MoveMark(ns, name string) (string, error)
 	Records() ([]installer.NodeRecord, error)
 	Replicas() ([]stranded.Replica, error)
+	VolumeCopies(replicas []stranded.Replica) (map[string]installer.VolumeCopies, error)
+	MarkMayLackWrites(ns, name string) error
 	LonghornVolumes() ([]string, error)
 	Start(ns, name string) error
 	ClearStop(ns, name string) error
@@ -145,8 +151,19 @@ func (s fenceStoppedStart) run(ns, name string) error {
 	if err != nil {
 		return err
 	}
+	copies, err := s.Server.VolumeCopies(replicas)
+	if err != nil {
+		return err
+	}
 	replicas = installer.AvailableReplicas(replicas, records, "")
-	fresh := installer.JudgeFreshness(exclude, mark.Volumes, replicas)
+	fresh := installer.JudgeFreshness(exclude, mark.Volumes, replicas, copies)
+	if fresh.MayLackWrites && !mark.MayLackWrites {
+		if err := s.Server.MarkMayLackWrites(ns, name); err != nil {
+			return err
+		}
+		mark.MayLackWrites = true
+	}
+	fresh = fresh.KeepDoubt(mark)
 	switch {
 	case fresh.Current:
 	case fresh.Reason == installer.FenceStopOnlyCopy && recorded:
@@ -154,6 +171,8 @@ func (s fenceStoppedStart) run(ns, name string) error {
 	case fresh.Reason == installer.FenceStopOnlyCopy:
 		return fmt.Errorf("the only copy of the data of %s was on %s, which has been removed. To bring the service back, %s", svc.Label(), mark.Node, restoreAdvice(ns, name))
 	case s.AcceptStale:
+	case !s.Interactive && fresh.Reason == installer.FenceStopUnverified:
+		return fmt.Errorf("%s wrote through %s, and kip cannot tell whether its copies hold every write %s made after it lost contact with the cluster. Pass --accept-stale-data to start it on them", svc.Label(), mark.Node, mark.Node)
 	case !s.Interactive:
 		return fmt.Errorf("no copy of the data of %s is known to be current. Pass --accept-stale-data to start it on the older copies", svc.Label())
 	default:
@@ -257,6 +276,10 @@ func (s startServer) MoveMark(ns, name string) (string, error) {
 }
 
 func (s startServer) Replicas() ([]stranded.Replica, error) { return installer.ReadReplicas(s.master) }
+
+func (s startServer) VolumeCopies(replicas []stranded.Replica) (map[string]installer.VolumeCopies, error) {
+	return installer.ReadVolumeCopies(s.master, replicas)
+}
 
 func (s startServer) LonghornVolumes() ([]string, error) {
 	return installer.ReadLonghornVolumes(s.master)
