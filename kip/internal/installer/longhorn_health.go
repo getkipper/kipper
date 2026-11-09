@@ -582,7 +582,7 @@ func (s longhornSnapshot) volumeProblems() []string {
 	problems := s.carryProblems()
 	for _, v := range s.Volumes {
 		if n := s.unfailedReplicas(v.Name); n > v.Replicas {
-			problems = append(problems, fmt.Sprintf("%s has %d replicas for a count of %d. An unfinished copy count change can leave extra replicas. Run 'kip status' to see why the change stopped", v.label(), n, v.Replicas))
+			problems = append(problems, fmt.Sprintf("%s has %d replicas for a count of %d. Longhorn removes %s once an engine upgrade or a copy count change finishes. If %s, run 'kip status' to see what prevents Longhorn from removing %s", v.label(), n, v.Replicas, plural(n-v.Replicas, "the extra one", "the extra ones"), plural(n-v.Replicas, "it stays", "they stay"), plural(n-v.Replicas, "it", "them")))
 		}
 		switch {
 		case v.DataEngine == "v2" || v.Robustness == "faulted":
