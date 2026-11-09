@@ -81,6 +81,48 @@ func TestComponentsMustHaveMovedToTheVersion(t *testing.T) {
 	assert.Contains(t, strings.Join(s.componentProblems("v1.8.2"), "\n"), "node worker-1 has no running instance manager")
 }
 
+// settledAt returns settledSnapshot with every component moved to version.
+func settledAt(version string) longhornSnapshot {
+	s := settledSnapshot()
+	engine := "longhornio/longhorn-engine:" + version
+	s.Settings["current-longhorn-version"] = version
+	s.Settings["default-engine-image"] = engine
+	s.EngineImages = []lhEngineImage{{Image: engine, State: "deployed", CLIAPI: 11, Controller: 6}}
+	m := s.Workloads["DaemonSet/longhorn-manager"]
+	m.Manager = "longhornio/longhorn-manager:" + version
+	s.Workloads["DaemonSet/longhorn-manager"] = m
+	return s
+}
+
+// From Longhorn 1.13 a Deployment runs the controllers that keep each volume's
+// Kubernetes status current, and it must run at least one replica.
+func TestComponentsFrom113IncludeTheGlobalManager(t *testing.T) {
+	assert.Empty(t, settledAt("v1.12.2").componentProblems("v1.12.2"), "1.12 has no global manager")
+
+	s := settledAt("v1.13.1")
+	assert.Contains(t, strings.Join(s.componentProblems("v1.13.1"), "\n"), "longhorn-global-manager does not exist yet")
+
+	s.Workloads[longhornGlobalManager] = lhWorkload{Kind: "Deployment", Desired: 3}
+	assert.Contains(t, strings.Join(s.componentProblems("v1.13.1"), "\n"), "longhorn-global-manager has not finished rolling out")
+
+	s.Workloads[longhornGlobalManager] = lhWorkload{Kind: "Deployment", Ready: true}
+	assert.Contains(t, strings.Join(s.componentProblems("v1.13.1"), "\n"), "longhorn-global-manager runs no replicas")
+
+	s.Workloads[longhornGlobalManager] = lhWorkload{Kind: "Deployment", Ready: true, Desired: 3}
+	assert.Empty(t, s.componentProblems("v1.13.1"))
+}
+
+func TestParseLonghornWorkloadsReadsTheDesiredCount(t *testing.T) {
+	var s longhornSnapshot
+	require.NoError(t, parseLonghornWorkloads([]byte(`{"items":[
+		{"kind":"Deployment","metadata":{"name":"longhorn-global-manager","generation":2},"spec":{"replicas":0},"status":{"observedGeneration":2}},
+		{"kind":"Deployment","metadata":{"name":"csi-attacher","generation":1},"spec":{"replicas":3},"status":{"observedGeneration":1,"replicas":3,"updatedReplicas":3,"availableReplicas":3}},
+		{"kind":"DaemonSet","metadata":{"name":"longhorn-csi-plugin","generation":1},"status":{"observedGeneration":1,"desiredNumberScheduled":2,"updatedNumberScheduled":2,"numberAvailable":2}}]}`), &s))
+	assert.Equal(t, lhWorkload{Kind: "Deployment", Ready: true}, s.Workloads["Deployment/longhorn-global-manager"])
+	assert.Equal(t, int32(3), s.Workloads["Deployment/csi-attacher"].Desired)
+	assert.Equal(t, int32(2), s.Workloads["DaemonSet/longhorn-csi-plugin"].Desired)
+}
+
 // A node out of service, as a fence leaves it, has no instance manager by
 // design. The problem says why and how to bring it back or let it go.
 func TestComponentProblemsNameANodeOutOfService(t *testing.T) {
@@ -117,7 +159,7 @@ func TestVolumeProblems(t *testing.T) {
 		"replica failed":     {func(s *longhornSnapshot) { s.Replicas[1].FailedAt = "t" }, "only 1 of its 2 replicas"},
 		"engine not running": {func(s *longhornSnapshot) { s.Engines[0].State = "starting" }, "its engine is starting"},
 		"more replicas than its count": {func(s *longhornSnapshot) { s.Volumes[0].Replicas = 1 },
-			"shop/data-db-0 has 2 replicas for a count of 1"},
+			"shop/data-db-0 has 2 replicas for a count of 1. Longhorn removes the extra one once an engine upgrade or a copy count change finishes. If it stays, run 'kip status' to see what prevents Longhorn from removing it"},
 		"two engines": {func(s *longhornSnapshot) {
 			s.Engines = append(s.Engines, lhEngine{Volume: "pvc-db", State: "running", Modes: map[string]string{"pvc-db-r-1": "RW", "pvc-db-r-2": "RW"}})
 		}, "has 2 engines"},
@@ -203,7 +245,7 @@ func TestParseLonghornWorkloads(t *testing.T) {
 ]}`
 	var s longhornSnapshot
 	require.NoError(t, parseLonghornWorkloads([]byte(data), &s))
-	assert.Equal(t, lhWorkload{Kind: "DaemonSet", Ready: true, Manager: "longhornio/longhorn-manager:v1.8.2"}, s.Workloads["DaemonSet/longhorn-manager"])
+	assert.Equal(t, lhWorkload{Kind: "DaemonSet", Ready: true, Desired: 2, Manager: "longhornio/longhorn-manager:v1.8.2"}, s.Workloads["DaemonSet/longhorn-manager"])
 	assert.False(t, s.Workloads["Deployment/csi-attacher"].Ready, "an old pod is still there")
 }
 

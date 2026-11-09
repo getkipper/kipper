@@ -2,13 +2,16 @@ package installer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,12 +26,15 @@ const LonghornUpgradeCommand = "kip upgrade --longhorn"
 // release this kip installs. Before every step it checks the cluster, takes a
 // Velero backup through Backup, which must return only once the backup has
 // completed, and writes Longhorn's volumes, replicas, engines and settings
-// under ExportDir. A recorded version change resumes with its existing backup
-// and export once either version marker shows the target. Prepared steps and
-// engine catch-ups restart with fresh checks, a backup and an export.
-// Backup must be non-nil when a new
-// step is needed and return the completed backup name. ExportDir must be
-// set for new steps.
+// under ExportDir. Once a step has settled it writes them again, so the
+// newest export shows the engine every volume runs. A recorded version change
+// resumes with its existing backup and export once either version marker
+// shows the target. Prepared steps and engine catch-ups with lagging volumes
+// restart with fresh checks, a backup and an export. A completed catch-up
+// with a pending export resumes by saving that export.
+//
+// Backup must be non-nil when a new step is needed and return the completed
+// backup name. ExportDir must be set for every step, including a resumed one.
 // StepTimeout bounds each settling wait and Interval sets the polling interval.
 // Zero values use 45 minutes and 10 seconds, respectively.
 // A nil Out discards progress messages.
@@ -55,18 +61,7 @@ const (
 // It disables automatic engine upgrades before host preparation and attempts
 // to disable them again on return. Cleanup failures are reported through Out.
 func (u LonghornUpgrade) Apply(client CommandRunner) error {
-	if u.StepTimeout == 0 {
-		u.StepTimeout = defaultLonghornStepTimeout
-	}
-	if u.Interval == 0 {
-		u.Interval = defaultLonghornInterval
-	}
-	if u.now == nil {
-		u.now = time.Now
-	}
-	if u.Out == nil {
-		u.Out = io.Discard
-	}
+	u = u.withDefaults()
 	// An interrupted run can leave engine upgrades enabled. Disable them before
 	// host preparation to keep upgrades within the backed-up engine phase,
 	// and attempt cleanup on every return.
@@ -94,6 +89,9 @@ func (u LonghornUpgrade) Apply(client CommandRunner) error {
 	}
 
 	steps := 0
+	// Keep the catch-up record until the settled export is saved, because
+	// version markers cannot show whether a catch-up reached that point.
+	catchUp := false
 	if rec := markers.Record; rec != nil {
 		switch {
 		case markers.HopStarted():
@@ -107,22 +105,28 @@ func (u LonghornUpgrade) Apply(client CommandRunner) error {
 			if err := u.settle(client, rec.To); err != nil {
 				return err
 			}
+			if err := u.exportSettled(client, rec.To); err != nil {
+				return err
+			}
 			say(u.Out, "       Longhorn %s → %s: settled\n", rec.From, rec.To)
 			steps++
 		case rec.From == rec.To:
-			say(u.Out, "       the engine catch-up on Longhorn %s did not finish. Starting it again with its checks and a new backup\n", rec.From)
+			say(u.Out, "       the engine catch-up on Longhorn %s did not finish. Checking which volumes still need it\n", rec.From)
+			catchUp = true
 		default:
 			say(u.Out, "       the Longhorn step from %s to %s was recorded but never applied. Starting it again with its checks and a new backup\n", rec.From, rec.To)
 		}
-		if err := deleteLonghornHopRecord(client); err != nil {
-			return err
+		if !catchUp {
+			if err := deleteLonghornHopRecord(client); err != nil {
+				return err
+			}
 		}
 	}
 	plan, err := PlanLonghornUpgrade(version)
 	if err != nil {
 		return err
 	}
-	snap, err := u.waitFor(client, version, "Longhorn "+version+"'s components", func(s longhornSnapshot) []string { return s.componentProblems(version) })
+	snap, err := u.waitForComponents(client, version)
 	if err != nil {
 		return err
 	}
@@ -132,6 +136,13 @@ func (u LonghornUpgrade) Apply(client CommandRunner) error {
 			return err
 		}
 		steps++
+	} else if catchUp {
+		if err := u.exportSettled(client, version); err != nil {
+			return err
+		}
+		if err := deleteLonghornHopRecord(client); err != nil {
+			return err
+		}
 	}
 	current := version
 	for _, hop := range plan.Hops {
@@ -146,18 +157,28 @@ func (u LonghornUpgrade) Apply(client CommandRunner) error {
 			return err
 		}
 		u.pruneEngineImages(client)
+		u.reportKeptEngines(client, current)
 		return nil
 	}
-	if snap, err := readLonghornSnapshot(client); err == nil {
-		if _, exempt := snap.engineLag(); len(exempt) > 0 {
-			say(u.Out, "       %s %s more replicas than the cluster has nodes, so %s older engine, which Longhorn %s still supports. Longhorn moves a volume onto the current engine once it has a node for every replica: add nodes with kip node add, then run %s again\n",
-				strings.Join(exempt, ", "), plural(len(exempt), "wants", "want"), plural(len(exempt), "it keeps its", "they keep their"), current, LonghornUpgradeCommand)
-		}
-	}
+	u.reportKeptEngines(client, current)
 	if _, err := tagServerStorage(client, serverStorageWait); err != nil {
 		return err
 	}
 	return ensureStorageClasses(client, serverStorageWait)
+}
+
+// reportKeptEngines names volumes that retain an older engine because they
+// request more replicas than there are nodes. Read failures are ignored because
+// this advisory report follows successful engine upgrade or installation work.
+func (u LonghornUpgrade) reportKeptEngines(client CommandRunner, version string) {
+	snap, err := readLonghornSnapshot(client)
+	if err != nil {
+		return
+	}
+	if _, exempt := snap.engineLag(); len(exempt) > 0 {
+		sort.Strings(exempt)
+		say(u.Out, "       %s\n", LonghornKeptEngineNotice(exempt, version))
+	}
 }
 
 // step moves Longhorn from one release to the next, or, with from equal to
@@ -195,6 +216,9 @@ func (u LonghornUpgrade) step(client CommandRunner, from, to string) error {
 		return fmt.Errorf("%w. Run %s again to finish it", err, LonghornUpgradeCommand)
 	}
 	if err := u.settle(client, to); err != nil {
+		return err
+	}
+	if err := u.exportSettled(client, to); err != nil {
 		return err
 	}
 	if err := deleteLonghornHopRecord(client); err != nil {
@@ -404,7 +428,7 @@ func hopRequirementProblems(client CommandRunner, snap longhornSnapshot, to stri
 // settle waits for Longhorn's components at version, lets Longhorn move every
 // volume it can onto version's engine, and waits for the whole cluster to settle.
 func (u LonghornUpgrade) settle(client CommandRunner, version string) error {
-	if _, err := u.waitFor(client, version, "Longhorn "+version+"'s components", func(s longhornSnapshot) []string { return s.componentProblems(version) }); err != nil {
+	if _, err := u.waitForComponents(client, version); err != nil {
 		return err
 	}
 	if err := u.setEngineUpgrades(client, "1"); err != nil {
@@ -452,6 +476,32 @@ func (u LonghornUpgrade) pruneEngineImages(client CommandRunner) {
 		}
 		say(u.Out, "       removed the unused engine image %s\n", ei.Image)
 	}
+}
+
+func (u LonghornUpgrade) withDefaults() LonghornUpgrade {
+	if u.StepTimeout == 0 {
+		u.StepTimeout = defaultLonghornStepTimeout
+	}
+	if u.Interval == 0 {
+		u.Interval = defaultLonghornInterval
+	}
+	if u.now == nil {
+		u.now = time.Now
+	}
+	if u.Out == nil {
+		u.Out = io.Discard
+	}
+	return u
+}
+
+// waitForComponents waits for Longhorn's components at version and, from
+// Longhorn 1.13 on, for an elected global manager that renews its lease.
+func (u LonghornUpgrade) waitForComponents(client CommandRunner, version string) (longhornSnapshot, error) {
+	snap, err := u.waitFor(client, version, "Longhorn "+version+"'s components", func(s longhornSnapshot) []string { return s.componentProblems(version) })
+	if err != nil || !runsGlobalManager(version) {
+		return snap, err
+	}
+	return snap, u.waitForGlobalLeader(client)
 }
 
 // waitFor polls the snapshot until problems returns none or StepTimeout passes.
@@ -521,31 +571,79 @@ func (u LonghornUpgrade) stopEngineUpgrades(client CommandRunner) {
 	}
 }
 
-// longhornExportKinds are the Longhorn objects saved before every step.
+// longhornExportKinds are the Longhorn objects saved before every step and
+// once it has settled.
 var longhornExportKinds = []string{"volumes", "replicas", "engines", "settings"}
 
-// export saves Longhorn's objects as YAML under ExportDir and returns the
-// timestamped directory. New directories and files are owner-only. A retry
-// within the same second can reuse the directory and overwrite its files.
+// export saves Longhorn's objects before the step from one release to
+// another and returns the directory.
 func (u LonghornUpgrade) export(client CommandRunner, from, to string) (string, error) {
+	return u.saveObjects(client, fmt.Sprintf("%s-to-%s", from, to), "before the upgrade")
+}
+
+// exportSettled saves Longhorn's objects once a step to version has settled.
+// With automatic engine upgrades disabled, the export records each volume's
+// engine until the next upgrade or manual change. The saved default engine
+// image identifies the engine used for volumes created afterward under those
+// settings.
+func (u LonghornUpgrade) exportSettled(client CommandRunner, version string) error {
+	dir, err := u.saveObjects(client, version+"-settled", "after the upgrade")
+	if err != nil {
+		return err
+	}
+	say(u.Out, "       Longhorn %s: volumes, replicas, engines and settings saved to %s\n", version, dir)
+	return nil
+}
+
+// saveObjects saves Longhorn's objects as YAML under ExportDir in a directory
+// named by the UTC time and suffix, and returns it. The files are written to
+// a staging directory that takes the final name only once all of them are
+// there, so a failed export leaves no directory under that name. Exports
+// with the same timestamp and suffix get numbered names that sort in creation
+// order, up to 99 exports. Existing exports are preserved. New directories and
+// files are owner-only.
+func (u LonghornUpgrade) saveObjects(client CommandRunner, suffix, when string) (string, error) {
 	if u.ExportDir == "" {
-		return "", fmt.Errorf("no directory to save Longhorn's objects to before the upgrade")
+		return "", fmt.Errorf("no directory to save Longhorn's objects to %s", when)
 	}
-	dir := filepath.Join(u.ExportDir, fmt.Sprintf("%s-%s-to-%s", u.now().UTC().Format("20060102T150405Z"), from, to))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("creating %s: %w", dir, err)
+	if err := os.MkdirAll(u.ExportDir, 0o700); err != nil {
+		return "", fmt.Errorf("creating %s: %w", u.ExportDir, err)
 	}
+	staging, err := os.MkdirTemp(u.ExportDir, ".partial-")
+	if err != nil {
+		return "", fmt.Errorf("creating a directory in %s: %w", u.ExportDir, err)
+	}
+	// Recovery selects completed export names, so it skips any staging
+	// directory left behind if cleanup fails.
+	defer func() { _ = os.RemoveAll(staging) }()
 	for _, kind := range longhornExportKinds {
 		out, err := client.Run(fmt.Sprintf("kubectl -n longhorn-system get %s.longhorn.io --request-timeout=60s -o yaml", kind))
 		if err != nil {
-			return "", fmt.Errorf("saving Longhorn's %s before the upgrade: %w", kind, err)
+			return "", fmt.Errorf("saving Longhorn's %s %s: %w", kind, when, err)
 		}
-		path := filepath.Join(dir, kind+".yaml")
+		path := filepath.Join(staging, kind+".yaml")
 		if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
 			return "", fmt.Errorf("writing %s: %w", path, err)
 		}
 	}
-	return dir, nil
+	stamp := u.now().UTC().Format("20060102T150405Z")
+	for n := 1; n < 100; n++ {
+		name := stamp
+		if n > 1 {
+			name = fmt.Sprintf("%s.%02d", stamp, n)
+		}
+		dir := filepath.Join(u.ExportDir, name+"-"+suffix)
+		if _, err := os.Lstat(dir); err == nil {
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("saving %s: %w", dir, err)
+		}
+		if err := os.Rename(staging, dir); err != nil {
+			return "", fmt.Errorf("saving %s: %w", dir, err)
+		}
+		return dir, nil
+	}
+	return "", fmt.Errorf("saving Longhorn's objects %s: %s already holds 99 exports from %s", when, u.ExportDir, stamp)
 }
 
 // hopProblems lists what keeps a manifest hop to release from starting: a

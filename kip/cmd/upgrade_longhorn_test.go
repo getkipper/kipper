@@ -35,6 +35,7 @@ type longhornCluster struct {
 	record                   map[string]string
 	nodes                    []*corev1.Node
 	objects                  []runtime.Object
+	longhornObjects          []runtime.Object
 	resolve                  map[string][]string
 }
 
@@ -80,7 +81,7 @@ func (c longhornCluster) clients() (*fake.Clientset, *dynamicfake.FakeDynamicCli
 	if c.record != nil {
 		kube = append(kube, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: installer.NodeRecordsNamespace, Name: installer.LonghornHopRecordName}, Data: c.record})
 	}
-	var dyn []runtime.Object
+	dyn := append([]runtime.Object{}, c.longhornObjects...)
 	if c.bsl != "-" {
 		dyn = append(dyn, backupLocation(c.bsl))
 	}
@@ -124,11 +125,11 @@ func TestLonghornReportPlansTheHopsFromTheInstalledRelease(t *testing.T) {
 
 	assert.True(t, r.Longhorn)
 	assert.Empty(t, r.Problems)
-	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3"}, r.Plan.Hops)
+	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3", "v1.12.2"}, r.Plan.Hops)
 
 	var out bytes.Buffer
 	require.NoError(t, r.print(&out, true))
-	assert.Contains(t, out.String(), "✔  Longhorn: kip upgrade --longhorn moves it v1.7.3 → v1.8.2 → v1.9.2 → v1.10.2 → v1.11.3")
+	assert.Contains(t, out.String(), "✔  Longhorn: kip upgrade --longhorn moves it v1.7.3 → v1.8.2 → v1.9.2 → v1.10.2 → v1.11.3 → v1.12.2")
 }
 
 func TestLonghornReportAtTheTarget(t *testing.T) {
@@ -509,5 +510,129 @@ func TestInClusterEndpoint(t *testing.T) {
 		"://":                                        true,
 	} {
 		assert.Equal(t, want, inClusterEndpoint(url, map[string]bool{"velero": true}), url)
+	}
+}
+
+func longhornObject(kind, name string, spec, status map[string]interface{}) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "longhorn.io/v1beta2", "kind": kind,
+		"metadata": map[string]interface{}{"name": name, "namespace": "longhorn-system"},
+		"spec":     spec, "status": status,
+	}}
+}
+
+// lhVolumeObjects returns a volume on engine with one running replica on
+// server-1 that its engine uses read-write.
+func lhVolumeObjects(name, claim, engine, robustness string, replicas int64) []runtime.Object {
+	image := "longhornio/longhorn-engine:" + engine
+	return []runtime.Object{
+		longhornObject("Volume", name, map[string]interface{}{"numberOfReplicas": replicas, "image": image, "dataEngine": "v1"},
+			map[string]interface{}{"state": "attached", "robustness": robustness, "currentImage": image,
+				"kubernetesStatus": map[string]interface{}{"namespace": "shop-staging", "pvcName": claim}}),
+		longhornObject("Replica", name+"-r", map[string]interface{}{"volumeName": name, "nodeID": "server-1", "healthyAt": "t"},
+			map[string]interface{}{"currentState": "running"}),
+		longhornObject("Engine", name+"-e", map[string]interface{}{"volumeName": name},
+			map[string]interface{}{"currentState": "running", "replicaModeMap": map[string]interface{}{name + "-r": "RW"}}),
+	}
+}
+
+// --check names volumes still on an older engine, which lack the fixes of
+// the release Longhorn runs, and says which of them a run moves.
+func TestLonghornReportNamesVolumesOnAnOlderEngine(t *testing.T) {
+	c := defaultLonghornCluster()
+	c.version = installer.LonghornTarget()
+	c.useResolver(t)
+	objects := []runtime.Object{
+		longhornObject("Setting", "default-engine-image", nil, nil),
+		longhornObject("Node", "server-1", map[string]interface{}{}, nil),
+	}
+	_ = unstructured.SetNestedField(objects[0].(*unstructured.Unstructured).Object, "longhornio/longhorn-engine:"+c.version, "value")
+	objects = append(objects, lhVolumeObjects("pvc-pg", "data-pg-0", "v1.11.3", "healthy", 1)...)
+	objects = append(objects, lhVolumeObjects("pvc-vol", "vol", "v1.11.3", "degraded", 3)...)
+	objects = append(objects, lhVolumeObjects("pvc-my", "data-my-0", c.version, "healthy", 1)...)
+	c.longhornObjects = objects
+	cs, dyn := c.clients()
+
+	r, err := readLonghornReport(context.Background(), cs, dyn, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shop-staging/data-pg-0"}, r.Lagging)
+	assert.Equal(t, []string{"shop-staging/vol"}, r.Kept)
+	var out bytes.Buffer
+	require.NoError(t, r.print(&out, true), "volumes a run moves are no reason to refuse it")
+	assert.Contains(t, out.String(), "runs "+c.version)
+	assert.Contains(t, out.String(), "⚠  Longhorn: shop-staging/data-pg-0 is not on Longhorn "+c.version+"'s engine yet, so it lacks the fixes of that release. kip upgrade --longhorn moves it first, with a backup")
+	assert.Contains(t, out.String(), "⚠  Longhorn: shop-staging/vol wants more replicas than the cluster has nodes, so it keeps its older engine")
+}
+
+// A resumed step takes no new backup, so neither --check nor the consent
+// text may say otherwise, and --check must not call the release running yet.
+func TestLonghornResumedStepIsDescribedAsItRuns(t *testing.T) {
+	c := defaultLonghornCluster()
+	c.version = "v1.11.3"
+	c.record = map[string]string{"from": "v1.11.3", "to": installer.LonghornTarget(), "backup": "before-longhorn-x", "export": "/home/op/.kip/x"}
+	r := c.report(t, true, false)
+	r.Started = true
+	r.Plan = installer.LonghornPlan{From: installer.LonghornTarget()}
+
+	var out bytes.Buffer
+	require.NoError(t, r.print(&out, true))
+	assert.Contains(t, out.String(), "did not finish, and kip upgrade --longhorn resumes it")
+	assert.NotContains(t, out.String(), "runs "+installer.LonghornTarget())
+
+	out.Reset()
+	longhornStep{Report: r, Upgrade: &installer.LonghornUpgrade{ExportDir: "x"}}.preview(&out)
+	assert.Contains(t, out.String(), "Longhorn finishes its step from v1.11.3 to "+installer.LonghornTarget()+", which stopped partway")
+	assert.Contains(t, out.String(), "backup before-longhorn-x")
+	assert.NotContains(t, out.String(), "one minor at a time")
+
+	// A catch-up whose record survived has nothing to hop either.
+	r.Started = false
+	r.Record = &installer.LonghornHopRecord{From: installer.LonghornTarget(), To: installer.LonghornTarget()}
+	out.Reset()
+	longhornStep{Report: r, Upgrade: &installer.LonghornUpgrade{ExportDir: "x"}}.preview(&out)
+	assert.Contains(t, out.String(), "already runs")
+	assert.NotContains(t, out.String(), "one minor at a time")
+}
+
+// A catch-up whose record survived takes a backup only when a volume still
+// needs to move, and the report names the volumes either way.
+func TestLonghornCatchUpRecordIsDescribedByWhatIsLeft(t *testing.T) {
+	setting := longhornObject("Setting", "default-engine-image", nil, nil)
+	_ = unstructured.SetNestedField(setting.Object, "longhornio/longhorn-engine:"+installer.LonghornTarget(), "value")
+	base := []runtime.Object{setting, longhornObject("Node", "server-1", map[string]interface{}{}, nil)}
+	base = append(base, lhVolumeObjects("pvc-vol", "vol", "v1.11.3", "degraded", 3)...)
+
+	for name, tc := range map[string]struct {
+		lagging     []runtime.Object
+		wantPreview []string
+		notPreview  []string
+	}{
+		"nothing to move": {nil,
+			[]string{"no volume is eligible for an engine upgrade, so kip takes no backup", "saves Longhorn's objects to complete the interrupted engine catch-up", "shop-staging/vol keeps its older engine"},
+			[]string{"after kip takes a Velero backup"}},
+		"a volume to move": {lhVolumeObjects("pvc-pg", "data-pg-0", "v1.11.3", "healthy", 1),
+			[]string{"moves shop-staging/data-pg-0 onto the current engine after kip takes a Velero backup", "shop-staging/vol keeps its older engine"},
+			[]string{"no volume is eligible for an engine upgrade"}},
+	} {
+		c := defaultLonghornCluster()
+		c.version = installer.LonghornTarget()
+		c.record = map[string]string{"from": c.version, "to": c.version, "backup": "before-catch-up", "export": "/home/op/.kip/x"}
+		c.longhornObjects = append(append([]runtime.Object{}, base...), tc.lagging...)
+		r := c.report(t, true, false)
+		assert.Equal(t, []string{"shop-staging/vol"}, r.Kept, name)
+
+		var out bytes.Buffer
+		require.NoError(t, r.print(&out, true), name)
+		assert.Contains(t, out.String(), "the engine catch-up on "+c.version+" did not finish, and kip upgrade --longhorn finishes it", name)
+		assert.NotContains(t, out.String(), "starts it again with a new backup", name)
+
+		out.Reset()
+		longhornStep{Report: r, Upgrade: &installer.LonghornUpgrade{ExportDir: "x"}}.preview(&out)
+		for _, want := range tc.wantPreview {
+			assert.Contains(t, out.String(), want, name)
+		}
+		for _, not := range tc.notPreview {
+			assert.NotContains(t, out.String(), not, name)
+		}
 	}
 }

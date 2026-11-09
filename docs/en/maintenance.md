@@ -332,9 +332,20 @@ kip upgrade --longhorn         # runs them
 
 Longhorn upgrades one minor version at a time and cannot be downgraded. kip
 moves it to the latest patch of each minor in turn: from 1.7.3, the release
-earlier kip versions installed, that is 1.8.2, 1.9.2, 1.10.2 and then 1.11.3.
-Longhorn 1.11 needs Kubernetes 1.34 or later on every node, so run
+earlier kip versions installed, that is 1.8.2, 1.9.2, 1.10.2, 1.11.3 and then
+1.12.2. Longhorn 1.11 needs Kubernetes 1.34 or later on every node, so run
 `kip upgrade --k3s` first on an older cluster, or pass both flags.
+
+Clusters with more than one node should upgrade to 1.12.2 soon. It fixes
+two Longhorn bugs that can cause data loss while a volume replica is rebuilt:
+writes smaller than 4 KiB during the rebuild (Longhorn issue 14447), and fast
+replica rebuilding (issue 14096, which kip already avoids by disabling fast
+rebuilding). A volume gets these fixes once it runs the 1.12.2 engine. A volume
+that keeps an older engine, as described below, gets them when a later
+`kip upgrade --longhorn` upgrades its engine. `kip upgrade --check` names every
+volume still using a different engine and shows which volumes the next
+`--longhorn` run upgrades and which need more nodes. If an upgrade step was
+interrupted, the check reports that step instead.
 
 `--longhorn` needs backups on external storage. Backups in in-cluster MinIO live
 on the Longhorn storage the upgrade changes, so kip refuses to start on such a
@@ -445,7 +456,7 @@ volume's last copy off the node, data locality and replica auto-balance off, RWX
 fast failover off, pods on a node that goes down left in place, and volume
 creation with degraded availability allowed. The last five are Longhorn's
 current defaults, explicitly set so that upgrades
-through four consecutive releases preserve them. Longhorn's own production
+through consecutive releases preserve them. Longhorn's own production
 guidance turns degraded creation off. Kipper keeps it on so that a single-node cluster can create volumes
 that want more copies than it has nodes. kip never sets a Longhorn backup target,
 because backups go through Velero. The same step marks Longhorn's stock
@@ -455,9 +466,10 @@ default applies to claims that omit the class: those created by the charts
 that `kip ai` installs, and Loki's on clusters installed by v0.38.0 or earlier.
 
 **Rocky Linux and AlmaLinux 9.7.** On Rocky Linux 9.7, Longhorn's volumes stop
-attaching (Longhorn issue 13606), and no Longhorn release carries a fix yet. kip
-holds every host at that level or later: Rocky Linux or AlmaLinux 9.7 or a later
-9.x, and any EL9 kernel from 5.14.0-611, which also covers CentOS Stream 9. A new
+attaching (Longhorn issue 13606), and no Longhorn release carries a fix yet.
+Longhorn 1.12.2's release notes list one, but its engine does not contain the
+change, so kip keeps the hold on that release too. kip holds every host at
+that level or later: Rocky Linux or AlmaLinux 9.7 or a later 9.x, and any EL9 kernel from 5.14.0-611, which also covers CentOS Stream 9. A new
 Longhorn cluster and `kip node add` refuse such a host, `kip upgrade` warns about
 each such node, `--longhorn` refuses to start, and `kip doctor` warns. Keep
 Longhorn nodes on 9.6 or earlier, or use version 10, until a Kipper release
@@ -592,13 +604,17 @@ mkdir -p /mnt/work
 cp -a --sparse=always /mnt/spare/<replica directory name> /mnt/work/
 ```
 
-**4. Start the engine on the working copy.** It needs a Linux host with `open-iscsi`, like any Longhorn node, and the engine image of the Longhorn release that wrote the copy, which is v1.11.3 for this kip. The surviving worker already has `open-iscsi`. Its k3s cannot run containers without the server, so install Docker there and start the engine with it. Docker pulls the engine image from Docker Hub, about 170 MB. `<volume name>` is the replica directory's name without its eight-character suffix, and `<size in bytes>` is the `Size` from step 1:
+**4. Start the engine on the working copy.** It needs a Linux host with `open-iscsi`, like any Longhorn node, and the engine image that wrote the copy.
+
+kip records that image after each `kip upgrade --longhorn` step settles by saving Longhorn's objects on the machine running the command, under `~/.kip/longhorn-upgrades/<cluster>/`. In the newest directory whose name ends in `-settled`, `volumes.yaml` records each volume's engine in `status.currentImage`. Volumes created afterward use the `default-engine-image` in that directory's `settings.yaml`, provided those settings remain unchanged. These records reflect the completed upgrade, so account for any later manual engine changes or interrupted upgrades. On a cluster that has never run `--longhorn` or had its engine images changed manually, every volume runs the engine from the Longhorn release kip installed. `kip upgrade --check` shows that release on its Longhorn line. Copy the export directory, or note the release, somewhere that survives the server, along with your other recovery material. Below, `<engine image>` is that image, such as `longhornio/longhorn-engine:v1.12.2`.
+
+The surviving worker already has `open-iscsi`. Its k3s cannot run containers without the server, so install Docker there and use it to start the engine. Docker pulls the engine image from Docker Hub, about 170 MB. `<volume name>` is the replica directory's name without its eight-character suffix, and `<size in bytes>` is the `Size` from step 1:
 
 ```bash
 apt-get install -y docker.io
 docker run -d --name longhorn-recovery --privileged \
   -v /dev:/host/dev -v /proc:/host/proc -v <working copy directory>:/volume \
-  longhornio/longhorn-engine:v1.11.3 launch-simple-longhorn <volume name> <size in bytes>
+  <engine image> launch-simple-longhorn <volume name> <size in bytes>
 timeout 120 sh -c 'until [ -b /dev/longhorn/<volume name> ]; do sleep 1; done'
 ```
 
@@ -617,7 +633,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: engine
-      image: longhornio/longhorn-engine:v1.11.3
+      image: <engine image>
       securityContext:
         privileged: true
       command: ["launch-simple-longhorn"]

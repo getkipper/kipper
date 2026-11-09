@@ -3,6 +3,7 @@ package installer
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -24,6 +25,7 @@ type longhornSnapshot struct {
 type lhWorkload struct {
 	Kind    string
 	Ready   bool
+	Desired int32
 	Manager string
 }
 
@@ -164,12 +166,14 @@ func parseLonghornWorkloads(data []byte, snap *longhornSnapshot) error {
 		current := st.ObservedGeneration >= it.Metadata.Generation
 		switch it.Kind {
 		case "DaemonSet":
+			w.Desired = st.DesiredNumberScheduled
 			w.Ready = current && st.DesiredNumberScheduled > 0 && st.UpdatedNumberScheduled == st.DesiredNumberScheduled && st.NumberAvailable == st.DesiredNumberScheduled
 		case "Deployment":
 			want := int32(1)
 			if it.Spec.Replicas != nil {
 				want = *it.Spec.Replicas
 			}
+			w.Desired = want
 			w.Ready = current && st.UpdatedReplicas == want && st.Replicas == want && st.AvailableReplicas >= want
 		default:
 			continue
@@ -409,18 +413,33 @@ var longhornSettledWorkloads = []string{
 	"Deployment/csi-snapshotter",
 }
 
+// longhornGlobalManager identifies the deployment introduced in Longhorn 1.13.
+// Its elected leader runs the controllers that update volumes' Kubernetes status.
+const longhornGlobalManager = "Deployment/longhorn-global-manager"
+
+func runsGlobalManager(version string) bool {
+	v, err := parseLonghornVersion(version)
+	return err == nil && v.major == 1 && v.minor >= 13
+}
+
 // componentProblems lists what keeps Longhorn's own components from having
-// settled at version: the manager, CSI, the default engine image and an
-// instance manager on every Longhorn node.
+// settled at version: the manager, CSI, the global manager from 1.13 on, the
+// default engine image and an instance manager on every Longhorn node.
 func (s longhornSnapshot) componentProblems(version string) []string {
 	var problems []string
-	for _, name := range longhornSettledWorkloads {
+	workloads := longhornSettledWorkloads
+	if runsGlobalManager(version) {
+		workloads = append(slices.Clone(workloads), longhornGlobalManager)
+	}
+	for _, name := range workloads {
 		w, ok := s.Workloads[name]
 		switch {
 		case !ok:
 			problems = append(problems, fmt.Sprintf("%s does not exist yet", name))
 		case !w.Ready:
 			problems = append(problems, fmt.Sprintf("%s has not finished rolling out", name))
+		case name == longhornGlobalManager && w.Desired == 0:
+			problems = append(problems, fmt.Sprintf("%s runs no replicas", name))
 		}
 	}
 	if m := s.Workloads["DaemonSet/longhorn-manager"].Manager; m != "" && !strings.HasSuffix(m, "longhorn-manager:"+version) {
@@ -563,7 +582,7 @@ func (s longhornSnapshot) volumeProblems() []string {
 	problems := s.carryProblems()
 	for _, v := range s.Volumes {
 		if n := s.unfailedReplicas(v.Name); n > v.Replicas {
-			problems = append(problems, fmt.Sprintf("%s has %d replicas for a count of %d. An unfinished copy count change can leave extra replicas. Run 'kip status' to see why the change stopped", v.label(), n, v.Replicas))
+			problems = append(problems, fmt.Sprintf("%s has %d replicas for a count of %d. Longhorn removes %s once an engine upgrade or a copy count change finishes. If %s, run 'kip status' to see what prevents Longhorn from removing %s", v.label(), n, v.Replicas, plural(n-v.Replicas, "the extra one", "the extra ones"), plural(n-v.Replicas, "it stays", "they stay"), plural(n-v.Replicas, "it", "them")))
 		}
 		switch {
 		case v.DataEngine == "v2" || v.Robustness == "faulted":
@@ -688,6 +707,41 @@ func (s longhornSnapshot) engineLag() (lagging, exempt []string) {
 		}
 	}
 	return lagging, exempt
+}
+
+// LonghornEngineLag parses Kubernetes JSON lists of Longhorn settings and objects
+// and groups volumes whose desired or current image differs from the default
+// engine. Objects include volumes, replicas, engines, engine images, instance
+// managers and Longhorn nodes. Each result is sorted by namespace/PVC name,
+// falling back to the volume name when claim information is missing.
+//
+// Lagging volumes need an engine upgrade. Exempt volumes are attached and
+// degraded only because they request more replicas than there are Longhorn
+// nodes, with a healthy, running, read-write replica on each node. They keep
+// their engine until they detach or have enough nodes for every replica.
+// Empty groups are nil. Invalid JSON or incompatible field types return an error
+// and nil groups. This function classifies engine lag without checking whether
+// the cluster is ready for an upgrade.
+func LonghornEngineLag(settings, objects []byte) (lagging, exempt []string, err error) {
+	var snap longhornSnapshot
+	if err := parseLonghornSettings(settings, &snap); err != nil {
+		return nil, nil, fmt.Errorf("reading Longhorn's settings: %w", err)
+	}
+	if err := parseLonghornObjects(objects, &snap); err != nil {
+		return nil, nil, fmt.Errorf("reading Longhorn's volumes: %w", err)
+	}
+	lagging, exempt = snap.engineLag()
+	sort.Strings(lagging)
+	sort.Strings(exempt)
+	return lagging, exempt, nil
+}
+
+// LonghornKeptEngineNotice formats an explanation and upgrade instructions for
+// a nonempty exempt group from LonghornEngineLag, preserving its order. The caller
+// must verify that the running Longhorn version supports the retained engines.
+func LonghornKeptEngineNotice(exempt []string, version string) string {
+	return fmt.Sprintf("%s %s more replicas than the cluster has nodes, so %s older engine, which Longhorn %s still supports. Longhorn moves a volume onto the current engine once it has a node for every replica: add nodes with kip node add, then run %s again",
+		strings.Join(exempt, ", "), plural(len(exempt), "wants", "want"), plural(len(exempt), "it keeps its", "they keep their"), version, LonghornUpgradeCommand)
 }
 
 // readyProblems lists component and volume problems at version, allowing

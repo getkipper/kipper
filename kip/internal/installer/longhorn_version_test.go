@@ -27,18 +27,29 @@ func TestLonghornPathIsContiguousAndEndsAtTheTarget(t *testing.T) {
 	}
 }
 
-// Each hop is the latest patch of its minor as of 2026-10-24. 1.12.0 and
-// 1.12.1 carry the 13571 rebuild bug and must never be a stop.
+// Each hop is the latest patch of its minor as of 2026-11-09. 1.12.0 and
+// 1.12.1 carry the rebuild bug in Longhorn issue 13571 and must never be a stop.
 func TestLonghornPathUsesTheCheckedPatches(t *testing.T) {
 	var versions []string
 	for _, r := range longhornPath {
 		versions = append(versions, r.Version)
 	}
-	assert.Equal(t, []string{"v1.7.3", "v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3"}, versions)
-	assert.Equal(t, "v1.34", longhornPath[len(longhornPath)-1].MinKubernetes,
-		"1.11.3 needs Kubernetes 1.34 for its CSI external-provisioner")
+	assert.Equal(t, []string{"v1.7.3", "v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3", "v1.12.2"}, versions)
 	for _, v := range versions {
 		assert.NotContains(t, []string{"v1.12.0", "v1.12.1"}, v)
+	}
+}
+
+// The floors come from each release's notes: 1.11.3 ships a CSI
+// external-provisioner that needs Kubernetes 1.34, and 1.12.2 ships an older
+// one that accepts 1.25.
+func TestLonghornPathKubernetesFloors(t *testing.T) {
+	for version, floor := range map[string]string{"v1.11.3": "v1.34", "v1.12.2": "v1.25"} {
+		r, ok := longhornReleaseFor(version)
+		require.True(t, ok, version)
+		assert.Equal(t, floor, r.MinKubernetes, version)
+		assert.Equal(t, 8, r.EngineCLIAPIMin, version)
+		assert.Equal(t, 4, r.EngineControllerAPIMin, version)
 	}
 }
 
@@ -62,17 +73,33 @@ func TestPlanLonghornUpgradeFromTheOldPin(t *testing.T) {
 	plan, err := PlanLonghornUpgrade("v1.7.3")
 	require.NoError(t, err)
 	assert.Equal(t, "v1.7.3", plan.From)
-	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3"}, plan.Hops)
+	assert.Equal(t, []string{"v1.8.2", "v1.9.2", "v1.10.2", "v1.11.3", "v1.12.2"}, plan.Hops)
+}
+
+func TestPlanLonghornUpgradeFromTheLastPin(t *testing.T) {
+	plan, err := PlanLonghornUpgrade("v1.11.3")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"v1.12.2"}, plan.Hops)
+}
+
+// A cluster someone moved to 1.12.0 or 1.12.1 by hand gets the patch with the
+// fix for Longhorn issue 13571.
+func TestPlanLonghornUpgradeMovesAnAvoidedPatchToTheFixedOne(t *testing.T) {
+	for _, from := range []string{"v1.12.0", "v1.12.1"} {
+		plan, err := PlanLonghornUpgrade(from)
+		require.NoError(t, err, from)
+		assert.Equal(t, []string{"v1.12.2"}, plan.Hops, from)
+	}
 }
 
 func TestPlanLonghornUpgradeTakesTheLatestPatchOfItsOwnMinorFirst(t *testing.T) {
 	plan, err := PlanLonghornUpgrade("v1.9.0")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"v1.9.2", "v1.10.2", "v1.11.3"}, plan.Hops)
+	assert.Equal(t, []string{"v1.9.2", "v1.10.2", "v1.11.3", "v1.12.2"}, plan.Hops)
 
 	plan, err = PlanLonghornUpgrade("v1.10.0-hotfix-1")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"v1.10.2", "v1.11.3"}, plan.Hops)
+	assert.Equal(t, []string{"v1.10.2", "v1.11.3", "v1.12.2"}, plan.Hops)
 }
 
 func TestPlanLonghornUpgradeAtTheTargetHasNoHops(t *testing.T) {
@@ -83,7 +110,7 @@ func TestPlanLonghornUpgradeAtTheTargetHasNoHops(t *testing.T) {
 
 func TestPlanLonghornUpgradeRefusesWhatItCannotPlace(t *testing.T) {
 	for in, want := range map[string]string{
-		"v1.12.1": "newer than",
+		"v1.12.3": "newer than",
 		"v1.13.0": "newer than",
 		"v2.0.0":  "newer than",
 		"v1.6.4":  "older than",
@@ -98,7 +125,7 @@ func TestLonghornReleaseLooksUpAPathEntry(t *testing.T) {
 	r, ok := longhornReleaseFor("v1.11.3")
 	require.True(t, ok)
 	assert.Equal(t, "v1.34", r.MinKubernetes)
-	_, ok = longhornReleaseFor("v1.12.1")
+	_, ok = longhornReleaseFor("v1.13.0")
 	assert.False(t, ok)
 
 	r, ok = longhornReleaseFor("v1.10.1")

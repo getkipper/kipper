@@ -1,6 +1,7 @@
 // Package longhorncap holds Longhorn's disk scheduling rules for new replicas,
 // read from Longhorn's node objects, so kip and console-api decide capacity
-// the same way. The rules follow longhorn-manager v1.7.3 and v1.11.3.
+// the same way. The rules follow longhorn-manager v1.7.3 to v1.13.0, where
+// they are unchanged for the v1 data engine.
 package longhorncap
 
 import (

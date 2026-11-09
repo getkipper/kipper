@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +30,15 @@ import (
 
 var longhornSettingGVR = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "settings"}
 
+type longhornResource struct{ resource, kind string }
+
+// longhornEngineResources are the Longhorn objects that show which engine
+// each volume runs and whether it can move to the default one.
+var longhornEngineResources = []longhornResource{
+	{"volumes", "Volume"}, {"replicas", "Replica"}, {"engines", "Engine"},
+	{"engineimages", "EngineImage"}, {"instancemanagers", "InstanceManager"}, {"nodes", "Node"},
+}
+
 const (
 	// longhornBackupTimeout bounds the wait for each backup taken before a Longhorn step.
 	longhornBackupTimeout = 2 * time.Hour
@@ -37,7 +47,10 @@ const (
 
 // longhornReport is what kip upgrade reads about a cluster's Longhorn before
 // it changes anything. Problems keep --longhorn from starting, and include
-// Held, the nodes under the RHEL 9.7 hold.
+// Held, the nodes under the RHEL 9.7 hold. Lagging and Kept name volumes not
+// on the default engine. A run upgrades lagging volumes. Kept volumes are
+// attached and degraded only because they request more replicas than there
+// are Longhorn nodes, with a healthy, running, read-write replica on each node.
 type longhornReport struct {
 	Longhorn bool
 	Profile  string
@@ -46,6 +59,8 @@ type longhornReport struct {
 	Started  bool
 	Problems []string
 	Held     []string
+	Lagging  []string
+	Kept     []string
 }
 
 // checkLonghornFlags refuses --longhorn with --skip-system, which skips the
@@ -59,7 +74,7 @@ func checkLonghornFlags(longhorn, skipSystem bool) error {
 
 // readLonghornReport reads the cluster's Longhorn through the Kubernetes API:
 // the storage mode, the hop record, the applied and running releases, the
-// backup destination and the nodes. It changes nothing. A cluster on local
+// backup destination, nodes and engine lag. It changes nothing. A cluster on local
 // storage returns a report with Longhorn false. With k3sFirst the Kubernetes
 // floors are left to the hop checks, since --k3s moves the nodes first.
 func readLonghornReport(ctx context.Context, cs kubernetes.Interface, dyn dynamic.Interface, localExternal, k3sFirst bool) (longhornReport, error) {
@@ -90,6 +105,13 @@ func readLonghornReport(ctx context.Context, cs kubernetes.Interface, dyn dynami
 	default:
 		if r.Plan, err = installer.PlanLonghornUpgrade(version); err != nil {
 			r.Problems = append(r.Problems, err.Error())
+			break
+		}
+		// Engine lag is expected during an interrupted step, which the report already explains.
+		if !r.Started {
+			if r.Lagging, r.Kept, err = readLonghornEngineLag(ctx, dyn); err != nil {
+				return r, err
+			}
 		}
 	}
 
@@ -118,6 +140,36 @@ func readLonghornReport(ctx context.Context, cs kubernetes.Interface, dyn dynami
 		r.Problems = append(r.Problems, r.Plan.KubernetesProblems(facts)...)
 	}
 	return r, nil
+}
+
+// readLonghornEngineLag reads settings and engine objects through the Kubernetes
+// API and returns the sorted volume groups defined by installer.LonghornEngineLag.
+// API and parsing failures return an error.
+func readLonghornEngineLag(ctx context.Context, dyn dynamic.Interface) (lagging, kept []string, err error) {
+	list := func(resources []longhornResource) ([]byte, error) {
+		var items []map[string]interface{}
+		for _, r := range resources {
+			gvr := longhornSettingGVR.GroupVersion().WithResource(r.resource)
+			l, err := dyn.Resource(gvr).Namespace("longhorn-system").List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return nil, fmt.Errorf("listing Longhorn's %s: %w", r.resource, err)
+			}
+			for _, it := range l.Items {
+				it.SetKind(r.kind)
+				items = append(items, it.Object)
+			}
+		}
+		return json.Marshal(map[string]interface{}{"items": items})
+	}
+	settings, err := list([]longhornResource{{"settings", "Setting"}})
+	if err != nil {
+		return nil, nil, err
+	}
+	objects, err := list(longhornEngineResources)
+	if err != nil {
+		return nil, nil, err
+	}
+	return installer.LonghornEngineLag(settings, objects)
 }
 
 // readLonghornMarkersViaAPI reads version markers through the Kubernetes
@@ -430,16 +482,25 @@ func (r longhornReport) print(out io.Writer, strict bool) error {
 	case r.Started:
 		_, _ = fmt.Fprintf(out, "  ⚠  Longhorn: the step from %s to %s did not finish, and %s resumes it\n", r.Record.From, r.Record.To, installer.LonghornUpgradeCommand)
 	case r.Record != nil && r.Record.From == r.Record.To:
-		_, _ = fmt.Fprintf(out, "  ⚠  Longhorn: the engine catch-up on %s did not finish, and %s starts it again with a new backup\n", r.Record.From, installer.LonghornUpgradeCommand)
+		_, _ = fmt.Fprintf(out, "  ⚠  Longhorn: the engine catch-up on %s did not finish, and %s finishes it\n", r.Record.From, installer.LonghornUpgradeCommand)
 	case r.Record != nil:
 		_, _ = fmt.Fprintf(out, "  ⚠  Longhorn: the step from %s to %s was recorded but never applied, and %s starts it again with a new backup\n", r.Record.From, r.Record.To, installer.LonghornUpgradeCommand)
 	}
 	switch {
 	case r.Plan.From == "":
+	case r.Started && len(r.Plan.Hops) == 0:
+		// An interrupted step may still run the previous release, so success is premature.
 	case len(r.Plan.Hops) == 0:
 		_, _ = fmt.Fprintf(out, "  ✔  Longhorn: runs %s, the release this kip installs\n", r.Plan.From)
 	default:
 		_, _ = fmt.Fprintf(out, "  ✔  Longhorn: %s moves it %s, with a backup before each step\n", installer.LonghornUpgradeCommand, r.Plan.Describe())
+	}
+	if n := len(r.Lagging); n > 0 {
+		_, _ = fmt.Fprintf(out, "  ⚠  Longhorn: %s %s not on Longhorn %s's engine yet, so %s the fixes of that release. %s moves %s first, with a backup\n",
+			strings.Join(r.Lagging, ", "), plural(n, "is", "are"), r.Plan.From, plural(n, "it lacks", "they lack"), installer.LonghornUpgradeCommand, plural(n, "it", "them"))
+	}
+	if len(r.Kept) > 0 {
+		_, _ = fmt.Fprintf(out, "  ⚠  Longhorn: %s\n", installer.LonghornKeptEngineNotice(r.Kept, r.Plan.From))
 	}
 	mark := "⚠"
 	if strict {
@@ -553,10 +614,31 @@ func (s longhornStep) preview(out io.Writer) {
 		}
 		return
 	}
-	if len(r.Plan.Hops) == 0 && r.Record == nil {
-		_, _ = fmt.Fprintf(out, "  Longhorn already runs %s. kip re-applies it, and any volume still on an older engine\n", r.Plan.From)
-		_, _ = fmt.Fprintf(out, "  moves onto the current one after kip takes a Velero backup.\n\n")
-	} else {
+	catchUp := r.Record != nil && r.Record.From == r.Record.To
+	switch {
+	case r.Started:
+		_, _ = fmt.Fprintf(out, "  Longhorn finishes its step from %s to %s, which stopped partway. kip re-applies %s\n", r.Record.From, r.Record.To, r.Record.To)
+		_, _ = fmt.Fprintf(out, "  without a new backup, since backup %s was taken before that step began, and waits\n", r.Record.Backup)
+		_, _ = fmt.Fprintf(out, "  for every volume to settle.")
+		if len(r.Plan.Hops) > 0 {
+			_, _ = fmt.Fprintf(out, " Then Longhorn moves %s with a backup before each step.", r.Plan.Describe())
+		}
+		_, _ = fmt.Fprintf(out, "\n\n")
+	case len(r.Plan.Hops) == 0 && (r.Record == nil || catchUp):
+		_, _ = fmt.Fprintf(out, "  Longhorn already runs %s.", r.Plan.From)
+		if len(r.Lagging) > 0 {
+			_, _ = fmt.Fprintf(out, " kip re-applies it and moves %s onto the current engine after kip takes a Velero backup.", strings.Join(r.Lagging, ", "))
+		} else {
+			_, _ = fmt.Fprintf(out, " kip re-applies it, and no volume is eligible for an engine upgrade, so kip takes no backup.")
+			if catchUp {
+				_, _ = fmt.Fprintf(out, " It also saves Longhorn's objects to complete the interrupted engine catch-up.")
+			}
+		}
+		if n := len(r.Kept); n > 0 {
+			_, _ = fmt.Fprintf(out, " %s %s older engine until the cluster has a node for every replica.", strings.Join(r.Kept, ", "), plural(n, "keeps its", "keep their"))
+		}
+		_, _ = fmt.Fprintf(out, "\n\n")
+	default:
 		_, _ = fmt.Fprintf(out, "  Longhorn moves %s, one minor at a time. Before each step kip checks every volume,\n", r.Plan.Describe())
 		_, _ = fmt.Fprintf(out, "  takes a Velero backup and waits for it to complete, and saves Longhorn's objects to\n")
 		_, _ = fmt.Fprintf(out, "  %s. Each step then waits for every volume to settle,\n", s.Upgrade.ExportDir)
