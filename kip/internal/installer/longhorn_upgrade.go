@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -156,18 +157,28 @@ func (u LonghornUpgrade) Apply(client CommandRunner) error {
 			return err
 		}
 		u.pruneEngineImages(client)
+		u.reportKeptEngines(client, current)
 		return nil
 	}
-	if snap, err := readLonghornSnapshot(client); err == nil {
-		if _, exempt := snap.engineLag(); len(exempt) > 0 {
-			say(u.Out, "       %s %s more replicas than the cluster has nodes, so %s older engine, which Longhorn %s still supports. Longhorn moves a volume onto the current engine once it has a node for every replica: add nodes with kip node add, then run %s again\n",
-				strings.Join(exempt, ", "), plural(len(exempt), "wants", "want"), plural(len(exempt), "it keeps its", "they keep their"), current, LonghornUpgradeCommand)
-		}
-	}
+	u.reportKeptEngines(client, current)
 	if _, err := tagServerStorage(client, serverStorageWait); err != nil {
 		return err
 	}
 	return ensureStorageClasses(client, serverStorageWait)
+}
+
+// reportKeptEngines names volumes that retain an older engine because they
+// request more replicas than there are nodes. Read failures are ignored because
+// this advisory report follows successful engine upgrade or installation work.
+func (u LonghornUpgrade) reportKeptEngines(client CommandRunner, version string) {
+	snap, err := readLonghornSnapshot(client)
+	if err != nil {
+		return
+	}
+	if _, exempt := snap.engineLag(); len(exempt) > 0 {
+		sort.Strings(exempt)
+		say(u.Out, "       %s\n", LonghornKeptEngineNotice(exempt, version))
+	}
 }
 
 // step moves Longhorn from one release to the next, or, with from equal to

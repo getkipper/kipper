@@ -998,3 +998,39 @@ func TestLonghornExportNeverReplacesAnEarlierOne(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "first\n", string(got))
 }
+
+// kip upgrade --check reads the same objects through the API and needs the
+// same split between volumes a run moves and volumes that keep their engine.
+func TestLonghornEngineLagSplitsMovableFromKeptVolumes(t *testing.T) {
+	f := newFakeLonghorn(longhornVersion)
+	f.volumes[0].engine = "v1.11.3"
+	f.volumes[0].robustness = "degraded"
+	f.volumes[0].replicas = 3
+	f.volumes[1].engine = "v1.11.3"
+	settings, err := f.Run(longhornSettingQuery)
+	require.NoError(t, err)
+	objects, err := f.Run(longhornObjectQuery)
+	require.NoError(t, err)
+
+	lagging, exempt, err := LonghornEngineLag([]byte(settings), []byte(objects))
+	require.NoError(t, err)
+	assert.Equal(t, []string{f.volumes[1].name}, lagging)
+	assert.Equal(t, []string{f.volumes[0].name}, exempt)
+
+	_, _, err = LonghornEngineLag([]byte("not json"), []byte(objects))
+	assert.Error(t, err)
+}
+
+// A run with nothing to move still names a volume that keeps its older
+// engine, which lacks the fixes of the current release.
+func TestLonghornUpgradeNamesAKeptEngineWhenNothingIsLeftToDo(t *testing.T) {
+	f := newFakeLonghorn(longhornVersion)
+	f.volumes[0].engine = "v1.11.3"
+	f.volumes[0].robustness = "degraded"
+	f.volumes[0].replicas = 3
+	run := newUpgradeRun(t)
+
+	require.NoError(t, run.upgrade.Apply(f), run.out.String())
+	assert.Empty(t, run.backups)
+	assert.Contains(t, run.out.String(), "pvc-db wants more replicas than the cluster has nodes, so it keeps its older engine, which Longhorn "+longhornVersion+" still supports")
+}

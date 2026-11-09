@@ -20,6 +20,11 @@ func platformConfigClient(storage string, objects ...runtime.Object) *dynamicfak
 	scheme.AddKnownTypeWithName(platformConfigGVR.GroupVersion().WithKind("PlatformConfigList"), &unstructured.UnstructuredList{})
 	scheme.AddKnownTypeWithName(backupStorageLocationGVR.GroupVersion().WithKind("BackupStorageLocation"), &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(backupStorageLocationGVR.GroupVersion().WithKind("BackupStorageLocationList"), &unstructured.UnstructuredList{})
+	for _, r := range append([]longhornResource{{"settings", "Setting"}}, longhornEngineResources...) {
+		gv := longhornSettingGVR.GroupVersion()
+		scheme.AddKnownTypeWithName(gv.WithKind(r.kind), &unstructured.Unstructured{})
+		scheme.AddKnownTypeWithName(gv.WithKind(r.kind+"List"), &unstructured.UnstructuredList{})
+	}
 	spec := map[string]interface{}{"profile": "small"}
 	if storage != "" {
 		spec["storage"] = storage
