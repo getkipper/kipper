@@ -709,6 +709,41 @@ func (s longhornSnapshot) engineLag() (lagging, exempt []string) {
 	return lagging, exempt
 }
 
+// LonghornEngineLag parses Kubernetes JSON lists of Longhorn settings and objects
+// and groups volumes whose desired or current image differs from the default
+// engine. Objects include volumes, replicas, engines, engine images, instance
+// managers and Longhorn nodes. Each result is sorted by namespace/PVC name,
+// falling back to the volume name when claim information is missing.
+//
+// Lagging volumes need an engine upgrade. Exempt volumes are attached and
+// degraded only because they request more replicas than there are Longhorn
+// nodes, with a healthy, running, read-write replica on each node. They keep
+// their engine until they detach or have enough nodes for every replica.
+// Empty groups are nil. Invalid JSON or incompatible field types return an error
+// and nil groups. This function classifies engine lag without checking whether
+// the cluster is ready for an upgrade.
+func LonghornEngineLag(settings, objects []byte) (lagging, exempt []string, err error) {
+	var snap longhornSnapshot
+	if err := parseLonghornSettings(settings, &snap); err != nil {
+		return nil, nil, fmt.Errorf("reading Longhorn's settings: %w", err)
+	}
+	if err := parseLonghornObjects(objects, &snap); err != nil {
+		return nil, nil, fmt.Errorf("reading Longhorn's volumes: %w", err)
+	}
+	lagging, exempt = snap.engineLag()
+	sort.Strings(lagging)
+	sort.Strings(exempt)
+	return lagging, exempt, nil
+}
+
+// LonghornKeptEngineNotice formats an explanation and upgrade instructions for
+// a nonempty exempt group from LonghornEngineLag, preserving its order. The caller
+// must verify that the running Longhorn version supports the retained engines.
+func LonghornKeptEngineNotice(exempt []string, version string) string {
+	return fmt.Sprintf("%s %s more replicas than the cluster has nodes, so %s older engine, which Longhorn %s still supports. Longhorn moves a volume onto the current engine once it has a node for every replica: add nodes with kip node add, then run %s again",
+		strings.Join(exempt, ", "), plural(len(exempt), "wants", "want"), plural(len(exempt), "it keeps its", "they keep their"), version, LonghornUpgradeCommand)
+}
+
 // readyProblems lists component and volume problems at version, allowing
 // stable older engines and volumes accepted by degradedByDesign.
 func (s longhornSnapshot) readyProblems(version string) []string {

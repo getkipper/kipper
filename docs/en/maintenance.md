@@ -342,7 +342,10 @@ writes smaller than 4 KiB during the rebuild (Longhorn issue 14447), and fast
 replica rebuilding (issue 14096, which kip already avoids by disabling fast
 rebuilding). A volume gets these fixes once it runs the 1.12.2 engine. A volume
 that keeps an older engine, as described below, gets them when a later
-`kip upgrade --longhorn` upgrades its engine.
+`kip upgrade --longhorn` upgrades its engine. `kip upgrade --check` names every
+volume still using a different engine and shows which volumes the next
+`--longhorn` run upgrades and which need more nodes. If an upgrade step was
+interrupted, the check reports that step instead.
 
 `--longhorn` needs backups on external storage. Backups in in-cluster MinIO live
 on the Longhorn storage the upgrade changes, so kip refuses to start on such a
