@@ -3,6 +3,7 @@ package installer
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -24,6 +25,7 @@ type longhornSnapshot struct {
 type lhWorkload struct {
 	Kind    string
 	Ready   bool
+	Desired int32
 	Manager string
 }
 
@@ -164,12 +166,14 @@ func parseLonghornWorkloads(data []byte, snap *longhornSnapshot) error {
 		current := st.ObservedGeneration >= it.Metadata.Generation
 		switch it.Kind {
 		case "DaemonSet":
+			w.Desired = st.DesiredNumberScheduled
 			w.Ready = current && st.DesiredNumberScheduled > 0 && st.UpdatedNumberScheduled == st.DesiredNumberScheduled && st.NumberAvailable == st.DesiredNumberScheduled
 		case "Deployment":
 			want := int32(1)
 			if it.Spec.Replicas != nil {
 				want = *it.Spec.Replicas
 			}
+			w.Desired = want
 			w.Ready = current && st.UpdatedReplicas == want && st.Replicas == want && st.AvailableReplicas >= want
 		default:
 			continue
@@ -409,18 +413,33 @@ var longhornSettledWorkloads = []string{
 	"Deployment/csi-snapshotter",
 }
 
+// longhornGlobalManager identifies the deployment introduced in Longhorn 1.13.
+// Its elected leader runs the controllers that update volumes' Kubernetes status.
+const longhornGlobalManager = "Deployment/longhorn-global-manager"
+
+func runsGlobalManager(version string) bool {
+	v, err := parseLonghornVersion(version)
+	return err == nil && v.major == 1 && v.minor >= 13
+}
+
 // componentProblems lists what keeps Longhorn's own components from having
-// settled at version: the manager, CSI, the default engine image and an
-// instance manager on every Longhorn node.
+// settled at version: the manager, CSI, the global manager from 1.13 on, the
+// default engine image and an instance manager on every Longhorn node.
 func (s longhornSnapshot) componentProblems(version string) []string {
 	var problems []string
-	for _, name := range longhornSettledWorkloads {
+	workloads := longhornSettledWorkloads
+	if runsGlobalManager(version) {
+		workloads = append(slices.Clone(workloads), longhornGlobalManager)
+	}
+	for _, name := range workloads {
 		w, ok := s.Workloads[name]
 		switch {
 		case !ok:
 			problems = append(problems, fmt.Sprintf("%s does not exist yet", name))
 		case !w.Ready:
 			problems = append(problems, fmt.Sprintf("%s has not finished rolling out", name))
+		case name == longhornGlobalManager && w.Desired == 0:
+			problems = append(problems, fmt.Sprintf("%s runs no replicas", name))
 		}
 	}
 	if m := s.Workloads["DaemonSet/longhorn-manager"].Manager; m != "" && !strings.HasSuffix(m, "longhorn-manager:"+version) {
