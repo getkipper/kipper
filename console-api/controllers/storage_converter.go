@@ -515,6 +515,11 @@ func (s storageConverter) read(ctx context.Context, pvc *corev1.PersistentVolume
 	if v.Attachment != nil {
 		nodeNames = append(nodeNames, v.Attachment.TicketNode)
 	}
+	for node, eligible := range c.Eligible {
+		if eligible {
+			nodeNames = append(nodeNames, node)
+		}
+	}
 	for _, node := range nodeNames {
 		if _, seen := c.Available[node]; node != "" && !seen {
 			c.Available[node] = readHolder(ctx, s.Reader, node) == holderAvailable

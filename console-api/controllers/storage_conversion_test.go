@@ -807,6 +807,21 @@ func TestTheBuildProgressCountsASalvagedCopyServingAgain(t *testing.T) {
 	assert.Equal(t, "Longhorn is building a copy of the volume (1 of 2 copies healthy).", step.Message)
 }
 
+// An unavailable node may hold a copy that Longhorn no longer lists, with
+// writes missing from the listed copies. Reducing the count must wait.
+func TestNoCountIsLoweredWhileANodeThatCanHoldCopiesIsDown(t *testing.T) {
+	c := convCluster(t)
+	c.Available["worker-1"] = false
+	v := convVolume(2, replicaOnly, healthyReplica("r-s", "server-1"), healthyReplica("r-w", "worker-2"))
+	step := planConversion(1, v, c, convNow)
+	assert.Equal(t, stepBlocked, step.Kind, "step: %+v", step)
+	assert.Contains(t, step.Message, "worker-1, which can hold copies, is not Ready or is fenced")
+
+	c.Available["worker-1"] = true
+	step = planConversion(1, v, c, convNow)
+	assert.NotEqual(t, stepBlocked, step.Kind, "step: %+v", step)
+}
+
 // No count is lowered while a present copy is on a node that is not Ready or
 // is fenced, including the decrease before a server copy is built and the
 // final count adjustment. Placement alone still changes.

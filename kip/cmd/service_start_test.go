@@ -22,6 +22,7 @@ type fakeStarter struct {
 	saved    []installer.NodeRecord
 	volumes  []string
 	cleared  []string
+	wanted   map[string]int
 }
 
 func (f *fakeStarter) FenceStop(string, string) (*installer.FenceStopMark, error) { return f.mark, nil }
@@ -29,6 +30,13 @@ func (f *fakeStarter) MoveMark(string, string) (string, error)                  
 func (f *fakeStarter) Records() ([]installer.NodeRecord, error)                   { return f.records, nil }
 func (f *fakeStarter) Replicas() ([]stranded.Replica, error)                      { return f.replicas, nil }
 func (f *fakeStarter) LonghornVolumes() ([]string, error)                         { return f.volumes, nil }
+func (f *fakeStarter) VolumeCopies(replicas []stranded.Replica) (map[string]installer.VolumeCopies, error) {
+	return installer.CountVolumeCopies(f.wanted, replicas), nil
+}
+func (f *fakeStarter) MarkMayLackWrites(string, string) error {
+	f.mark.MayLackWrites = true
+	return nil
+}
 func (f *fakeStarter) ClearStop(ns, name string) error {
 	f.cleared = append(f.cleared, ns+"/"+name)
 	return nil
@@ -53,7 +61,34 @@ func starterFor(state string, replicas ...stranded.Replica) *fakeStarter {
 		records:  []installer.NodeRecord{{Name: "server-1", Role: installer.NodeRoleServer, State: installer.NodeStateReady}, rec},
 		replicas: replicas,
 		volumes:  []string{"pvc-1"},
+		wanted:   map[string]int{"pvc-1": 1},
 	}
+}
+
+func TestServiceStartNeedsConsentWhenACopyElsewhereMayLackWrites(t *testing.T) {
+	onServer := stranded.Replica{Name: "r1", Volume: "pvc-1", Node: "server-1", HealthyAt: healthy}
+	onWorker := stranded.Replica{Name: "r2", Volume: "pvc-1", Node: "worker-1", HealthyAt: healthy, FailedAt: "2026-10-24T09:00:00Z"}
+	s := starterFor(installer.NodeStateFenced, onServer, onWorker)
+	s.mark.Reason = installer.FenceStopOnlyCopy
+	s.wanted["pvc-1"] = 2
+	err := fenceStoppedStart{Out: &bytes.Buffer{}, Server: s}.run("shop", "db")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wrote through worker-1")
+	assert.Contains(t, err.Error(), "--accept-stale-data")
+	assert.Empty(t, s.started)
+	assert.True(t, s.mark.MayLackWrites, "the doubt is recorded on the stop mark")
+
+	// The worker rejoins and its copy turns current, which must not erase the doubt.
+	rejoined := starterFor(installer.NodeStateReady, onServer, stranded.Replica{Name: "r2", Volume: "pvc-1", Node: "worker-1", HealthyAt: healthy})
+	rejoined.mark = s.mark
+	rejoined.wanted["pvc-1"] = 2
+	err = fenceStoppedStart{Out: &bytes.Buffer{}, Server: rejoined}.run("shop", "db")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wrote through worker-1")
+	assert.Empty(t, rejoined.started)
+
+	require.NoError(t, fenceStoppedStart{Out: &bytes.Buffer{}, Server: rejoined, AcceptStale: true}.run("shop", "db"))
+	assert.Equal(t, []string{"shop/db"}, rejoined.started)
 }
 
 func TestServiceStartRefusesAServiceTheFenceDidNotStop(t *testing.T) {

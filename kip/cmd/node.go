@@ -54,10 +54,14 @@ It makes sure k3s is stopped and cannot start, reboots the host unless it
 has booted since the fence, then lifts the fence, runs the checks above and
 starts the services the fence stopped. A service whose copies are not known
 to be current starts only after you accept the older data, interactively
-or with --accept-stale-data. In private mode, if a fenced worker responds at
-an address different from the one its node publishes, kip records the new
-address. After the rejoin, kip runs the add process again so the node publishes
-the new address. In public mode, kip refuses to rejoin it at the new address.`,
+or with --accept-stale-data. When a stopped service has a copy on another
+node, kip asks before it lifts the fence, because Longhorn can then rebuild
+the worker's copies from it and writes that exist only on the worker are
+lost. Without a terminal, pass --accept-stale-data or the worker stays fenced.
+In private mode, if a fenced worker responds at an address different from
+the one its node publishes, kip records the new address. After the rejoin,
+kip runs the add process again so the node publishes the new address. In
+public mode, kip refuses to rejoin it at the new address.`,
 	Args:         cobra.MaximumNArgs(1),
 	SilenceUsage: true,
 	RunE:         runNodeAdd,
@@ -82,7 +86,7 @@ func init() {
 	nodeAddCmd.Flags().Bool("public", false, "use the nodes' public addresses even when they share a private network")
 	nodeAddCmd.Flags().Bool("yes", false, "apply or recover server network changes without prompting")
 	nodeAddCmd.Flags().Bool("no-ssh-rate-limit", false, "Allow SSH without UFW rate limiting on the joining node, replacing any existing limit. By default, keep its managed rule or inherit the server's setting for a new firewall.")
-	nodeAddCmd.Flags().Bool("accept-stale-data", false, "when rejoining a fenced worker, start its stopped services even when no copy of their data is known to be current")
+	nodeAddCmd.Flags().Bool("accept-stale-data", false, "When rejoining a fenced worker, give up writes that may exist only on it and start its stopped services even when no copy of their data is known to be current.")
 	nodeAddCmd.Flags().Bool("no-copies", false, "skip the disk check that lets the node hold copies of volumes. Run 'kip node storage <node> --copies' later")
 	nodeAddCmd.Flags().Bool("firewall", true, "set up a host firewall on the new node (default: follow the server's kip-managed firewall setting); use --firewall=false to skip setup")
 
@@ -967,6 +971,10 @@ func joinedNodeStorage(existing *installer.NodeRecord) *config.NodeStorage {
 }
 
 func nodeAddRetry(err error, host string) error {
+	var refused *rejoinRefusal
+	if errors.As(err, &refused) {
+		return err
+	}
 	return fmt.Errorf("%w. The join is incomplete. Fix the cause, then run 'kip node add %s' again with the same options to resume", err, host)
 }
 

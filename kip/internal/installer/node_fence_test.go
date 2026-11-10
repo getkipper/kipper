@@ -118,6 +118,7 @@ func fenceViewRunner() *routedRunner {
 		{contains: "get pv ", out: fencePVs},
 		{contains: "get statefulsets", out: fenceSets},
 		{contains: "replicas.longhorn.io", out: fenceReplicas},
+		{contains: "volumes.longhorn.io", out: `{"items":[{"metadata":{"name":"pvc-1"},"spec":{"numberOfReplicas":2}}]}`},
 	}}
 }
 
@@ -130,6 +131,7 @@ func TestReadFenceViewGroupsByStatefulSetAndAddsEarlierStops(t *testing.T) {
 	assert.Equal(t, FenceService{Namespace: "shop", StatefulSet: "db", Pods: []string{"db-0"}, Volumes: []string{"pvc-1"}}, view.Services[1])
 	assert.Equal(t, []PodHolder{{Namespace: "shop", Pod: "blob-0"}}, view.Holders, "an RWO pod no StatefulSet owns is listed with what starts it")
 	assert.Len(t, view.Replicas, 1)
+	assert.Equal(t, map[string]VolumeCopies{"pvc-1": {Wanted: 2, Placed: 1}}, view.Copies)
 }
 
 func TestReadFenceViewFailsOnAnUnreadableStopMark(t *testing.T) {
@@ -146,25 +148,115 @@ func TestJudgeFreshness(t *testing.T) {
 		{Name: "a-current", Volume: "a", Node: "server-1", HealthyAt: healthy},
 		{Name: "b-stale", Volume: "b", Node: "server-1", HealthyAt: healthy, LastFailedAt: "2026-10-24T09:00:00Z"},
 		{Name: "c-local", Volume: "c", Node: "worker-1", HealthyAt: healthy},
+		{Name: "d-single", Volume: "d", Node: "server-1", HealthyAt: healthy},
 	}
-	f := JudgeFreshness("worker-1", []string{"a"}, replicas)
-	assert.True(t, f.Current)
+	copies := map[string]VolumeCopies{"a": {Wanted: 2, Placed: 2}, "b": {Wanted: 1, Placed: 1}, "c": {Wanted: 1, Placed: 1}, "d": {Wanted: 1, Placed: 1}}
+
+	f := JudgeFreshness("worker-1", []string{"d"}, replicas, copies)
+	assert.True(t, f.Current, "a volume with one copy, on another node, received every write")
 	assert.Empty(t, f.Reason)
 
-	f = JudgeFreshness("worker-1", []string{"a", "b"}, replicas)
+	f = JudgeFreshness("worker-1", []string{"a"}, replicas, copies)
+	assert.False(t, f.Current, "healthy markers on a second copy cannot rule out writes made only through worker-1")
+	assert.Equal(t, FenceStopUnverified, f.Reason)
+	assert.Equal(t, []config.ReplicaStamp{{Volume: "a", Name: "a-current", Node: "server-1", HealthyAt: healthy}}, f.Stamps)
+
+	f = JudgeFreshness("worker-1", []string{"a", "b"}, replicas, copies)
 	assert.False(t, f.Current)
-	assert.Equal(t, FenceStopStale, f.Reason)
+	assert.Equal(t, FenceStopStale, f.Reason, "a stale volume outranks an unverified one")
 	assert.Equal(t, []config.ReplicaStamp{
 		{Volume: "a", Name: "a-current", Node: "server-1", HealthyAt: healthy},
 		{Volume: "b", Name: "b-stale", Node: "server-1", HealthyAt: healthy, LastFailedAt: "2026-10-24T09:00:00Z"},
 	}, f.Stamps)
 
-	f = JudgeFreshness("worker-1", []string{"b", "c"}, replicas)
+	f = JudgeFreshness("worker-1", []string{"b", "c"}, replicas, copies)
 	assert.False(t, f.Current)
 	assert.Equal(t, FenceStopOnlyCopy, f.Reason, "a volume with no copy elsewhere outranks a stale one")
 
-	f = JudgeFreshness("", []string{"c"}, replicas)
+	f = JudgeFreshness("worker-1", []string{"a", "c"}, replicas, copies)
+	assert.Equal(t, FenceStopOnlyCopy, f.Reason, "a volume with no copy elsewhere outranks an unverified one")
+
+	f = JudgeFreshness("", []string{"c"}, replicas, copies)
 	assert.True(t, f.Current, "with no node excluded, the returned worker's own replica counts")
+	f = JudgeFreshness("", []string{"a"}, replicas, nil)
+	assert.True(t, f.Current, "with no node excluded, there is no writer to doubt")
+}
+
+func TestJudgeFreshnessTrustsOnlyAGenuineSingleCopy(t *testing.T) {
+	healthy := "2026-10-24T08:00:00Z"
+	replicas := []stranded.Replica{{Name: "v-server", Volume: "v", Node: "server-1", HealthyAt: healthy}}
+	for name, c := range map[string]map[string]VolumeCopies{
+		"Longhorn deleted the worker's replica of a two-copy volume": {"v": {Wanted: 2, Placed: 1}},
+		"a copy count change left a second replica":                  {"v": {Wanted: 1, Placed: 2}},
+		"the volume is missing from Longhorn's list":                 {},
+		"no volume counts were read":                                 nil,
+	} {
+		f := JudgeFreshness("worker-1", []string{"v"}, replicas, c)
+		assert.False(t, f.Current, name)
+		assert.Equal(t, FenceStopUnverified, f.Reason, name)
+	}
+}
+
+func TestJudgeFreshnessKeepsDoubtUnderAWorseReason(t *testing.T) {
+	healthy := "2026-10-24T08:00:00Z"
+	replicas := []stranded.Replica{
+		{Name: "a-server", Volume: "a", Node: "server-1", HealthyAt: healthy},
+		{Name: "d-server", Volume: "d", Node: "server-1", HealthyAt: healthy},
+	}
+	copies := map[string]VolumeCopies{"a": {Wanted: 2, Placed: 2}, "b": {Wanted: 1, Placed: 1}, "d": {Wanted: 1, Placed: 1}}
+	f := JudgeFreshness("worker-1", []string{"a", "b"}, replicas, copies)
+	assert.Equal(t, FenceStopOnlyCopy, f.Reason)
+	assert.True(t, f.MayLackWrites, "volume a's doubt survives volume b's missing copy")
+
+	f = JudgeFreshness("worker-1", []string{"d", "b"}, replicas, copies)
+	assert.Equal(t, FenceStopOnlyCopy, f.Reason)
+	assert.False(t, f.MayLackWrites, "a single copy elsewhere raises no doubt")
+}
+
+func TestKeepDoubtSurvivesALaterCurrentVerdict(t *testing.T) {
+	current := Freshness{Current: true, Stamps: []config.ReplicaStamp{{Volume: "a", Name: "a-server", Node: "server-1"}}}
+	for name, mark := range map[string]*FenceStopMark{
+		"stopped unverified":    {Reason: FenceStopUnverified},
+		"doubt under only-copy": {Reason: FenceStopOnlyCopy, MayLackWrites: true},
+		"doubt under stale":     {Reason: FenceStopStale, MayLackWrites: true},
+	} {
+		got := current.KeepDoubt(mark)
+		assert.False(t, got.Current, name)
+		assert.Equal(t, FenceStopUnverified, got.Reason, name)
+		assert.True(t, got.MayLackWrites, name)
+		assert.Equal(t, current.Stamps, got.Stamps, name)
+	}
+	assert.Equal(t, current, current.KeepDoubt(nil), "a running service has no mark")
+	assert.Equal(t, current, current.KeepDoubt(&FenceStopMark{Reason: FenceStopOnlyCopy}), "a sole copy rebuilt from the worker raises no doubt")
+	assert.Equal(t, current, current.KeepDoubt(&FenceStopMark{}), "a mark from an older kip falls through to the verdict")
+
+	onlyCopy := Freshness{Reason: FenceStopOnlyCopy}
+	assert.Equal(t, onlyCopy, onlyCopy.KeepDoubt(&FenceStopMark{Reason: FenceStopUnverified}), "a missing copy stays stronger than doubt")
+}
+
+func TestCountVolumeCopiesCountsEveryPlacedReplica(t *testing.T) {
+	replicas := []stranded.Replica{
+		{Name: "a-1", Volume: "a", Node: "server-1"},
+		{Name: "a-2", Volume: "a", Node: "worker-1", FailedAt: "2026-10-24T09:00:00Z"},
+		{Name: "a-3", Volume: "a"},
+		{Name: "b-1", Volume: "b", Node: "server-1"},
+	}
+	got := CountVolumeCopies(map[string]int{"a": 2, "b": 1, "c": 1}, replicas)
+	assert.Equal(t, map[string]VolumeCopies{"a": {Wanted: 2, Placed: 2}, "b": {Wanted: 1, Placed: 1}, "c": {Wanted: 1}}, got)
+}
+
+func TestReadVolumeCopiesReadsTheReplicaCount(t *testing.T) {
+	master := &routedRunner{routes: []route{{contains: "get volumes.longhorn.io", out: `{"items":[{"metadata":{"name":"a"},"spec":{"numberOfReplicas":2}},{"metadata":{"name":"b"},"spec":{"numberOfReplicas":1}}]}`}}}
+	got, err := ReadVolumeCopies(master, []stranded.Replica{{Name: "a-1", Volume: "a", Node: "server-1"}})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]VolumeCopies{"a": {Wanted: 2, Placed: 1}, "b": {Wanted: 1}}, got)
+}
+
+func TestNeedsConsent(t *testing.T) {
+	assert.True(t, NeedsConsent(FenceStopStale))
+	assert.True(t, NeedsConsent(FenceStopUnverified))
+	assert.False(t, NeedsConsent(FenceStopOnlyCopy))
+	assert.False(t, NeedsConsent(""))
 }
 
 func TestSameStamps(t *testing.T) {
@@ -211,6 +303,30 @@ func TestStartAfterFenceRestoresTheCountAndDropsTheMark(t *testing.T) {
 	untouched := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"44"},"spec":{"replicas":1}}`}}}
 	require.NoError(t, StartAfterFence(untouched, "shop", "db"))
 	assert.Empty(t, untouched.stdins)
+}
+
+func TestMarkMayLackWritesKeepsTheRestOfTheMark(t *testing.T) {
+	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"only-copy\",\"volumes\":[\"pvc-1\",\"pvc-2\"]}"}},"spec":{"replicas":0}}`}}}
+	require.NoError(t, MarkMayLackWrites(master, "shop", "db"))
+	require.Len(t, master.stdins, 1)
+	var patch struct {
+		Metadata struct {
+			ResourceVersion string            `json:"resourceVersion"`
+			Annotations     map[string]string `json:"annotations"`
+		} `json:"metadata"`
+		Spec *struct{} `json:"spec"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(master.stdins[0]), &patch))
+	assert.Equal(t, "43", patch.Metadata.ResourceVersion)
+	assert.Nil(t, patch.Spec, "the replica count stays as the stop set it")
+	assert.JSONEq(t, `{"node":"worker-1","replicas":2,"reason":"only-copy","volumes":["pvc-1","pvc-2"],"mayLackWrites":true}`, patch.Metadata.Annotations[FenceStopAnnotation])
+
+	marked := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"44","annotations":{"kipper.run/fence-stop":"{\"reason\":\"stale\",\"mayLackWrites\":true}"}},"spec":{"replicas":0}}`}}}
+	require.NoError(t, MarkMayLackWrites(marked, "shop", "db"))
+	assert.Empty(t, marked.stdins, "a mark that already records the doubt is left alone")
+
+	started := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"45"},"spec":{"replicas":1}}`}}}
+	assert.Error(t, MarkMayLackWrites(started, "shop", "db"), "a service started since the view was read cannot carry the doubt")
 }
 
 func TestAttachmentsOnListsLonghornAttachmentsOfTheNode(t *testing.T) {

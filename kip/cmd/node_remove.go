@@ -211,6 +211,19 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	if err := removalMayStart(records, worker.MachineID); err != nil {
 		return err
 	}
+	if force && worker.Fence == nil {
+		node, err := installer.ReadFenceNode(master, worker.Name)
+		if err != nil {
+			return err
+		}
+		view, err := installer.ReadFenceView(master, worker.Name)
+		if err != nil {
+			return err
+		}
+		if err := refuseForceWithoutFence(worker, node, view); err != nil {
+			return err
+		}
+	}
 	if force && worker.Fence != nil {
 		view, err := installer.ReadFenceView(master, worker.Name)
 		if err != nil {
@@ -826,11 +839,34 @@ func fenceAllowsRemoval(rec installer.NodeRecord, force bool) error {
 	return nil
 }
 
-// checkFencedRemoval allows the forced removal of a fenced worker only while
-// the fence still holds a host that answers over SSH, and only once every
-// service the fence stopped with older copies elsewhere has been decided on.
-// Services whose only copy is on the worker are listed, and the data-loss
-// check of the removal still applies to them.
+// refuseForceWithoutFence blocks forced removal while the Node exists and
+// Kipper pods use ReadWriteOnce Longhorn volumes on it. Call it for workers
+// with no fence. Removing the Node lets Kubernetes restart those pods on
+// potentially older copies, so fencing must stop the affected workloads first.
+func refuseForceWithoutFence(worker installer.NodeRecord, node installer.FenceNode, view installer.FenceView) error {
+	if !node.Exists {
+		return nil
+	}
+	var running []string
+	for _, svc := range view.Services {
+		if len(svc.Pods) > 0 {
+			running = append(running, svc.Label())
+		}
+	}
+	for _, h := range view.Holders {
+		running = append(running, h.Label())
+	}
+	if len(running) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s still runs %s that %s to %s volumes through it: %s. Run 'kip node fence %s' first: it checks each workload's data copies and stops workloads that need a decision. Forced removal skips those checks",
+		worker.Name, plural(len(running), "a workload", "workloads"), plural(len(running), "writes", "write"), plural(len(running), "its", "their"), strings.Join(running, ", "), worker.Name)
+}
+
+// checkFencedRemoval requires a reachable worker to remain fenced and blocks
+// removal while stopped services have copies elsewhere that need consent
+// because they are older or may lack writes made on the worker. It lists
+// services whose only copy is on the worker for the removal's data-loss check.
 func checkFencedRemoval(out io.Writer, rec installer.NodeRecord, view installer.FenceView, records []installer.NodeRecord, dial func() (rejoinHost, func(), error)) error {
 	if host, done, err := dial(); err == nil {
 		defer done()
@@ -856,18 +892,18 @@ func checkFencedRemoval(out io.Writer, rec installer.NodeRecord, view installer.
 		if svc.Stop == nil {
 			continue
 		}
-		fresh := installer.JudgeFreshness(rec.Name, svc.Volumes, replicas)
+		fresh := installer.JudgeFreshness(rec.Name, svc.Volumes, replicas, view.Copies).KeepDoubt(svc.Stop)
 		switch {
 		case fresh.Current:
-		case fresh.Reason == installer.FenceStopStale:
+		case installer.NeedsConsent(fresh.Reason):
 			waiting = append(waiting, svc.StatefulSet+" ("+svc.Namespace+")")
 		default:
 			onlyCopy = append(onlyCopy, svc)
 		}
 	}
 	if len(waiting) > 0 {
-		return fmt.Errorf("%s %s stopped, and %s other copies may be older than %s data on %s. Removing the worker loses that data, so decide first: start %s on the older copies with 'kip service start <name> --accept-stale-data', or rejoin the worker with 'kip node add %s'",
-			strings.Join(waiting, ", "), plural(len(waiting), "is", "are"), plural(len(waiting), "its", "their"), plural(len(waiting), "its", "their"), rec.Name, plural(len(waiting), "it", "them"), rec.Host)
+		return fmt.Errorf("%s %s stopped, and %s other copies may lack writes that exist only on %s. Removing the worker loses those writes, so decide first: start %s on the other copies with 'kip service start <name> --accept-stale-data', or rejoin the worker with 'kip node add %s'. Rejoining asks you to give up those writes before Longhorn can rebuild the worker's copies from copies on other nodes",
+			strings.Join(waiting, ", "), plural(len(waiting), "is", "are"), plural(len(waiting), "its", "their"), rec.Name, plural(len(waiting), "it", "them"), rec.Host)
 	}
 	for _, svc := range onlyCopy {
 		say(out, "  ⚠  %s stays stopped: the only copy of its data is on %s. After the removal, %s\n", svc.Label(), rec.Name, restoreAdvice(svc.Namespace, svc.StatefulSet))

@@ -57,7 +57,7 @@ func TestNodeAlertNamesStrandedServicesTheirCopyAndTheFence(t *testing.T) {
 		return []stranded.Replica{{Name: "r1", Volume: "pvc-1", Node: "server-1", HealthyAt: "2026-10-24T08:00:00Z"}}, nil
 	}
 	reason := nodeAlertReason(t, rc, downNode())
-	for _, want := range []string{"db (shop)", "current copy on server-1", "kip node fence worker-1"} {
+	for _, want := range []string{"db (shop)", "another copy on server-1", "kip node fence worker-1"} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("alert %q does not mention %q", reason, want)
 		}
