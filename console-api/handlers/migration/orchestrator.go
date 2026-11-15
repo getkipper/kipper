@@ -901,8 +901,28 @@ func (h *Handler) createApp(ctx context.Context, name, namespace string, spec ma
 		}); err != nil {
 			return fmt.Errorf("resetting build status for %s/%s: %w", namespace, name, err)
 		}
-		if _, err := builder.CreateBuildJob(ctx, h.Client, h.CRClient, app, commit); err != nil {
+		job, err := builder.CreateBuildJob(ctx, h.Client, h.CRClient, app, commit)
+		if err != nil {
 			return fmt.Errorf("triggering rebuild for %s/%s: %w", namespace, name, err)
+		}
+		// The queue can record a source-change discard when status names the
+		// Job or still has this commit's Pending build without a Job name.
+		// Preserve cleared status and status with a Job name or a different
+		// commit so discard results and other build controller updates survive.
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var fresh kipperv1.App
+			if err := h.CRClient.Get(ctx, crclient.ObjectKey{Namespace: namespace, Name: name}, &fresh); err != nil {
+				return err
+			}
+			if b := fresh.Status.Build; b == nil || b.Build != "" || b.Commit != commit {
+				return nil
+			}
+			created := job.CreationTimestamp
+			fresh.Status.Build.Build = job.Name
+			fresh.Status.Build.JobCreatedAt = &created
+			return h.CRClient.Status().Update(ctx, &fresh)
+		}); err != nil {
+			return fmt.Errorf("recording the build job in the status of app %s/%s: %w", namespace, name, err)
 		}
 	}
 

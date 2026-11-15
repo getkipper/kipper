@@ -280,13 +280,14 @@ func (wh *Webhooks) Rebuild(w http.ResponseWriter, r *http.Request) {
 	wh.triggerBuild(ctx, w, &appCR, commit)
 }
 
-// describesTheSameBuild reports whether a stored verdict is about the job a
-// status was derived from. Both name the job, so this needs no clock: comparing
-// a job's apiserver-stamped creation time against a time the controller stamped
-// itself assumed the two agreed.
+// describesTheSameBuild reports whether a stored verdict applies to the same
+// Job as the derived status or to a newer Job. A nil stored status returns false.
 //
-// A verdict that names no job predates the field and is treated as describing
-// whatever is reported, which keeps it preferred rather than hidden.
+// A missing Job name or nil derived status keeps the stored verdict eligible,
+// preserving verdicts recorded before Job names were stored. Different names
+// require both creation timestamps and a newer stored Job, ordered by timestamp
+// and then lexicographically by name. API server timestamps avoid clock
+// differences with the controller.
 func describesTheSameBuild(stored, derived *kipperv1.AppBuildStatus) bool {
 	if stored == nil {
 		return false
@@ -294,7 +295,19 @@ func describesTheSameBuild(stored, derived *kipperv1.AppBuildStatus) bool {
 	if stored.Build == "" {
 		return true
 	}
-	return derived == nil || derived.Build == "" || derived.Build == stored.Build
+	if derived == nil || derived.Build == "" || derived.Build == stored.Build {
+		return true
+	}
+	// Deleting a discarded waiting build can leave an earlier Job as the
+	// newest one listed, so its status must yield to the newer stored verdict.
+	if stored.JobCreatedAt == nil || derived.StartedAt == nil {
+		return false
+	}
+	// Match GetBuildStatus's ordering when creation timestamps are equal.
+	if stored.JobCreatedAt.Equal(derived.StartedAt) {
+		return stored.Build > derived.Build
+	}
+	return stored.JobCreatedAt.After(derived.StartedAt.Time)
 }
 
 // BuildStatus returns the current build status and git source info for an app.

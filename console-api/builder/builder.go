@@ -13,6 +13,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -38,6 +39,20 @@ const (
 	defaultBuildMemoryLimit = "2Gi"
 	defaultBuildCPULimit    = "2"
 )
+
+// defaultBuildTimeout limits each build's runtime so a hung build cannot
+// block other projects in the shared queue, which defaults to one build at a time.
+const defaultBuildTimeout = time.Hour
+
+// buildTimeout reads BUILD_TIMEOUT as a positive duration such as 90m, falling
+// back to the default for an unset or invalid value. Kubernetes starts the
+// deadline timer when the Job resumes, so only time outside the queue counts.
+func buildTimeout() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("BUILD_TIMEOUT")); err == nil && d > 0 {
+		return d
+	}
+	return defaultBuildTimeout
+}
 
 // buildLimits resolves the kaniko build container's CPU and memory limits.
 // Resolution is layered, most specific first: the app's own BuildResources,
@@ -327,6 +342,10 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, owners nso
 			// Cleanup is the label-scoped CancelBuilds sweep plus the Job TTL.
 		},
 		Spec: batchv1.JobSpec{
+			// The build controller starts queued builds, a few at a time, so
+			// several pushes at once cannot exhaust a small node's memory.
+			Suspend:                 boolPtr(true),
+			ActiveDeadlineSeconds:   int64Ptr(int64(buildTimeout().Seconds())),
 			BackoffLimit:            &backoffLimit,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
@@ -952,8 +971,9 @@ func GetBuildPod(ctx context.Context, client kubernetes.Interface, namespace, ap
 	return latest, nil
 }
 
-// CancelBuild deletes the active build Job for an app. Its ephemeral secrets
-// are owned by the Job, so foreground deletion garbage-collects them.
+// CancelBuild deletes every unfinished build Job for an app, running or still
+// waiting in the queue. Each Job owns its ephemeral secrets, so foreground
+// deletion garbage-collects them.
 func CancelBuild(ctx context.Context, client kubernetes.Interface, namespace, appName string) error {
 	propagation := metav1.DeletePropagationForeground
 	jobs, err := client.BatchV1().Jobs(buildsNamespace).List(ctx, metav1.ListOptions{
@@ -964,7 +984,7 @@ func CancelBuild(ctx context.Context, client kubernetes.Interface, namespace, ap
 	}
 
 	for i := range jobs.Items {
-		if jobs.Items[i].Status.Active > 0 {
+		if jobs.Items[i].Status.Succeeded == 0 && jobs.Items[i].Status.Failed == 0 {
 			if err := client.BatchV1().Jobs(buildsNamespace).Delete(ctx, jobs.Items[i].Name, metav1.DeleteOptions{
 				PropagationPolicy: &propagation,
 			}); err != nil {
@@ -977,9 +997,8 @@ func CancelBuild(ctx context.Context, client kubernetes.Interface, namespace, ap
 }
 
 // CancelBuilds deletes every build Job for an app, whether active, pending, or
-// already finished. Unlike CancelBuild (which only stops a running build), this
-// guarantees no build Job survives to reconcile later and write its image onto
-// the App — the precedence rollback needs so a completing build can't undo it.
+// already finished. This prevents a surviving Job from later reconciling its
+// image onto the App and undoing a rollback.
 func CancelBuilds(ctx context.Context, client kubernetes.Interface, namespace, appName string) error {
 	propagation := metav1.DeletePropagationForeground
 	selector := buildSelector(namespace, appName)
@@ -1012,7 +1031,9 @@ func CancelBuilds(ctx context.Context, client kubernetes.Interface, namespace, a
 	return nil
 }
 
-// GetBuildStatus returns the current build status from the latest build Job.
+// GetBuildStatus returns the status of the app's newest build Job, or nil if
+// no build exists. Equal creation times select the lexicographically greatest
+// Job name. Job listing errors are returned.
 func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace, appName string) (*kipperv1.AppBuildStatus, error) {
 	jobs, err := client.BatchV1().Jobs(buildsNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: buildSelector(namespace, appName),
@@ -1025,9 +1046,8 @@ func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace,
 		return nil, nil
 	}
 
-	// Find the most recent job. Equal timestamps break on name, the same way
-	// supersession does, so two jobs created in the same second cannot make the
-	// older one the latest for one reader and not the other.
+	// Use the same tie-breaker as the controller so both select the same Job
+	// when multiple builds share a creation timestamp.
 	latest := &jobs.Items[0]
 	for i := range jobs.Items {
 		switch {
@@ -1046,10 +1066,20 @@ func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace,
 	switch {
 	case latest.Status.Succeeded > 0:
 		status.Phase = "Succeeded"
-		if len(latest.Status.Conditions) > 0 {
-			t := latest.Status.Conditions[0].LastTransitionTime
+		// Builds start suspended, so the first condition may record queue
+		// release rather than completion.
+		if cond := jobCondition(latest, batchv1.JobComplete); cond != nil {
+			t := cond.LastTransitionTime
 			status.CompletedAt = &t
 		}
+	case failedCondition(latest) != nil:
+		// A Job can fail through its condition alone, as when its deadline
+		// expires before any pod runs.
+		cond := failedCondition(latest)
+		status.Phase = "Failed"
+		status.Message = cond.Message
+		t := cond.LastTransitionTime
+		status.CompletedAt = &t
 	case latest.Status.Failed > 0:
 		status.Phase = "Failed"
 		status.Message = "build failed"
@@ -1065,6 +1095,21 @@ func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace,
 	}
 
 	return status, nil
+}
+
+// failedCondition returns a Job's true Failed condition, or nil.
+func failedCondition(job *batchv1.Job) *batchv1.JobCondition {
+	return jobCondition(job, batchv1.JobFailed)
+}
+
+// jobCondition returns a Job's true condition of the given type, or nil.
+func jobCondition(job *batchv1.Job, kind batchv1.JobConditionType) *batchv1.JobCondition {
+	for i := range job.Status.Conditions {
+		if c := &job.Status.Conditions[i]; c.Type == kind && c.Status == corev1.ConditionTrue {
+			return c
+		}
+	}
+	return nil
 }
 
 func propagationBackground() *metav1.DeletionPropagation {

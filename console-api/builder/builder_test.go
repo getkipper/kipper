@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -70,6 +71,10 @@ func TestCreateBuildJob(t *testing.T) {
 
 	// No cross-namespace App owner reference (the App is in the tenant namespace).
 	assert.Empty(t, job.OwnerReferences)
+
+	// The build waits in the cluster's build queue, which starts it.
+	require.NotNil(t, job.Spec.Suspend)
+	assert.True(t, *job.Spec.Suspend)
 
 	// The build runs as the zero-permission builder identity with no token.
 	assert.Equal(t, buildsServiceAccount, job.Spec.Template.Spec.ServiceAccountName)
@@ -741,6 +746,31 @@ func TestCancelBuild_NoJobs(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// A queued build has no pod yet, and canceling it must keep the queue from
+// starting it later. A finished build stays as the app's last result.
+func TestCancelBuild_StopsQueuedAndRunningBuilds(t *testing.T) {
+	labels := map[string]string{appLabel: "my-app", buildLabel: "true", sourceNamespaceLabel: "project-test"}
+	job := func(name string, status batchv1.JobStatus, suspended bool) *batchv1.Job {
+		return &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildsNamespace, Labels: labels},
+			Spec:       batchv1.JobSpec{Suspend: &suspended},
+			Status:     status,
+		}
+	}
+	client := fake.NewClientset(
+		job("queued", batchv1.JobStatus{}, true),
+		job("running", batchv1.JobStatus{Active: 1}, false),
+		job("done", batchv1.JobStatus{Succeeded: 1}, false),
+	)
+
+	require.NoError(t, CancelBuild(context.Background(), client, "project-test", "my-app"))
+
+	remaining, err := client.BatchV1().Jobs(buildsNamespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, remaining.Items, 1)
+	assert.Equal(t, "done", remaining.Items[0].Name)
+}
+
 func TestGetBuildStatus_NoJobs(t *testing.T) {
 	client := fake.NewClientset()
 	status, err := GetBuildStatus(context.Background(), client, "project-test", "my-app")
@@ -1030,4 +1060,62 @@ func testOwners(t *testing.T, objs ...crclient.Object) nsowner.Reader {
 		t.Fatalf("registering the core scheme: %v", err)
 	}
 	return crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+}
+
+// Builds run one at a time by default, so a hung one would hold up every
+// other project's builds until something stopped it.
+func TestBuildJobHasATimeLimit(t *testing.T) {
+	for _, tc := range []struct{ setting, want string }{
+		{"", "1h0m0s"},
+		{"90m", "1h30m0s"},
+		{"forever", "1h0m0s"},
+		{"-5m", "1h0m0s"},
+	} {
+		t.Run(tc.setting, func(t *testing.T) {
+			t.Setenv("BUILD_TIMEOUT", tc.setting)
+			job, err := CreateBuildJob(context.Background(), buildFakeClient(), testOwners(t), testApp(), "abc123def456")
+			require.NoError(t, err)
+			require.NotNil(t, job.Spec.ActiveDeadlineSeconds)
+			assert.Equal(t, tc.want, (time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second).String())
+		})
+	}
+}
+
+// A Job can fail through its condition alone, as when its deadline passes
+// before any pod runs.
+func TestGetBuildStatus_FailedByConditionAlone(t *testing.T) {
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app-build-1", Namespace: buildsNamespace, Labels: map[string]string{
+			appLabel: "my-app", buildLabel: "true", sourceNamespaceLabel: "project-test",
+		}},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "Job was active longer than specified deadline",
+		}}},
+	}
+	status, err := GetBuildStatus(context.Background(), fake.NewClientset(job), "project-test", "my-app")
+	require.NoError(t, err)
+	require.NotNil(t, status)
+	assert.Equal(t, "Failed", status.Phase)
+	assert.Equal(t, "Job was active longer than specified deadline", status.Message)
+}
+
+// TestGetBuildStatus_CompletedAtIsWhenTheBuildCompleted covers a build whose
+// first condition records release from suspension. Its completion time comes
+// from the Complete condition.
+func TestGetBuildStatus_CompletedAtIsWhenTheBuildCompleted(t *testing.T) {
+	released := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	completed := metav1.NewTime(time.Now())
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app-build-2", Namespace: buildsNamespace, Labels: map[string]string{
+			appLabel: "my-app", buildLabel: "true", sourceNamespaceLabel: "project-test",
+		}},
+		Status: batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobSuspended, Status: corev1.ConditionFalse, LastTransitionTime: released},
+			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: completed},
+		}},
+	}
+	status, err := GetBuildStatus(context.Background(), fake.NewClientset(job), "project-test", "my-app")
+	require.NoError(t, err)
+	require.NotNil(t, status.CompletedAt)
+	assert.True(t, status.CompletedAt.Equal(&completed))
 }

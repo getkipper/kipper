@@ -156,9 +156,9 @@ func main() {
 			handlers.RetireConnectorSecrets(ctx, clientset, 10*time.Minute, time.Now)
 		})
 
-	// Backstop cleanup of build Jobs and their ephemeral credential secrets in
-	// kipper-builds: sweeps anything older than 3h, so a hung build or a secret
-	// orphaned by a console-api restart never outlives its build.
+	// Supplement Job TTL cleanup in kipper-builds with a sweep every 30 minutes
+	// for builds started over 3 hours ago and old, unused credential secrets,
+	// including credentials orphaned by a console-api restart.
 	go builder.RunBuildJanitor(context.Background(), clientset, 30*time.Minute, 3*time.Hour)
 
 	// Keep the cluster's kipper.run subdomain alive on the gateway.

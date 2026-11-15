@@ -383,6 +383,47 @@ func TestBuildReconciler_FailedJob(t *testing.T) {
 	assert.Equal(t, "Dockerfile not found", updated.Status.Build.Message)
 }
 
+// A Job can fail with no pod at all, for example when its deadline passes
+// before a pod could be created. The App still learns that its build failed.
+func TestBuildReconciler_FailedJobWithoutAFailedPod(t *testing.T) {
+	scheme := testScheme()
+	app := newTestApp()
+	app.Spec.Git = &kipperv1.AppGitSource{URL: "https://github.com/example/app.git"}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-app-build-jkl012",
+			Namespace: "project-test",
+			Labels: map[string]string{
+				"kipper.run/build":            "true",
+				"kipper.run/app":              "my-app",
+				"kipper.run/source-namespace": "project-test",
+			},
+			Annotations: map[string]string{
+				builder.SourceFingerprintAnnotation: builder.GitSourceFingerprint(app.Spec.Git),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+				Reason: batchv1.JobReasonDeadlineExceeded, Message: "Job was active longer than specified deadline",
+			}},
+		},
+	}
+	fakeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, job).WithStatusSubresource(app).Build()
+	reconciler := &BuildReconciler{Client: fakeClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "my-app-build-jkl012", Namespace: "project-test"},
+	})
+	require.NoError(t, err)
+
+	var updated kipperv1.App
+	require.NoError(t, fakeClient.Get(context.Background(), crclient.ObjectKey{Namespace: "project-test", Name: "my-app"}, &updated))
+	require.NotNil(t, updated.Status.Build)
+	assert.Equal(t, "Failed", updated.Status.Build.Phase)
+	assert.Equal(t, "Job was active longer than specified deadline", updated.Status.Build.Message)
+}
+
 func TestBuildReconciler_ActiveJob(t *testing.T) {
 	scheme := testScheme()
 

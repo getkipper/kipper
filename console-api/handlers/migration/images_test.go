@@ -158,6 +158,14 @@ func TestCreateApp_GitAppGetsPlaceholderAndBuild(t *testing.T) {
 	if jobs.Items[0].Labels["kipper.run/build"] != "true" {
 		t.Fatal("triggered job must carry the build label")
 	}
+	// The App's status must name the awaited build so the queue can report
+	// why it discarded that build when its git source changes.
+	if err := h.CRClient.Get(context.Background(), crclient.ObjectKey{Namespace: "shop-prod", Name: "backend"}, &app); err != nil {
+		t.Fatalf("getting created app: %v", err)
+	}
+	if app.Status.Build == nil || app.Status.Build.Phase != "Pending" || app.Status.Build.Build != jobs.Items[0].Name {
+		t.Fatalf("build status = %+v, want Pending naming %s", app.Status.Build, jobs.Items[0].Name)
+	}
 }
 
 // An image-based app keeps its image untouched and triggers no build.

@@ -181,6 +181,16 @@ git:
 
 To raise the default for every build on a cluster instead of per app, set `BUILD_MEMORY_LIMIT` (and optionally `BUILD_CPU_LIMIT`) on the console-api. A per-app setting always wins over the cluster default.
 
+By default, a cluster runs one build at a time. Further builds wait in a queue with a `Pending` status and start in request order as slots become available. That keeps several pushes, or a migration that rebuilds every git app at once, from running a small node out of memory. On a cluster with room for more, set `BUILD_MAX_CONCURRENT` on the console-api to the number of builds it may run side by side:
+
+```bash
+kip cluster env console-api BUILD_MAX_CONCURRENT=2
+```
+
+When a newer build of the same app joins the queue, older queued builds are dropped. Queued builds are also dropped if their app was deleted. If an app's git source changes after a build is queued, that build is discarded. Its status becomes `Discarded` if the app still tracks that build. Deploy again to build the current source. Canceling a build from the console removes its queued builds as well.
+
+By default, a build has a one-hour time limit starting when it leaves the queue. It fails if it exceeds that limit. Set `BUILD_TIMEOUT` the same way for builds that need longer, for example `BUILD_TIMEOUT=90m`.
+
 ### Private repositories
 
 For private repos, pass your Git access token when deploying:

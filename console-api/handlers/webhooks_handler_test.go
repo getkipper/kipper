@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
@@ -736,6 +737,46 @@ func TestWebhooksHandler_BuildStatusServesABuildStartedAfterTheDiscard(t *testin
 		"a build started after the discard was hidden behind the previous build's verdict")
 }
 
+// TestWebhooksHandler_BuildStatusServesADiscardNewerThanAnyJob covers queue
+// deletion of a discarded waiting build, which can leave an earlier successful
+// Job as the newest one listed. The operator needs the later build's verdict.
+func TestWebhooksHandler_BuildStatusServesADiscardNewerThanAnyJob(t *testing.T) {
+	now := time.Now()
+	discardedAt := metav1.NewTime(now)
+	appCR := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{
+			Image: "registry.example.com/shop/checkout:current",
+			Git:   &kipperv1.AppGitSource{URL: "https://git.example.com/shop/checkout.git", Branch: "release"},
+		},
+		Status: kipperv1.AppStatus{Build: &kipperv1.AppBuildStatus{
+			Phase:        "Discarded",
+			Message:      "The app's git source differs from this build's source.",
+			Build:        "checkout-build-dropped",
+			JobCreatedAt: &discardedAt,
+		}},
+	}
+	earlier := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "checkout-build-earlier", Namespace: "kipper-builds",
+			CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Minute)),
+			Labels:            map[string]string{"kipper.run/build": "true", "kipper.run/app": "checkout", "kipper.run/source-namespace": "shop-test"},
+		},
+		Status: batchv1.JobStatus{Succeeded: 1},
+	}
+
+	handler := &Webhooks{Client: fake.NewClientset(earlier), CRClient: testCRClient(appCR)}
+	r := chi.NewRouter()
+	r.Get("/api/v1/projects/{name}/apps/{app}/build/status", handler.BuildStatus)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/projects/shop-test/apps/checkout/build/status", nil))
+
+	var got map[string]interface{}
+	assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "Discarded", got["phase"], "the earlier build's success hid the verdict on the later one")
+}
+
 // The three structs that marshal the deploy-history annotation are mirrors, and
 // this one round-trips the whole list on rollback. A field present only on the
 // controller's copy is stripped from every entry the first time somebody rolls
@@ -870,4 +911,14 @@ func TestWebhooksHandler_BuildStatusDoesNotProbeACredentialBoundElsewhere(t *tes
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, false, got["git_credential_valid"],
 		"the console was not told the credential is unusable")
+}
+
+// TestDescribesTheSameBuild_BreaksATimeTieByName verifies that equal creation
+// timestamps favor the lexicographically greater Job name, matching GetBuildStatus.
+func TestDescribesTheSameBuild_BreaksATimeTieByName(t *testing.T) {
+	at := metav1.NewTime(time.Now())
+	stored := &kipperv1.AppBuildStatus{Phase: "Discarded", Build: "web-build-b", JobCreatedAt: &at}
+
+	assert.True(t, describesTheSameBuild(stored, &kipperv1.AppBuildStatus{Build: "web-build-a", StartedAt: &at}))
+	assert.False(t, describesTheSameBuild(stored, &kipperv1.AppBuildStatus{Build: "web-build-c", StartedAt: &at}))
 }
