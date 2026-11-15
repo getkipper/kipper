@@ -3,7 +3,9 @@ package cmd
 import (
 	"compress/gzip"
 	"context"
+	"crypto/md5" //nolint:gosec // S3 checks an SSE-C key against its MD5
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
@@ -59,13 +62,13 @@ func runBackupDescribe(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n  %s\n\n", platform.BackupsNotConfigured)
 		return nil
 	}
-	return describeBackup(ctx, k8sClient.Dynamic(), args[0], os.Stdout, &http.Client{Timeout: time.Minute})
+	return describeBackup(ctx, k8sClient.Dynamic(), k8sClient.Clientset(), args[0], os.Stdout, &http.Client{Timeout: time.Minute})
 }
 
 // describeBackup prints the named backup. It downloads the error and warning
 // messages only when Velero counted some. Failures to read volume backups or
 // messages are printed in place of those details.
-func describeBackup(ctx context.Context, dyn dynamic.Interface, name string, out io.Writer, httpClient *http.Client) error {
+func describeBackup(ctx context.Context, dyn dynamic.Interface, cs kubernetes.Interface, name string, out io.Writer, httpClient *http.Client) error {
 	backup, err := dyn.Resource(backupGVR).Namespace("velero").Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return fmt.Errorf("there is no backup named %q. Run kip backup list to see available backups", name)
@@ -86,8 +89,11 @@ func describeBackup(ctx context.Context, dyn dynamic.Interface, name string, out
 	var resultsErr error
 	if backupCount(*backup, "errors")+backupCount(*backup, "warnings") > 0 {
 		var r backupResults
-		if r, resultsErr = fetchBackupResults(ctx, dyn, name, httpClient); resultsErr == nil {
-			results = &r
+		var sseKey []byte
+		if sseKey, resultsErr = backupSSEKey(ctx, dyn, cs, *backup); resultsErr == nil {
+			if r, resultsErr = fetchBackupResults(ctx, dyn, name, sseKey, httpClient); resultsErr == nil {
+				results = &r
+			}
 		}
 	}
 	writeBackupDescription(out, *backup, pvbs, pvbErr, results, resultsErr)
@@ -125,8 +131,9 @@ const downloadCleanupWait = 10 * time.Second
 // fetchBackupResults asks Velero for a link to the backup's error and warning
 // messages and downloads them. It attempts to delete its DownloadRequest when
 // done, allowing up to downloadCleanupWait even if ctx has ended. Cleanup errors
-// are ignored. The HTTP client controls the download timeout.
-func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup string, httpClient *http.Client) (backupResults, error) {
+// are ignored. The HTTP client controls the download timeout. A non-nil sseKey
+// is the SSE-C key the messages were stored with.
+func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup string, sseKey []byte, httpClient *http.Client) (backupResults, error) {
 	suffix := make([]byte, 4)
 	if _, err := rand.Read(suffix); err != nil {
 		return backupResults{}, err
@@ -154,7 +161,27 @@ func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup strin
 	if err != nil {
 		return backupResults{}, err
 	}
-	resp, err := httpClient.Get(link) //nolint:gosec // the URL is Velero's presigned link to the backup storage
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return backupResults{}, downloadError(err)
+	}
+	if sseKey != nil {
+		// The key decrypts every backup, so it goes only over TLS and only
+		// to the address Velero signed.
+		if req.URL.Scheme != "https" {
+			return backupResults{}, fmt.Errorf("the backup storage's download link is not HTTPS, so kip does not send it the SSE-C key")
+		}
+		sum := md5.Sum(sseKey) //nolint:gosec // S3 checks an SSE-C key against its MD5
+		req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Algorithm", "AES256")
+		req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Key", base64.StdEncoding.EncodeToString(sseKey))
+		req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Key-Md5", base64.StdEncoding.EncodeToString(sum[:]))
+		keyed := *httpClient
+		keyed.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return errors.New("the backup storage redirected the download, and kip does not follow a redirect with the SSE-C key")
+		}
+		httpClient = &keyed
+	}
+	resp, err := httpClient.Do(req) //nolint:gosec // the URL is Velero's presigned link to the backup storage
 	if err != nil {
 		return backupResults{}, downloadError(err)
 	}
@@ -176,6 +203,40 @@ func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup strin
 		return backupResults{}, fmt.Errorf("reading the messages: %w", err)
 	}
 	return results, nil
+}
+
+// backupSSEKey returns the SSE-C key of the storage location a backup was
+// written to, or nil when no key is configured. A missing location also returns
+// nil, leaving the download to report any storage access problem.
+func backupSSEKey(ctx context.Context, dyn dynamic.Interface, cs kubernetes.Interface, backup unstructured.Unstructured) ([]byte, error) {
+	location, _, _ := unstructured.NestedString(backup.Object, "spec", "storageLocation")
+	if location == "" {
+		location = "default"
+	}
+	bsl, err := dyn.Resource(backupStorageLocationGVR).Namespace("velero").Get(ctx, location, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading backup location %s: %w", location, err)
+	}
+	ref, _, _ := unstructured.NestedString(bsl.Object, "spec", "config", "customerKeyEncryptionSecret")
+	if ref == "" {
+		return nil, nil
+	}
+	secretName, field, ok := strings.Cut(ref, "/")
+	if !ok {
+		return nil, fmt.Errorf("backup location %s names its SSE-C key as %q, which is not <secret>/<key>", location, ref)
+	}
+	secret, err := cs.CoreV1().Secrets("velero").Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("reading the SSE-C key in Secret velero/%s: %w", secretName, err)
+	}
+	key := secret.Data[field]
+	if len(key) != 32 {
+		return nil, fmt.Errorf("the SSE-C key in Secret velero/%s is not 32 bytes long", secretName)
+	}
+	return key, nil
 }
 
 // downloadError describes a failed download without the presigned link, whose

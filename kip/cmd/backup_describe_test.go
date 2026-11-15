@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/md5" //nolint:gosec // S3 checks an SSE-C key against its MD5
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,11 +17,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -118,9 +122,10 @@ func gzipJSON(t *testing.T, v any) []byte {
 // DownloadRequest with url.
 func describeClient(url string, objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		backupGVR:          "BackupList",
-		podVolumeBackupGVR: "PodVolumeBackupList",
-		downloadRequestGVR: "DownloadRequestList",
+		backupGVR:                "BackupList",
+		podVolumeBackupGVR:       "PodVolumeBackupList",
+		downloadRequestGVR:       "DownloadRequestList",
+		backupStorageLocationGVR: "BackupStorageLocationList",
 	}, objects...)
 	dyn.PrependReactor("get", "downloadrequests", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		name := action.(k8stesting.GetAction).GetName()
@@ -147,7 +152,7 @@ func TestDescribeBackupDownloadsTheMessages(t *testing.T) {
 	dyn := describeClient(srv.URL, describedBackup("PartiallyFailed", 1, 0))
 	var out bytes.Buffer
 
-	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, srv.Client()))
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "velero-daily-apps-20261021030000", &out, srv.Client()))
 
 	assert.Contains(t, out.String(), "shop: pod volume backup failed")
 	left, err := dyn.Resource(downloadRequestGVR).Namespace("velero").List(context.Background(), metav1.ListOptions{})
@@ -167,7 +172,7 @@ func TestDescribeBackupSkipsTheDownloadForACleanBackup(t *testing.T) {
 	dyn := describeClient("http://unused.invalid", describedBackup("Completed", 0, 0))
 	var out bytes.Buffer
 
-	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, http.DefaultClient))
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "velero-daily-apps-20261021030000", &out, http.DefaultClient))
 
 	for _, a := range dyn.Actions() {
 		assert.False(t, a.GetVerb() == "create", "a backup without errors or warnings needs no download")
@@ -178,7 +183,7 @@ func TestDescribeBackupSkipsTheDownloadForACleanBackup(t *testing.T) {
 func TestDescribeBackupNamesAMissingBackup(t *testing.T) {
 	dyn := describeClient("http://unused.invalid")
 
-	err := describeBackup(context.Background(), dyn, "nope", io.Discard, http.DefaultClient)
+	err := describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "nope", io.Discard, http.DefaultClient)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kip backup list")
@@ -191,7 +196,7 @@ func TestDescribeBackupReportsAnUnreachableDownload(t *testing.T) {
 	dyn := describeClient(srv.URL, describedBackup("PartiallyFailed", 1, 0))
 	var out bytes.Buffer
 
-	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, srv.Client()))
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "velero-daily-apps-20261021030000", &out, srv.Client()))
 
 	assert.True(t, strings.Contains(out.String(), "kip could not read the error and warning messages") && strings.Contains(out.String(), "403"), out.String())
 }
@@ -204,7 +209,7 @@ func TestDescribeBackupKeepsThePresignedLinkOutOfATransportError(t *testing.T) {
 	dyn := describeClient(link, describedBackup("PartiallyFailed", 1, 0))
 	var out bytes.Buffer
 
-	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, &http.Client{Timeout: 5 * time.Second}))
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "velero-daily-apps-20261021030000", &out, &http.Client{Timeout: 5 * time.Second}))
 
 	text := out.String()
 	assert.Contains(t, text, "kip could not read the error and warning messages: downloading from the backup storage at "+strings.TrimPrefix(srv.URL, "http://"))
@@ -225,7 +230,7 @@ func TestDescribeBackupKeepsASignedRedirectOutOfTheError(t *testing.T) {
 	dyn := describeClient(srv.URL+"/results?X-Amz-Signature=outer", describedBackup("PartiallyFailed", 1, 0))
 	var out bytes.Buffer
 
-	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, srv.Client()))
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "velero-daily-apps-20261021030000", &out, srv.Client()))
 
 	text := out.String()
 	assert.Contains(t, text, "kip could not read the error and warning messages: downloading from the backup storage")
@@ -248,7 +253,7 @@ func TestDescribeBackupRefusesOversizedMessages(t *testing.T) {
 	dyn := describeClient(srv.URL, describedBackup("PartiallyFailed", 1, 0))
 	var out bytes.Buffer
 
-	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, srv.Client()))
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "velero-daily-apps-20261021030000", &out, srv.Client()))
 
 	assert.Contains(t, out.String(), "kip could not read the error and warning messages: the messages are larger than 1 MiB")
 	assert.NotContains(t, out.String(), strings.Repeat("x", 100))
@@ -291,7 +296,7 @@ func TestDescribeBackupGivesUpWhenVeleroNeverAnswers(t *testing.T) {
 	}, describedBackup("PartiallyFailed", 1, 0))
 	var out bytes.Buffer
 
-	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, http.DefaultClient))
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(), "velero-daily-apps-20261021030000", &out, http.DefaultClient))
 
 	assert.Contains(t, out.String(), "kip could not read the error and warning messages: velero did not provide a download link")
 	left, err := dyn.Resource(downloadRequestGVR).Namespace("velero").List(context.Background(), metav1.ListOptions{})
@@ -308,4 +313,91 @@ func TestWriteBackupDescriptionNamesValidationErrors(t *testing.T) {
 	writeBackupDescription(&out, *b, nil, nil, nil, nil)
 
 	assert.Contains(t, out.String(), "Validation: backup storage location 'default' is unavailable")
+}
+
+// sseCFixtures returns a backup location that encrypts with SSE-C and the
+// Secret holding its key.
+func sseCFixtures(key []byte) (*unstructured.Unstructured, *corev1.Secret) {
+	location := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "velero.io/v1", "kind": "BackupStorageLocation",
+		"metadata": map[string]any{"name": "default", "namespace": "velero"},
+		"spec":     map[string]any{"config": map[string]any{"customerKeyEncryptionSecret": "kipper-backup-sse-key/customer-key"}},
+	}}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "kipper-backup-sse-key", Namespace: "velero"},
+		Data:       map[string][]byte{"customer-key": key},
+	}
+	return location, secret
+}
+
+var testSSECKey = []byte("0123456789abcdef0123456789abcdef")
+
+// With SSE-C on, the storage refuses to hand out an object unless the request
+// carries the key it was written with, presigned link or not.
+func TestDescribeBackupSendsTheSSECKey(t *testing.T) {
+	noDownloadWait(t)
+	sum := md5.Sum(testSSECKey) //nolint:gosec // S3 checks an SSE-C key against its MD5
+	body := gzipJSON(t, map[string]any{
+		"errors":   map[string]any{"namespaces": map[string]any{"shop": []string{"pod volume backup failed"}}},
+		"warnings": map[string]any{},
+	})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Amz-Server-Side-Encryption-Customer-Algorithm") != "AES256" ||
+			r.Header.Get("X-Amz-Server-Side-Encryption-Customer-Key") != base64.StdEncoding.EncodeToString(testSSECKey) ||
+			r.Header.Get("X-Amz-Server-Side-Encryption-Customer-Key-Md5") != base64.StdEncoding.EncodeToString(sum[:]) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	location, secret := sseCFixtures(testSSECKey)
+	dyn := describeClient(srv.URL, describedBackup("PartiallyFailed", 1, 0), location)
+	var out bytes.Buffer
+
+	require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(secret), "velero-daily-apps-20261021030000", &out, srv.Client()))
+
+	assert.Contains(t, out.String(), "shop: pod volume backup failed")
+	assert.NotContains(t, out.String(), base64.StdEncoding.EncodeToString(testSSECKey))
+}
+
+// The key decrypts every backup, so it travels only over TLS and only to the
+// address Velero signed, never to wherever a redirect points.
+func TestDescribeBackupKeepsTheSSECKeyFromAnywhereElse(t *testing.T) {
+	noDownloadWait(t)
+	keyHeader := "X-Amz-Server-Side-Encryption-Customer-Key"
+	var leaked []string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(keyHeader) != "" {
+			leaked = append(leaked, "redirect target")
+		}
+	}))
+	defer elsewhere.Close()
+	redirecting := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/results", http.StatusFound)
+	}))
+	defer redirecting.Close()
+	plain := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(keyHeader) != "" {
+			leaked = append(leaked, "plain HTTP link")
+		}
+	}))
+	defer plain.Close()
+	location, secret := sseCFixtures(testSSECKey)
+
+	for _, tc := range []struct {
+		name, link string
+		client     *http.Client
+	}{
+		{"a redirect", redirecting.URL, redirecting.Client()},
+		{"a plain HTTP link", plain.URL, plain.Client()},
+	} {
+		dyn := describeClient(tc.link, describedBackup("PartiallyFailed", 1, 0), location)
+		var out bytes.Buffer
+
+		require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(secret), "velero-daily-apps-20261021030000", &out, tc.client), tc.name)
+
+		assert.Contains(t, out.String(), "SSE-C key", tc.name)
+	}
+	assert.Empty(t, leaked)
 }
