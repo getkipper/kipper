@@ -84,6 +84,40 @@ func (h *Handler) emitSecurityEvent(ctx context.Context, e security.Event) {
 // belongs to an earlier attempt's build.
 const migrationBuildAnnotation = "kipper.run/migration-build"
 
+// migrationBuildPrefix starts every commit tag migrationBuildID makes.
+const migrationBuildPrefix = "migrate-"
+
+// answersMigrationBuild reports whether a build status speaks for the build a
+// migration triggered under commit tag expect: it is that build, or a build
+// started on this cluster outside any migration, such as a manual rebuild,
+// whose Job was created in a later second. A build tagged by another migration
+// attempt never answers, however late its Job was created.
+func answersMigrationBuild(build *kipperv1.AppBuildStatus, expect string) bool {
+	if build.Commit == expect {
+		return true
+	}
+	if strings.HasPrefix(build.Commit, migrationBuildPrefix) {
+		return false
+	}
+	triggered, ok := migrationBuildTime(expect)
+	return ok && build.JobCreatedAt != nil && build.JobCreatedAt.After(triggered)
+}
+
+// migrationBuildTime reads the time a migration build tag from
+// migrationBuildID was made, to the second.
+func migrationBuildTime(tag string) (time.Time, bool) {
+	rest, ok := strings.CutPrefix(tag, migrationBuildPrefix)
+	if !ok {
+		return time.Time{}, false
+	}
+	seconds, _, _ := strings.Cut(rest, "-")
+	unix, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(unix, 0), true
+}
+
 // BuildVersion is the console-api build version, set from main at startup.
 // The accept handshake refuses migrations between different major versions,
 // since the two sides speak the same wire protocol only within a major.
@@ -716,10 +750,7 @@ func (h *Handler) TargetAppsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				if app.Status.Build != nil {
 					state.BuildPhase = app.Status.Build.Phase
-					// A status written by a different build than the one this
-					// migration triggered (an earlier attempt's Job reporting
-					// late) must not read as this rebuild's outcome.
-					if expect := app.Annotations[migrationBuildAnnotation]; expect != "" && app.Status.Build.Commit != expect {
+					if expect := app.Annotations[migrationBuildAnnotation]; expect != "" && !answersMigrationBuild(app.Status.Build, expect) {
 						state.BuildPhase = "Pending"
 					}
 				}

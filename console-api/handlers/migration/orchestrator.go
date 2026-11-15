@@ -410,7 +410,8 @@ var errNoNamespaces = goerrors.New("this project holds no namespaces")
 // exist in this namespace. A <name>-credentials Secret with no Service of that
 // name is nobody's shared credentials and still travels as an ordinary Secret.
 // issuedForRoutes holds the certificate Secrets this namespace's Kipper routes
-// have cert-manager issue; any other TLS Secret travels.
+// have cert-manager issue. Other TLS Secrets travel unless another exclusion
+// applies, such as the service TLS label.
 func transferableSecret(secret *corev1.Secret, ridesWithService, issuedForRoutes map[string]bool) bool {
 	if secret.Type == corev1.SecretTypeServiceAccountToken {
 		return false
@@ -932,7 +933,7 @@ func migrationBuildID() (string, error) {
 	if _, err := rand.Read(suffix); err != nil {
 		return "", fmt.Errorf("generating build id: %w", err)
 	}
-	return fmt.Sprintf("migrate-%d-%s", time.Now().Unix(), hex.EncodeToString(suffix)), nil
+	return fmt.Sprintf("%s%d-%s", migrationBuildPrefix, time.Now().Unix(), hex.EncodeToString(suffix)), nil
 }
 
 func (h *Handler) updateAppRoute(ctx context.Context, name, namespace string, spec map[string]interface{}) error {

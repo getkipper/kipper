@@ -417,11 +417,72 @@ func TestTargetAppsHandler_BuildIdentity(t *testing.T) {
 		Spec:   kipperv1.AppSpec{Git: &kipperv1.AppGitSource{URL: "https://github.com/shop/api"}},
 		Status: kipperv1.AppStatus{Build: &kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "migrate-200"}},
 	}
+	phases := targetBuildPhases(t, staleBuild, currentBuild)
+	if phases["web"] != "Pending" {
+		t.Fatalf("stale build commit must report Pending, got %q", phases["web"])
+	}
+	if phases["api"] != "Succeeded" {
+		t.Fatalf("matching build commit must report Succeeded, got %q", phases["api"])
+	}
+}
+
+// A build started on the target after the migration's own, such as a manual
+// rebuild once a missing credential was granted, settles the gate when it
+// succeeds. A build from another migration attempt never does, even when its
+// Job was created late.
+func TestTargetAppsHandler_AcceptsALaterRebuild(t *testing.T) {
+	gitApp := func(name string, build kipperv1.AppBuildStatus) *kipperv1.App {
+		return &kipperv1.App{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "shop-prod",
+				Annotations: map[string]string{migrationBuildAnnotation: "migrate-200-0a1b2c3d"},
+			},
+			Spec:   kipperv1.AppSpec{Git: &kipperv1.AppGitSource{URL: "https://github.com/shop/" + name}},
+			Status: kipperv1.AppStatus{Build: &build},
+		}
+	}
+	at := func(unix int64) *metav1.Time { t := metav1.NewTime(time.Unix(unix, 0)); return &t }
+
+	phases := targetBuildPhases(t,
+		gitApp("rebuilt", kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "manual-300", JobCreatedAt: at(300)}),
+		gitApp("earlier", kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "migrate-100-ffffffff", JobCreatedAt: at(100)}),
+		gitApp("delayed-attempt", kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "migrate-190-dddddddd", JobCreatedAt: at(300)}),
+		gitApp("same-second", kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "migrate-200-eeeeeeee", JobCreatedAt: at(200)}),
+		gitApp("undated", kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "manual-300"}),
+		gitApp("manual-before", kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "manual-190", JobCreatedAt: at(190)}),
+		gitApp("manual-same-second", kipperv1.AppBuildStatus{Phase: "Succeeded", Commit: "manual-200", JobCreatedAt: at(200)}),
+		gitApp("failed", kipperv1.AppBuildStatus{Phase: "Failed", Commit: "manual-300", JobCreatedAt: at(300)}),
+	)
+
+	want := map[string]string{
+		"rebuilt":            "Succeeded",
+		"earlier":            "Pending",
+		"delayed-attempt":    "Pending",
+		"same-second":        "Pending",
+		"undated":            "Pending",
+		"manual-before":      "Pending",
+		"manual-same-second": "Pending",
+		"failed":             "Failed",
+	}
+	for name, phase := range want {
+		if phases[name] != phase {
+			t.Errorf("%s: build phase = %q, want %q", name, phases[name], phase)
+		}
+	}
+}
+
+// targetBuildPhases serves the target's app inventory over the given apps in
+// project "shop" and returns each app's reported build phase by name.
+func targetBuildPhases(t *testing.T, apps ...*kipperv1.App) map[string]string {
+	t.Helper()
+	objects := []crclient.Object{ownerOf("shop-prod")}
+	for _, app := range apps {
+		objects = append(objects, app)
+	}
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-prod", "shop")),
-		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).
-			WithObjects(staleBuild, currentBuild, ownerOf("shop-prod")).Build(),
+		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).WithObjects(objects...).Build(),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}})
 
@@ -447,12 +508,7 @@ func TestTargetAppsHandler_BuildIdentity(t *testing.T) {
 	for _, a := range resp.Apps {
 		phases[a.Name] = a.BuildPhase
 	}
-	if phases["web"] != "Pending" {
-		t.Fatalf("stale build commit must report Pending, got %q", phases["web"])
-	}
-	if phases["api"] != "Succeeded" {
-		t.Fatalf("matching build commit must report Succeeded, got %q", phases["api"])
-	}
+	return phases
 }
 
 // persist() marshals the session snapshot outside the lock; concurrent route
