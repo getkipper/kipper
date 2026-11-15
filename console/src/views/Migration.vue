@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ArrowRightLeft, Copy, Check, AlertTriangle, ExternalLink, Globe, RefreshCw, ShieldCheck, OctagonAlert } from 'lucide-vue-next'
 import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useProjectsStore } from '@/stores/projects'
@@ -114,6 +114,8 @@ const buildsPending = computed(() =>
   verificationApps.value.some(a => a.build_phase && a.build_phase !== 'Succeeded' && a.build_phase !== 'Failed'),
 )
 let verifyPollTimer: ReturnType<typeof setTimeout> | null = null
+// Set once the page closes, so an answer that arrives later starts nothing.
+let disposed = false
 
 // DNS
 const domains = ref<DomainStatus[]>([])
@@ -249,6 +251,7 @@ async function loadVerification() {
   } finally {
     loadingVerification.value = false
   }
+  if (disposed) return
   // A build is an automatic step the operator is waiting on, so keep it fresh
   // ourselves until every build resolves instead of leaving it stale.
   if (verifyPollTimer) {
@@ -313,7 +316,29 @@ async function handleCancel() {
   steps.value = []
 }
 
+/** Resumes progress and verification updates for an active migration after a page reload. */
+async function resumeActiveMigration() {
+  let session: Awaited<ReturnType<typeof migrationApi.getActiveMigration>>
+  try {
+    session = await migrationApi.getActiveMigration()
+  } catch {
+    return
+  }
+  if (disposed || !session || phase.value !== 'idle') return
+  sessionId.value = session.id
+  steps.value = session.steps ?? []
+  sessionStatus.value = session.status
+  phase.value = session.status === 'verifying' ? 'verifying' : 'migrating'
+  // Cutover reports its warnings as steps, so a verifying session needs the
+  // progress stream too.
+  connectWebSocket()
+  if (session.status === 'verifying') loadVerification()
+}
+
+onMounted(resumeActiveMigration)
+
 onUnmounted(() => {
+  disposed = true
   ws?.close()
   if (verifyPollTimer) clearTimeout(verifyPollTimer)
 })

@@ -57,6 +57,7 @@ GET /api/v1/migrate-target/projects	anon=401 outsider=401 viewer=401 deployer=40
 GET /api/v1/migrate-target/{session}/apps	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
 GET /api/v1/migrate-target/{session}/status	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
 GET /api/v1/migrate-target/{session}/transfer/{transfer}/*	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
+GET /api/v1/migration/active	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow cluster-viewer=403 cluster-viewer-owner=403
 GET /api/v1/migration/notification-status	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow cluster-viewer=403 cluster-viewer-owner=403
 GET /api/v1/migration/{session}	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=404 cluster-viewer=403 cluster-viewer-owner=403
 GET /api/v1/migration/{session}/dns	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=404 cluster-viewer=403 cluster-viewer-owner=403

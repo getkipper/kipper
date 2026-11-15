@@ -517,6 +517,26 @@ func (ss *SessionStore) FindByIdempotencyKey(key string) *Session {
 	return nil
 }
 
+// LatestOutgoing returns the most recently started outgoing migration that is
+// running or awaiting verification, or nil if none exists.
+func (ss *SessionStore) LatestOutgoing() *Session {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	var latest *Session
+	for _, s := range ss.sessions {
+		if s.TargetAPI == "" {
+			continue
+		}
+		if status := s.CurrentStatus(); status != SessionRunning && status != SessionVerifying {
+			continue
+		}
+		if latest == nil || s.StartedAt.After(latest.StartedAt) {
+			latest = s
+		}
+	}
+	return latest
+}
+
 // Get returns a session by ID.
 func (ss *SessionStore) Get(id string) (*Session, bool) {
 	ss.mu.RLock()

@@ -917,6 +917,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Get("/migration/notification-status", admin(migrationHandler.NotificationStatusHandler))
 		r.Post("/migration/plan", admin(migrationHandler.PlanHandler))
 		r.Post("/migration/start", admin(migrationHandler.StartHandler))
+		r.Get("/migration/active", admin(migrationHandler.ActiveSessionHandler))
 		r.Get("/migration/{session}", admin(migrationHandler.SessionHandler))
 		r.Get("/migration/{session}/progress", admin(migrationHandler.ProgressHandler))
 		r.Get("/migration/{session}/verify", admin(migrationHandler.VerificationHandler))

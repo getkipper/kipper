@@ -87,11 +87,10 @@ const migrationBuildAnnotation = "kipper.run/migration-build"
 // migrationBuildPrefix starts every commit tag migrationBuildID makes.
 const migrationBuildPrefix = "migrate-"
 
-// answersMigrationBuild reports whether a build status speaks for the build a
-// migration triggered under commit tag expect: it is that build, or a build
-// started on this cluster outside any migration, such as a manual rebuild,
-// whose Job was created in a later second. A build tagged by another migration
-// attempt never answers, however late its Job was created.
+// answersMigrationBuild accepts the expected migration build or a later build
+// started outside migration, such as a manual rebuild. Later builds must have
+// a Job creation time after the expected tag's timestamp, which has second
+// precision. Builds tagged by another migration attempt are always excluded.
 func answersMigrationBuild(build *kipperv1.AppBuildStatus, expect string) bool {
 	if build.Commit == expect {
 		return true
@@ -1210,6 +1209,19 @@ func (h *Handler) NotificationStatusHandler(w http.ResponseWriter, r *http.Reque
 		"out_of_band": outOfBand,
 		"env_pinned":  envPinned,
 	})
+}
+
+// ActiveSessionHandler returns the outgoing migration still in progress, so a
+// reloaded migration page can follow it again. The session is null when none
+// is running or awaiting verification.
+// GET /api/v1/migration/active
+func (h *Handler) ActiveSessionHandler(w http.ResponseWriter, _ *http.Request) {
+	session := h.Sessions.LatestOutgoing()
+	if session == nil {
+		respondJSON(w, http.StatusOK, map[string]interface{}{"session": nil})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{"session": session.View()})
 }
 
 // SessionHandler returns the current state of a migration session.

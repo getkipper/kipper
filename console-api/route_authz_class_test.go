@@ -172,6 +172,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/migrate-target/{session}/apps":                       {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"GET /api/v1/migrate-target/{session}/status":                     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"GET /api/v1/migrate-target/{session}/transfer/{transfer}/*":      {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
+	"GET /api/v1/migration/active":                                    {class: classGlobalRole},
 	"GET /api/v1/migration/notification-status":                       {class: classGlobalRole},
 	"GET /api/v1/migration/{session}":                                 {class: classGlobalRole},
 	"GET /api/v1/migration/{session}/dns":                             {class: classGlobalRole},
