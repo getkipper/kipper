@@ -3,11 +3,13 @@ package migration
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -181,10 +183,13 @@ func (h *Handler) migrateDatabaseData(ctx context.Context, session *Session, tok
 	if sizeErr == nil && estimatedSize > maxAutoTransferBytes {
 		sizeMB := estimatedSize / (1024 * 1024)
 		session.MarkDataLeftBehind(namespace, svc.Name)
+		// Fetch manual steps before UpdateStep acquires the session lock so
+		// cancellation can proceed while these requests run.
+		manual := h.manualMigrationSteps(ctx, namespace, svc)
 		session.UpdateStep(stepName, func(s *Step) {
 			s.Status = StepSkipped
 			s.Detail = fmt.Sprintf("Database is ~%d MB: too large for automatic transfer", sizeMB)
-			s.ManualSteps = buildManualMigrationSteps(svc.Spec.Type, svc.Name, namespace)
+			s.ManualSteps = manual
 		})
 		return nil
 	}
@@ -412,8 +417,9 @@ func buildImportCommand(svcType, serviceName string) ([]string, string) {
 	}
 }
 
-// estimateDatabaseSize measures how much data a dump of the service carries,
-// in bytes, from inside its pod.
+// estimateDatabaseSize estimates the service's data size in bytes from inside
+// its pod. The estimate determines eligibility for automatic transfer and may
+// differ from the dump size.
 func (h *Handler) estimateDatabaseSize(ctx context.Context, namespace, serviceName, svcType string) (int64, error) {
 	pod, err := h.servicePod(ctx, namespace, serviceName)
 	if err != nil {
@@ -442,8 +448,9 @@ func estimateSize(svcType string, run func(cmd []string) (string, error)) (int64
 	return strconv.ParseInt(strings.TrimSpace(out), 10, 64)
 }
 
-// logicalSizeCommand prints the bytes of user data the engine holds, or is
-// nil for a type that has no such query.
+// logicalSizeCommand returns a query for MySQL table data bytes or Postgres
+// non-template database bytes, or nil for an unsupported engine. MySQL reads
+// current statistics instead of the ones it caches for up to a day.
 func logicalSizeCommand(svcType string) []string {
 	switch svcType {
 	case "mysql":
@@ -470,46 +477,99 @@ func dataDirectory(svcType string) string {
 	}
 }
 
-func buildManualMigrationSteps(svcType, serviceName, namespace string) []string {
-	project := namespace
+// plainDatabaseName is the database name kip service export and import accept.
+var plainDatabaseName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+// manualMigrationSteps lists the service's databases for buildManualMigrationSteps.
+// If the list is unavailable, Postgres and MySQL steps use the service's default
+// database, while MongoDB steps transfer the whole archive.
+func (h *Handler) manualMigrationSteps(ctx context.Context, namespace string, svc *kipperv1.Service) []string {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var databases []string
+	if pod, err := h.servicePod(ctx, namespace, svc.Name); err == nil {
+		databases, _ = listDatabases(svc.Spec.Type, func(cmd []string) (string, error) {
+			return h.execInPod(ctx, namespace, pod, svc.Name, cmd, nil)
+		})
+	}
+	return buildManualMigrationSteps(svc.Spec.Type, svc.Name, namespace, databases)
+}
+
+// listDatabases lists the user databases of a postgres or mysql service.
+func listDatabases(svcType string, run func(cmd []string) (string, error)) ([]string, error) {
+	var cmd []string
 	switch svcType {
 	case "postgres":
-		return []string{
-			"# Export each database from the source cluster (list them with \\l):",
-			fmt.Sprintf("kip exec %s --project %s -- pg_dump -U kipper --clean --if-exists --no-owner --no-privileges app > %s-app.sql", serviceName, project, serviceName),
-			"# Copy to target server:",
-			fmt.Sprintf("scp %s-app.sql root@<target-server>:/tmp/", serviceName),
-			"# Import on target cluster (repeat per database):",
-			fmt.Sprintf("kip exec %s --project %s -- psql -U kipper -d app -v ON_ERROR_STOP=1 < /tmp/%s-app.sql", serviceName, project, serviceName),
-		}
+		cmd = []string{"sh", "-c", `psql -U "$POSTGRES_USER" -d postgres -At -c "SELECT encode(convert_to(datname, 'UTF8'), 'hex') FROM pg_database WHERE NOT datistemplate"`}
 	case "mysql":
-		// Single quotes defer password expansion to the shell inside the pod.
-		return []string{
-			"# Export from source cluster:",
-			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%smysqldump -u root --all-databases --single-transaction' > %s-dump.sql`, serviceName, project, mysqlClient, serviceName),
-			"# Copy to target server:",
-			fmt.Sprintf("scp %s-dump.sql root@<target-server>:/tmp/", serviceName),
-			"# Import on target cluster:",
-			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%smysql -u root' < /tmp/%s-dump.sql`, serviceName, project, mysqlClient, serviceName),
-		}
-	case "mongodb":
-		// Single quotes let the pod's shell read its credentials. Otherwise,
-		// the operator's shell would expand the variables before kip sees them.
-		// These scripts contain no single quotes, so the outer quoting is safe.
-		return []string{
-			"# Export from source cluster:",
-			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%s' > %s-dump.archive`, serviceName, project, mongotool.Script("mongodump --archive"), serviceName),
-			"# Copy to target server:",
-			fmt.Sprintf("scp %s-dump.archive root@<target-server>:/tmp/", serviceName),
-			"# Import on target cluster:",
-			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%s' < /tmp/%s-dump.archive`, serviceName, project, mongotool.Script("mongorestore --archive"), serviceName),
-		}
+		cmd = []string{"sh", "-c", mysqlClient + `mysql -u root -N -B -e "SELECT HEX(schema_name) FROM information_schema.schemata WHERE schema_name NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')"`}
 	default:
-		return []string{
-			fmt.Sprintf("# Manual data transfer required for %s service %q", svcType, serviceName),
-		}
+		return nil, nil
 	}
+	out, err := run(cmd)
+	if err != nil {
+		return nil, err
+	}
+	// Each name comes back hex-encoded, because spaces and line breaks are
+	// part of an identifier and plain output would lose or split them.
+	var databases []string
+	for _, line := range strings.Fields(out) {
+		name, err := hex.DecodeString(line)
+		if err != nil {
+			return nil, fmt.Errorf("reading a database name: %w", err)
+		}
+		databases = append(databases, string(name))
+	}
+	return databases, nil
+}
+
+// buildManualMigrationSteps returns kip export and import commands to run from
+// a machine that can reach both clusters. Postgres and MySQL move one database
+// at a time. With no database list, they use the service's default database and
+// include instructions to repeat the commands for others. MongoDB moves the
+// whole archive. Unsupported engines and unsafe names get manual instructions.
+func buildManualMigrationSteps(svcType, serviceName, namespace string, databases []string) []string {
+	extension := map[string]string{"postgres": ".dump", "mysql": ".sql.gz", "mongodb": ".archive.gz"}[svcType]
+	if extension == "" {
+		return []string{fmt.Sprintf("# Manual data transfer required for %s service %q", svcType, serviceName)}
+	}
+	// Migration preserves namespace names, so use the exact namespace to avoid
+	// adding the operator's organization prefix through --project.
+	scope := "--namespace " + namespace
+	steps := []string{
+		"# Run these commands from a machine where kip can reach both clusters. Use the cluster names from 'kip cluster list'.",
+	}
+	// Require a successful export before importing because export rejects an
+	// existing dump file, which could contain data from another transfer.
+	transfer := func(databaseFlag, file string) {
+		steps = append(steps, fmt.Sprintf(
+			"kip service export %[1]s %[2]s%[3]s --file %[4]s --cluster <source-cluster> && "+
+				// --drop replaces data from a failed import so the operator can retry.
+				"kip service import %[1]s %[2]s%[3]s --drop --file %[4]s --cluster <target-cluster>",
+			serviceName, scope, databaseFlag, file))
+	}
+	// The namespace prefix separates dumps from different namespaces. Dots
+	// separate the names because namespaces and accepted database names cannot contain them.
+	prefix := namespace + "." + serviceName
+	if svcType == "mongodb" {
+		transfer("", prefix+extension)
+		return steps
+	}
+	if len(databases) == 0 {
+		// Omitting --database selects the database named in the service's credentials.
+		transfer("", prefix+extension)
+		return append(steps, "# Repeat this line for each additional database in the service. Add --database <name> to both commands and use the same --file path in both, with a different path for each database.")
+	}
+	for _, db := range databases {
+		// The steps are pasted into a shell, and a database name is whatever
+		// its creator chose, so only a name kip accepts becomes a command.
+		if !plainDatabaseName.MatchString(db) {
+			steps = append(steps, fmt.Sprintf("# Move the database %q by hand: kip service export accepts only letters, digits, underscores and hyphens.", db))
+			continue
+		}
+		transfer(" --database "+db, prefix+"."+db+extension)
+	}
+	return steps
 }
 
 func hasExportableData(svcType string) bool {

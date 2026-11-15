@@ -228,7 +228,7 @@ If a route fails to apply, the cutover stops and reports which one. The session 
 
 ## Limitations
 
-- **Database size**: Databases up to ~500MB transfer automatically. Larger ones are skipped with manual instructions shown in the progress view. The dump streams between the clusters with a one-hour budget per database, so the cap is about transfer time on a normal uplink rather than memory.
+- **Database size**: Databases up to ~500MB transfer automatically. Larger ones are skipped, and the progress view shows `kip service export` and `kip service import` commands for them, a pair per database on Postgres and MySQL and one pair for the whole service on MongoDB. A database whose name kip cannot pass on a command line gets a comment in place of its pair. Run them from a machine that reaches both clusters. The commands name the namespace with `--namespace`, because the migration keeps namespace names and `--project` would add your CLI's organization prefix. Each import carries `--drop`, so running it again after a failed attempt replaces what that attempt loaded. Importing into a database that does not exist yet creates it, and on MySQL grants the service user access. The dump streams between the clusters with a one-hour budget per database, so the cap is about transfer time on a normal uplink rather than memory.
 - **Volumes and service storage have no size cap**: Shared volumes move through a chunked transfer that verifies every file and resumes from the last completed chunk after a network or pod failure within the run. MinIO and OpenSearch storage moves the same way as raw bytes; the service pauses on both clusters for the duration of its transfer and restarts automatically. If the console API itself restarts mid-run, the migration fails, both clusters clean up and restart paused services on their own, and a fresh migration retransfers the data.
 - **Stop apps before migrating**: The data transfer copies each volume once. Writes that land while a transfer runs are not picked up, so stop the source apps with `kip app stop --for-migration` first. The plan screen reminds you when source apps can still write.
 - **Redirect domains move at cutover**: An app's route carries one serving hostname plus any [redirect domains](/en/domains#redirect-domains). During the verification phase the target serves neither; both switch over together at cutover, and each redirect domain's DNS record must be repointed just like the main hostname's.
@@ -254,10 +254,10 @@ If the database import fails, the Service CR still exists on the target. Export 
 
 ```bash
 # Pointed at the source cluster: export
-kip service export mydb --file dump.dump --project blog --environment prod
+kip service export mydb --file dump.dump --namespace blog-prod
 
-# Pointed at the target cluster: import
-kip service import mydb --file dump.dump --project blog --environment prod
+# Pointed at the target cluster: import, replacing whatever a failed attempt loaded
+kip service import mydb --drop --file dump.dump --namespace blog-prod
 ```
 
 Both commands stream through the Kubernetes API, so they work from any machine with cluster access. See [Importing and exporting data](/en/services#importing-and-exporting-data) for formats and options. This is also the path for databases too large for the automated transfer.
