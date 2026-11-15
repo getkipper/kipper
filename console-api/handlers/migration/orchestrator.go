@@ -409,7 +409,9 @@ var errNoNamespaces = goerrors.New("this project holds no namespaces")
 // ridesWithService holds the shared credentials names for the Services that
 // exist in this namespace. A <name>-credentials Secret with no Service of that
 // name is nobody's shared credentials and still travels as an ordinary Secret.
-func transferableSecret(secret *corev1.Secret, ridesWithService map[string]bool) bool {
+// issuedForRoutes holds the certificate Secrets this namespace's Kipper routes
+// have cert-manager issue; any other TLS Secret travels.
+func transferableSecret(secret *corev1.Secret, ridesWithService, issuedForRoutes map[string]bool) bool {
 	if secret.Type == corev1.SecretTypeServiceAccountToken {
 		return false
 	}
@@ -423,6 +425,12 @@ func transferableSecret(secret *corev1.Secret, ridesWithService map[string]bool)
 	}
 	// The target issues its own service certificate and key.
 	if _, ok := secret.Labels[labels.TLSFor]; ok {
+		return false
+	}
+	// The target's cert-manager writes each route certificate under the name
+	// the route asks for, so a copy would be adopted as current while it names
+	// the source's hosts.
+	if issuedForRoutes[secret.Name] {
 		return false
 	}
 	if isPublishedEnvironment(secret) {
@@ -490,6 +498,29 @@ func (h *Handler) credentialsRidingWithServices(ctx context.Context, namespace s
 	return riding, nil
 }
 
+// routeCertificates names the Secrets that Kipper's own Ingresses in a
+// namespace have cert-manager issue certificates into.
+func (h *Handler) routeCertificates(ctx context.Context, namespace string) (map[string]bool, error) {
+	ingresses, err := h.Client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/managed-by=kipper",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing routes in %s: %w", namespace, err)
+	}
+	issued := map[string]bool{}
+	for _, ing := range ingresses.Items {
+		if ing.Annotations["cert-manager.io/cluster-issuer"] == "" {
+			continue
+		}
+		for _, tls := range ing.Spec.TLS {
+			if tls.SecretName != "" {
+				issued[tls.SecretName] = true
+			}
+		}
+	}
+	return issued, nil
+}
+
 func (h *Handler) transferSecrets(ctx context.Context, session *Session, token *Token, namespace string, res *domainResolution) error {
 	secrets, err := h.Client.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -500,10 +531,14 @@ func (h *Handler) transferSecrets(ctx context.Context, session *Session, token *
 	if err != nil {
 		return err
 	}
+	routeCerts, err := h.routeCertificates(ctx, namespace)
+	if err != nil {
+		return err
+	}
 
 	toTransfer := 0
 	for i := range secrets.Items {
-		if transferableSecret(&secrets.Items[i], riding) {
+		if transferableSecret(&secrets.Items[i], riding, routeCerts) {
 			toTransfer++
 		}
 	}
@@ -521,7 +556,7 @@ func (h *Handler) transferSecrets(ctx context.Context, session *Session, token *
 
 	sent := 0
 	for _, secret := range secrets.Items {
-		if !transferableSecret(&secret, riding) {
+		if !transferableSecret(&secret, riding, routeCerts) {
 			continue
 		}
 

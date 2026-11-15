@@ -57,7 +57,7 @@ Before anything moves, the source checks the target has enough free CPU, memory,
 
 - System components (Traefik, cert-manager, Longhorn, Dex), which already exist on the target from `kip install`
 - User accounts (Dex). The migration shows a reminder with the `kip user import` steps; the target starts with only its bootstrap admin
-- TLS certificates, because cert-manager issues new ones on the target
+- TLS certificates that Kipper requested for its routes, because the target requests new ones. Any other TLS Secret, such as a certificate you uploaded or one from a Certificate of your own, migrates with the other secrets
 - Postgres globals. Databases move one by one, so roles other than the service user, role passwords and settings, and database-level settings (`ALTER DATABASE ... SET`) stay behind. Kipper-managed services use a single service user and are unaffected
 - Service share links. The grants and their signing key stay on the source cluster, and an old link fails closed on the target. Mint fresh links after the cutover
 - Build history (git apps are rebuilt fresh on the target)
@@ -175,7 +175,7 @@ The plan shows everything before anything moves:
 - Capacity numbers: CPU, memory, and disk the projects need against what the target has free
 - **Data that will be skipped**: databases over the 500MB cap stay behind with manual steps. Volumes and service storage always move, chunked and verified, with no size cap
 - What will migrate, item by item, with git apps marked "rebuilt from the branch head"
-- What never migrates (Dex users, TLS certificates, share links, Postgres globals, build history)
+- What never migrates (Dex users, route TLS certificates, share links, Postgres globals, build history)
 
 If a project already exists on the target, confirm the overwrite by typing its name on the plan; the plan then refreshes with the overwrite applied as a warning.
 

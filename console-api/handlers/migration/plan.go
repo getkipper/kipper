@@ -88,7 +88,7 @@ type planResponse struct {
 var notMigratedList = []string{
 	"System components (Traefik, cert-manager, Longhorn, Dex): they already exist on the target",
 	"User accounts (Dex): the target starts with only its bootstrap admin; import them with kip user import",
-	"TLS certificates: cert-manager issues new ones on the target once DNS lands",
+	"TLS certificates Kipper issued for routes: the target issues new ones once DNS lands. Uploaded certificates travel with the other secrets",
 	"Postgres globals: extra roles, role passwords, and ALTER DATABASE settings stay behind",
 	"Service share links: grants and signing key stay on the source; mint fresh links after cutover",
 	"Build history: git apps are rebuilt fresh on the target",
@@ -593,9 +593,13 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 		if err != nil {
 			return err
 		}
+		routeCerts, err := h.routeCertificates(ctx, ns)
+		if err != nil {
+			return err
+		}
 		count := 0
 		for i := range secrets.Items {
-			if transferableSecret(&secrets.Items[i], riding) {
+			if transferableSecret(&secrets.Items[i], riding, routeCerts) {
 				count++
 			}
 		}
