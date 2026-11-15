@@ -456,15 +456,11 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 		desired[sslRootCertKey] = []byte(serviceCAPath(svc.Name))
 	}
 
-	// The password and the identity are the two things the engine keeps and the
-	// Service cannot say, and what to do about either one turns on whether an
-	// engine has initialised at all.
-	//
-	// Over a volume the Secret is the only record: a missing key cannot be
-	// filled in from the current default, because that would publish an account
-	// the engine has never heard of and every bound workload would authenticate
-	// as nobody. An identity the Secret names is kept either way, because the
-	// StatefulSet starts the engine under that name.
+	// The Secret records the engine's password and identity, which the Service
+	// spec does not store. Once a volume is initialized, replacing a missing key
+	// with a default would give bound workloads credentials the engine rejects.
+	// Preserve an existing identity even before initialization because the
+	// StatefulSet uses it to start the engine.
 	identity := engineIdentityKey(svc.Spec.Type)
 	missing := ""
 	for _, key := range []string{secretCredentialKey(svc.Spec.Type), identity} {
@@ -524,9 +520,10 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 // defaultEngineUsername is the account a new service's engine is created with.
 const defaultEngineUsername = "kipper"
 
-// engineUsername is the account the engine is started with: the username the
-// service's credentials Secret names, which a migrated or older service carries
-// over, or kipper for a Secret that names none.
+// engineUsername returns the identity from the service's credentials Secret,
+// preserving migrated and older accounts. It defaults to kipper when the engine
+// has no identity key or the Secret or identity is missing. Other read errors
+// are returned to the caller.
 func (r *ServiceReconciler) engineUsername(ctx context.Context, svc *kipperv1.Service) (string, error) {
 	if engineIdentityKey(svc.Spec.Type) == "" {
 		return defaultEngineUsername, nil
@@ -776,6 +773,14 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		for k, v := range stamp {
 			existing.Spec.Template.Annotations[k] = v
 		}
+	}
+	// Refresh labels on older StatefulSets so kip can find their service pods.
+	// Merge them to preserve labels added by other controllers or users.
+	if existing.Spec.Template.Labels == nil {
+		existing.Spec.Template.Labels = map[string]string{}
+	}
+	for k, v := range desired.Spec.Template.Labels {
+		existing.Spec.Template.Labels[k] = v
 	}
 	existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
 	for _, v := range podVolumes {
