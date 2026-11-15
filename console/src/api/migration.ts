@@ -32,6 +32,8 @@ export interface AppVerification {
 
 export interface DomainStatus {
   domain: string
+  // Set when the domain redirects to another one of the app's hosts.
+  redirect_to?: string
   app: string
   namespace: string
   resolved: boolean
@@ -47,6 +49,8 @@ export interface PlanItem {
   detail?: string
   // Domain disposition for an app with a public route.
   host?: string
+  // Hosts that redirect to host and move with it.
+  redirect_from?: string[]
   domain_class?: 'custom' | 'platform' | 'gateway'
   disposition?: 'move' | 'coexist' | 'gateway'
   target_url?: string

@@ -587,6 +587,9 @@ onUnmounted(() => {
             <div class="min-w-0">
               <span class="text-sm font-medium text-slate-900 dark:text-slate-50">{{ item.name }}</span>
               <span class="ml-1.5 font-mono text-xs text-slate-500 dark:text-slate-400">{{ item.host }}</span>
+              <p v-if="item.redirect_from?.length" class="font-mono text-xs text-slate-500 dark:text-slate-400" data-testid="plan-redirect-hosts">
+                Redirects here: {{ item.redirect_from.join(', ') }}
+              </p>
               <p v-if="item.domain_class === 'platform'" class="text-xs text-slate-400">Stays on both. New cluster serves {{ item.target_url }}. The old URL keeps working until you decommission the old cluster.</p>
               <p v-else-if="item.domain_class === 'gateway'" class="text-xs text-slate-400">Free kipper.run subdomain. The new cluster gets its own; re-register separately if you need the old one.</p>
               <p v-else-if="keepDomains.has(domainKey(item))" class="text-xs text-slate-400">Kept on the old cluster. The new cluster serves {{ item.target_url }}.</p>
@@ -843,6 +846,7 @@ onUnmounted(() => {
             <div class="flex items-center gap-2">
               <Globe class="h-4 w-4 text-slate-400" :stroke-width="1.75" />
               <span class="text-sm font-medium text-slate-900 dark:text-slate-50">{{ d.domain }}</span>
+              <span v-if="d.redirect_to" class="text-xs text-slate-400">redirects to {{ d.redirect_to }}</span>
               <span v-if="!d.resolved && d.expected_ips && d.expected_ips.length > 0" class="font-mono text-xs text-slate-400">
                 A record: {{ d.expected_ips.join(', ') }}
               </span>

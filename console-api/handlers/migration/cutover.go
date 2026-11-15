@@ -109,12 +109,7 @@ func (h *Handler) CutoverHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		domains = append(domains, domainStatus{
-			Domain:      host,
-			App:         appName,
-			Namespace:   namespace,
-			ExpectedIPs: expected,
-		})
+		domains = append(domains, routeDomains(routeMap, appName, namespace, expected)...)
 	}
 
 	// Fail closed on any unapplied route: the session stays in verifying so
@@ -319,15 +314,10 @@ func (h *Handler) DNSStatusHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		ds := domainStatus{
-			Domain:      host,
-			App:         appName,
-			Namespace:   namespace,
-			ExpectedIPs: expected,
+		for _, ds := range routeDomains(routeMap, appName, namespace, expected) {
+			ds.check(expected)
+			domains = append(domains, ds)
 		}
-		ds.check(expected)
-
-		domains = append(domains, ds)
 	}
 
 	respondJSON(w, http.StatusOK, domains)
@@ -377,10 +367,25 @@ func (h *Handler) VerificationHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// routeDomains lists the hosts a saved route answers for: its own host, then
+// each host that redirects to it. Every one needs its DNS record changed.
+func routeDomains(routeMap map[string]interface{}, appName, namespace string, expected []string) []domainStatus {
+	host, _ := routeMap["host"].(string)
+	domains := []domainStatus{{Domain: host, App: appName, Namespace: namespace, ExpectedIPs: expected}}
+	redirects, _ := routeMap["redirectFrom"].([]interface{})
+	for _, r := range redirects {
+		if from, _ := r.(string); from != "" {
+			domains = append(domains, domainStatus{Domain: from, RedirectTo: host, App: appName, Namespace: namespace, ExpectedIPs: expected})
+		}
+	}
+	return domains
+}
+
 type domainStatus struct {
-	Domain    string `json:"domain"`
-	App       string `json:"app"`
-	Namespace string `json:"namespace"`
+	Domain     string `json:"domain"`
+	RedirectTo string `json:"redirect_to,omitempty"`
+	App        string `json:"app"`
+	Namespace  string `json:"namespace"`
 	// Resolved means the hostname points at the target cluster, not merely
 	// that it resolves to something.
 	Resolved    bool     `json:"resolved"`

@@ -43,10 +43,11 @@ type planItem struct {
 	Detail    string `json:"detail,omitempty"`
 	Binding   string `json:"binding,omitempty"`
 
-	Host        string `json:"host,omitempty"`
-	DomainClass string `json:"domain_class,omitempty"`
-	Disposition string `json:"disposition,omitempty"`
-	TargetURL   string `json:"target_url,omitempty"`
+	Host         string   `json:"host,omitempty"`
+	RedirectFrom []string `json:"redirect_from,omitempty"`
+	DomainClass  string   `json:"domain_class,omitempty"`
+	Disposition  string   `json:"disposition,omitempty"`
+	TargetURL    string   `json:"target_url,omitempty"`
 }
 
 // planCapacity carries the numbers behind the capacity verdict. Operators
@@ -722,10 +723,12 @@ func (h *Handler) planAppDomain(app *kipperv1.App, ns, env string, token *Token,
 	item.Disposition = string(disp)
 	switch {
 	case disp == dispositionMove:
-		// The custom domain follows the app to the new cluster.
+		// The custom domain follows the app to the new cluster, and so do its
+		// redirect hosts. Any other route keeps them on the source.
+		item.RedirectFrom = app.Spec.Route.RedirectFrom
 		item.TargetURL = "https://" + effective
 	case moveBaseDomain && class == domain.DomainClassPlatform:
-		// Mode B adopts the base domain on the target, so the app keeps its host.
+		// Moving the base domain to the target preserves the app's hostname.
 		item.TargetURL = "https://" + effective
 	default:
 		if tgt := domain.TargetEquivalent(prefix, token.BaseDomain); tgt != "" {
@@ -733,9 +736,9 @@ func (h *Handler) planAppDomain(app *kipperv1.App, ns, env string, token *Token,
 		}
 	}
 
-	// Bind host + disposition into the digest verbatim, so a tampered keep/move
-	// choice changes the digest and fails consent.
-	item.Binding = fmt.Sprintf("route=%s;disp=%s", effective, disp)
+	// Bind the hostname, all source redirect hosts, and disposition into the
+	// digest so changes to the route or keep/move choice invalidate consent.
+	item.Binding = fmt.Sprintf("route=%s;redirect=%s;disp=%s", effective, strings.Join(app.Spec.Route.RedirectFrom, ","), disp)
 }
 
 // planService classifies one service for the report, sizing its database
