@@ -23,6 +23,7 @@ import (
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/capacity"
 	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
 // The plan screen is the mandatory report every migration starts from: what
@@ -78,8 +79,10 @@ type planResponse struct {
 	TargetBaseDomain string        `json:"target_base_domain,omitempty"`
 	MoveBaseDomain   bool          `json:"move_base_domain,omitempty"`
 
-	arriveStopped []string
-	twoCopies     []string
+	arriveStopped        []string
+	twoCopies            []string
+	sharedGitCredentials []gitCredentialUse
+	sourceCredentials    []sharedcred.Entry
 }
 
 // notMigratedList is the static "what does NOT move" block, mirrored from
@@ -392,6 +395,12 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		}
 	}
 
+	shared, err := sharedcred.Load(ctx, h.Client)
+	if err != nil {
+		resp.Blockers = append(resp.Blockers, fmt.Sprintf("Could not read this cluster's shared git credentials: %v", err))
+	}
+	resp.sourceCredentials = shared
+
 	// Inventory. Failing to enumerate a project is a blocker: a partial
 	// report must never read as the whole picture.
 	for _, project := range projects {
@@ -400,6 +409,9 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		}
 	}
 
+	if targetAnswered {
+		h.checkTargetGitCredentials(token, resp)
+	}
 	if msg := copiesShortfall(resp.twoCopies, target); targetAnswered && msg != "" {
 		resp.Blockers = append(resp.Blockers, msg)
 	}
@@ -527,6 +539,12 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 			if app.Spec.Git != nil {
 				item.Detail = "rebuilt from the branch head on the target"
 				gitApps = append(gitApps, ns+"/"+app.Name)
+				use, ok, err := sharedGitCredentialUse(app, project, resp.sourceCredentials)
+				if err != nil {
+					resp.Blockers = append(resp.Blockers, err.Error())
+				} else if ok {
+					resp.sharedGitCredentials = append(resp.sharedGitCredentials, use)
+				}
 			}
 			h.planAppDomain(app, ns, env, token, keep, resp.MoveBaseDomain, &item)
 			resp.WillMigrate = append(resp.WillMigrate, item)

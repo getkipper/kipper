@@ -311,6 +311,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"POST /api/v1/jobs/{name}/trigger":                                 {class: classHandlerInternal, reason: "the handler resolves which namespace the name means and gates on that one; the fixture has no such job so the probe stops at 404"},
 	"POST /api/v1/link":                                                {class: classHandlerInternal, reason: "the caller's namespace comes from the request body"},
 	"POST /api/v1/migrate-target/accept":                               {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"POST /api/v1/migrate-target/git-credentials":                      {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/abort":                      {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/commit":                     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/db-import":                  {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},

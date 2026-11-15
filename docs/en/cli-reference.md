@@ -1382,6 +1382,8 @@ kip credentials allow git-acme-tools --project acme --project blog
 kip credentials revoke git-acme-tools --project blog
 ```
 
+A project must exist on the cluster to prevent typos from creating grants that never match. To grant access before a migration creates the project, use `--allow-missing-project`. This stores the name exactly as given, without an org prefix, and displays a notice that the project does not exist yet.
+
 A build refused for want of a grant says so and names the command:
 
 ```

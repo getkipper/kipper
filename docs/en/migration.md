@@ -218,7 +218,7 @@ Click each URL to verify the app works correctly. Check that pages load, databas
 
 When everything looks good, enter a fresh authenticator code and click **Everything looks good, apply custom domains**. The cutover repoints production domains, so it carries the same 2FA requirement as the start. Kipper applies the original route configuration and shows the exact DNS records to change.
 
-The cutover refuses to run while a git rebuild is still going or has failed: the custom domain would serve the "building" page instead of the app. The console lists the unfinished builds and offers **Cut over anyway** for the case where an app can go live later.
+The cutover refuses to run while a git rebuild is still going or has failed: the custom domain would serve the "building" page instead of the app. The console lists the unfinished builds and offers **Cut over anyway** for the case where an app can go live later. A build you start on the target yourself after the migration's own, such as a rebuild once a missing grant is in place, counts once it succeeds.
 
 Complete verification and cutover within 7 days of starting the migration. After that the target stops accepting the session and the routes have to be applied by hand.
 
@@ -234,6 +234,7 @@ If a route fails to apply, the cutover stops and reports which one. The session 
 - **Redirect domains move at cutover**: An app's route carries one serving hostname plus any [redirect domains](/en/domains#redirect-domains). During the verification phase the target serves neither; both switch over together at cutover, and each redirect domain's DNS record must be repointed just like the main hostname's.
 - **Target volumes use the declared size**: A volume on a [local-storage](/en/nano) cluster has no size limit, so it can hold more than its service declares. The target volume is created at the declared size, so increase the declared size with `kip service update <name> --storage <size>` before migrating if the data has outgrown it.
 - **Shared volumes require a Longhorn target**: A target cluster with local storage rejects shared volumes and apps that mount them. The plan screen does not flag these incompatibilities yet. Move projects that use shared volumes to a target with Longhorn storage.
+- **Shared git credentials stay on each cluster**: A git app that builds with a shared credential needs that credential on the target too, allowed for the app's project. The plan asks the target and blocks until it is, naming the command to run there. A target on a Kipper release without this check gets a warning listing the grants to make instead. The command carries `--allow-missing-project`, which takes the project name exactly as the migration creates it and works before the project exists: `kip credentials allow --project <project> --allow-missing-project -- <name>`.
 - **Git apps build the branch head**: The rebuild on the target checks out the configured branch fresh. If the branch moved since the last deploy on the source, the target runs the newer code.
 - **Active connections**: Apps on the source cluster continue running during migration. There is no automatic traffic cutover. DNS changes propagate gradually. Writes that land on the source after its data was copied stay there, which is why the guide says to freeze writes first.
 

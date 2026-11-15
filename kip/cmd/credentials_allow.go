@@ -31,6 +31,10 @@ asked for: this changes who may use it, not what it is.
   kip credentials allow forge --project shop
   kip credentials allow forge --project shop --project blog
 
+A project has to exist on this cluster. To grant one that arrives later, such
+as a project a migration is about to create, add --allow-missing-project. The
+names are then stored exactly as given, without the org prefix.
+
 Container registry credentials are granted with 'kip registry allow'.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCredentialsAllow,
@@ -54,15 +58,26 @@ func runCredentialsAllow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Stored under the name the cluster knows the project by, which is what the
-	// build-time check compares against. An org prefix is part of that name, so
-	// a bare project would otherwise be granted something that matches nothing.
+	allowMissing, _ := cmd.Flags().GetBool("allow-missing-project")
+	return grantSharedCredential(context.Background(), k8sClient.Clientset(), k8sClient.Dynamic(),
+		args[0], grantedNames(cluster, projects, allowMissing), allowMissing, cmd.OutOrStdout())
+}
+
+// grantedNames is what a grant stores for the projects as typed. Normally that
+// is the name the cluster knows each project by, which is what the build-time
+// check compares against: an org prefix is part of that name, so a bare project
+// would otherwise be granted something that matches nothing. When
+// allowMissing is true, every project name is stored verbatim because migration
+// preserves source names without adding a prefix.
+func grantedNames(cluster *config.Cluster, projects []string, allowMissing bool) []string {
+	if allowMissing {
+		return projects
+	}
 	resolved := make([]string, 0, len(projects))
 	for _, project := range projects {
 		resolved = append(resolved, cluster.ResolveNamespace(project, ""))
 	}
-	return grantSharedCredential(context.Background(), k8sClient.Clientset(), k8sClient.Dynamic(),
-		args[0], resolved, cmd.OutOrStdout())
+	return resolved
 }
 
 func runCredentialsRevoke(cmd *cobra.Command, args []string) error {
@@ -106,16 +121,25 @@ func revocableForms(cluster *config.Cluster, projects []string) []string {
 }
 
 // grantSharedCredential allows projects to build with the named shared git
-// credential and reports the allow-list it leaves behind.
+// credential and reports the allow-list it leaves behind. A project the cluster
+// does not have is refused unless allowMissing is set, which grants it with a
+// notice.
 func grantSharedCredential(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface,
-	name string, projects []string, out io.Writer) error {
+	name string, projects []string, allowMissing bool, out io.Writer) error {
 	// Only a grant checks the project. Nothing reports at build time which
 	// project a token was granted to, so a typo is stored as a success and met
 	// as a refused build much later. A revoke is the way out of a mistake,
 	// including one naming a project that has since been deleted, so requiring
 	// the project there would shut the door on the way out.
-	if err := projectsMustExist(ctx, dyn, projects); err != nil {
+	missing, err := missingProjects(ctx, dyn, projects)
+	if err != nil {
 		return err
+	}
+	if len(missing) > 0 && !allowMissing {
+		return fmt.Errorf("%w. If the project arrives later, for example by a migration, add --allow-missing-project", missing[0])
+	}
+	for _, project := range missing {
+		_, _ = fmt.Fprintf(out, "\n  !  %s does not exist on this cluster yet. The grant applies once it does.\n", project.project)
 	}
 	return changeSharedCredential(ctx, clientset, name, projects, projects, sharedcred.Grant, "may now build with", out)
 }
@@ -159,20 +183,45 @@ func changeSharedCredential(ctx context.Context, clientset kubernetes.Interface,
 // and says which it does. A project name is compared exactly at build time, so a
 // typo or the wrong case is a grant that can never match.
 func projectsMustExist(ctx context.Context, dyn dynamic.Interface, projects []string) error {
+	missing, err := missingProjects(ctx, dyn, projects)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return missing[0]
+	}
+	return nil
+}
+
+// missingProject describes an absent project and lists existing projects in
+// its error message.
+type missingProject struct {
+	project string
+	known   []string
+}
+
+func (m missingProject) Error() string {
+	return fmt.Sprintf("this cluster has no project %q. It has: %s", m.project, strings.Join(m.known, ", "))
+}
+
+// missingProjects returns the named projects the cluster does not have, in the
+// order given.
+func missingProjects(ctx context.Context, dyn dynamic.Interface, projects []string) ([]missingProject, error) {
 	live, err := dyn.Resource(manifest.ProjectGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("listing projects: %w", err)
+		return nil, fmt.Errorf("listing projects: %w", err)
 	}
 	known := make([]string, 0, len(live.Items))
 	for i := range live.Items {
 		known = append(known, live.Items[i].GetName())
 	}
+	var missing []missingProject
 	for _, project := range projects {
 		if !contains(known, project) {
-			return fmt.Errorf("this cluster has no project %q. It has: %s", project, strings.Join(known, ", "))
+			missing = append(missing, missingProject{project: project, known: known})
 		}
 	}
-	return nil
+	return missing, nil
 }
 
 // sharedCredentialError says which command grants a registry credential when

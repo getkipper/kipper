@@ -514,6 +514,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Post("/accept", migrationHandler.AcceptHandler)
 		r.Get("/projects", migrationHandler.TargetProjectsHandler)
 		r.Get("/capacity", migrationHandler.TargetCapacityHandler)
+		r.Post("/git-credentials", migrationHandler.TargetGitCredentialsHandler)
 		// Per-session receive endpoints perform cluster writes, so each must
 		// prove it holds the accepted session's migration secret.
 		r.Group(func(r chi.Router) {

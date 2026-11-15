@@ -66,6 +66,7 @@ func init() {
 	credentialsGetCmd.Flags().String("environment", "", "target environment (used with --app)")
 
 	credentialsAllowCmd.Flags().StringArray("project", nil, "project allowed to build with this credential (repeatable)")
+	credentialsAllowCmd.Flags().Bool("allow-missing-project", false, "grant a project this cluster does not have yet, such as one a migration will create, under exactly the name given")
 	credentialsRevokeCmd.Flags().StringArray("project", nil, "project to stop from building with this credential (repeatable)")
 
 	credentialsCmd.AddCommand(credentialsListCmd)

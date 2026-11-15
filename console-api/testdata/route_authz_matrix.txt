@@ -184,6 +184,7 @@ POST /api/v1/jobs	anon=401 outsider=allow viewer=allow deployer=allow owner=allo
 POST /api/v1/jobs/{name}/trigger	anon=401 outsider=404 viewer=404 deployer=404 owner=404 admin=404 cluster-viewer=404 cluster-viewer-owner=404
 POST /api/v1/link	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=allow cluster-viewer-owner=allow
 POST /api/v1/migrate-target/accept	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
+POST /api/v1/migrate-target/git-credentials	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
 POST /api/v1/migrate-target/{session}/abort	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
 POST /api/v1/migrate-target/{session}/commit	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
 POST /api/v1/migrate-target/{session}/db-import	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401 cluster-viewer=401 cluster-viewer-owner=401
