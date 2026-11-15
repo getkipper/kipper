@@ -37,7 +37,7 @@ Migration is a console feature with visual progress. The flow:
 |---|---|
 | Project CRs | Created on target, namespaces auto-provisioned |
 | Kubernetes Secrets | Transferred directly with their types intact (env vars, registry auth). Two kinds travel differently: see the two rows below |
-| Service CRs | Created on target, StatefulSets auto-provisioned. A service's credentials travel inside the same handover, so the target owns them from the moment they land and its engine starts on the password your data was written with |
+| Service CRs | Created on target, StatefulSets auto-provisioned. A service's credentials travel inside the same handover, so the target owns them from the moment they land and its engine starts with the username and password your data was written with |
 | Per-binding credentials | Rebuilt on the target from the service's credentials, so they are not sent. They are a projection of the shared credentials with the binding's own database applied, and each workload's controller renders its own |
 | Postgres data | Each database dumped with pg_dump and restored into the same database name, then verified by table count. Dumps stream directly between the clusters. On a confirmed overwrite, databases that exist only on the target are dropped, so the result is a replacement rather than a merge |
 | MySQL / MongoDB data | Exported via mysqldump (including routines, events, and triggers) / mongodump, imported on target |

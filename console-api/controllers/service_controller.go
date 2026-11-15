@@ -280,7 +280,7 @@ func credentialData(svc *kipperv1.Service, password string) map[string][]byte {
 		// password is set, so redis://:${REDIS_PASSWORD}@host fails to
 		// connect and names the wrong cause.
 		if servicecatalog.HasAuth(svc.Spec.Type) {
-			data["USERNAME"] = []byte("kipper")
+			data["USERNAME"] = []byte(defaultEngineUsername)
 			data["PASSWORD"] = []byte(password)
 		}
 		// Type-specific defaults: NAME=app for databases, VHOST=/ for
@@ -463,9 +463,8 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 	// Over a volume the Secret is the only record: a missing key cannot be
 	// filled in from the current default, because that would publish an account
 	// the engine has never heard of and every bound workload would authenticate
-	// as nobody, and an identity that disagrees with the default is the one the
-	// engine answers to. With no volume there is no history to preserve, and
-	// what the service will come up as is what the StatefulSet passes it.
+	// as nobody. An identity the Secret names is kept either way, because the
+	// StatefulSet starts the engine under that name.
 	identity := engineIdentityKey(svc.Spec.Type)
 	missing := ""
 	for _, key := range []string{secretCredentialKey(svc.Spec.Type), identity} {
@@ -474,10 +473,8 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 			break
 		}
 	}
-	disagrees := identity != "" && len(secret.Data[identity]) > 0 &&
-		!bytes.Equal(secret.Data[identity], desired[identity])
 
-	if missing != "" || disagrees {
+	if missing != "" {
 		initialised, err := r.serviceHasData(ctx, svc)
 		if err != nil {
 			return err
@@ -491,10 +488,6 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 		case !initialised:
 			if key := secretCredentialKey(svc.Spec.Type); key != "" && len(secret.Data[key]) == 0 {
 				desired[key] = []byte(generatePassword())
-			}
-			if disagrees {
-				secret.Data[identity] = desired[identity]
-				changed = true
 			}
 		}
 	}
@@ -526,6 +519,30 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 		return nil
 	}
 	return r.Update(ctx, secret)
+}
+
+// defaultEngineUsername is the account a new service's engine is created with.
+const defaultEngineUsername = "kipper"
+
+// engineUsername is the account the engine is started with: the username the
+// service's credentials Secret names, which a migrated or older service carries
+// over, or kipper for a Secret that names none.
+func (r *ServiceReconciler) engineUsername(ctx context.Context, svc *kipperv1.Service) (string, error) {
+	if engineIdentityKey(svc.Spec.Type) == "" {
+		return defaultEngineUsername, nil
+	}
+	var secret corev1.Secret
+	err := r.Get(ctx, client.ObjectKey{Namespace: svc.Namespace, Name: secretname.ServiceCredentials(svc.Name)}, &secret)
+	if errors.IsNotFound(err) {
+		return defaultEngineUsername, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the credentials of %s: %w", svc.Name, err)
+	}
+	if username := string(secret.Data[engineIdentityKey(svc.Spec.Type)]); username != "" {
+		return username, nil
+	}
+	return defaultEngineUsername, nil
 }
 
 func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kipperv1.Service) error {
@@ -582,8 +599,11 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		},
 	}
 
-	// Set env vars from catalog
-	container.Env = catalog.envVars(svc.Name)
+	username, err := r.engineUsername(ctx, svc)
+	if err != nil {
+		return err
+	}
+	container.Env = catalog.envVars(svc.Name, username)
 
 	var podVolumes []corev1.Volume
 	if svc.Spec.Type == "mongodb" {
@@ -1464,7 +1484,7 @@ type serviceCatalogEntry struct {
 	// service pins no explicit resources, so every service pod declares
 	// requests and limits (databases need more than a plain app).
 	resourceProfile string
-	envVars         func(name string) []corev1.EnvVar
+	envVars         func(name, username string) []corev1.EnvVar
 	command         []string
 	args            []string
 	readiness       *corev1.ProbeHandler
@@ -1490,9 +1510,9 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			image: "postgres", defaultVersion: "16-alpine", port: 5432, resourceProfile: "database",
 			dataPath: "/var/lib/postgresql/data", defaultStorage: "5Gi",
 			readiness: execCheck("pg_isready", "-U", "kipper", "-h", "127.0.0.1", "-p", "5432"),
-			envVars: func(name string) []corev1.EnvVar {
+			envVars: func(name, username string) []corev1.EnvVar {
 				return []corev1.EnvVar{
-					{Name: "POSTGRES_USER", Value: "kipper"},
+					{Name: "POSTGRES_USER", Value: username},
 					{Name: "POSTGRES_DB", Value: "app"},
 					{Name: "PGDATA", Value: "/var/lib/postgresql/data/pgdata"},
 					secretEnvPassword("POSTGRES_PASSWORD", secretname.ServiceCredentials(name)),
@@ -1504,9 +1524,19 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			image: "mysql", defaultVersion: "8-oracle", port: 3306, resourceProfile: "database",
 			dataPath: "/var/lib/mysql", defaultStorage: "5Gi",
 			readiness: execCheck("mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp"),
-			envVars: func(name string) []corev1.EnvVar {
+			envVars: func(name, username string) []corev1.EnvVar {
+				// The image reserves MYSQL_USER for an additional account and
+				// rejects root. Root uses MYSQL_ROOT_PASSWORD. Preserve the
+				// existing environment variable order to avoid restarting pods
+				// solely because the order changed.
+				if username == "root" {
+					return []corev1.EnvVar{
+						{Name: "MYSQL_DATABASE", Value: "app"},
+						secretEnvPassword("MYSQL_ROOT_PASSWORD", secretname.ServiceCredentials(name)),
+					}
+				}
 				return []corev1.EnvVar{
-					{Name: "MYSQL_USER", Value: "kipper"},
+					{Name: "MYSQL_USER", Value: username},
 					{Name: "MYSQL_DATABASE", Value: "app"},
 					secretEnvPassword("MYSQL_PASSWORD", secretname.ServiceCredentials(name)),
 					secretEnvPassword("MYSQL_ROOT_PASSWORD", secretname.ServiceCredentials(name)),
@@ -1520,7 +1550,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			// redis-cli exits 0 on an error reply such as LOADING, so the
 			// probe checks for the reply itself.
 			readiness: execCheck("sh", "-c", "redis-cli ping | grep -q PONG"),
-			envVars:   func(_ string) []corev1.EnvVar { return nil },
+			envVars:   func(_, _ string) []corev1.EnvVar { return nil },
 		}
 	case "mongodb":
 		return serviceCatalogEntry{
@@ -1529,9 +1559,9 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			// The image listens only on loopback while it initializes an empty
 			// data directory, so probing the pod's address waits for initialization.
 			readiness: tcpCheck(27017),
-			envVars: func(name string) []corev1.EnvVar {
+			envVars: func(name, username string) []corev1.EnvVar {
 				return []corev1.EnvVar{
-					{Name: "MONGO_INITDB_ROOT_USERNAME", Value: "kipper"},
+					{Name: "MONGO_INITDB_ROOT_USERNAME", Value: username},
 					secretEnvPassword("MONGO_INITDB_ROOT_PASSWORD", secretname.ServiceCredentials(name)),
 				}
 			},
@@ -1541,9 +1571,9 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			image: "rabbitmq", defaultVersion: "3-management-alpine", port: 5672, resourceProfile: "memory-heavy",
 			dataPath: "/var/lib/rabbitmq", defaultStorage: "1Gi",
 			readiness: tcpCheck(5672),
-			envVars: func(name string) []corev1.EnvVar {
+			envVars: func(name, username string) []corev1.EnvVar {
 				return []corev1.EnvVar{
-					{Name: "RABBITMQ_DEFAULT_USER", Value: "kipper"},
+					{Name: "RABBITMQ_DEFAULT_USER", Value: username},
 					secretEnvPassword("RABBITMQ_DEFAULT_PASS", secretname.ServiceCredentials(name)),
 				}
 			},
@@ -1552,7 +1582,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		return serviceCatalogEntry{
 			image: "opensearchproject/opensearch", defaultVersion: "2", port: 9200, resourceProfile: "jvm",
 			dataPath: "/usr/share/opensearch/data", defaultStorage: "5Gi",
-			envVars: func(_ string) []corev1.EnvVar {
+			envVars: func(_, _ string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "discovery.type", Value: "single-node"},
 					{Name: "DISABLE_SECURITY_PLUGIN", Value: "true"},
@@ -1566,7 +1596,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			dataPath: "/data", defaultStorage: "10Gi",
 			command: []string{"minio"},
 			args:    []string{"server", "/data", "--console-address", ":9001"},
-			envVars: func(name string) []corev1.EnvVar {
+			envVars: func(name, username string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "MINIO_ROOT_USER", Value: "kipper"},
 					secretEnv("MINIO_ROOT_PASSWORD", secretname.ServiceCredentials(name), "SECRET_KEY"),
@@ -1591,7 +1621,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			ui:             &serviceCatalogUI{port: port, path: "/"},
 			dataPath:       "/maildir",
 			defaultStorage: "1Gi",
-			envVars:        func(_ string) []corev1.EnvVar { return nil },
+			envVars:        func(_, _ string) []corev1.EnvVar { return nil },
 		}
 	default:
 		return serviceCatalogEntry{
@@ -1599,7 +1629,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			// way the database entries above do.
 			image: "alpine", defaultVersion: "3.24", port: 80, resourceProfile: "standard",
 			dataPath: "/data", defaultStorage: "1Gi",
-			envVars: func(_ string) []corev1.EnvVar { return nil },
+			envVars: func(_, _ string) []corev1.EnvVar { return nil },
 		}
 	}
 }

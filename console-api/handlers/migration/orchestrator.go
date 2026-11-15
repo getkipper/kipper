@@ -10,6 +10,7 @@ import (
 	goerrors "errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -734,7 +735,22 @@ func (h *Handler) refuseUnsafeCredentialHandover(ctx context.Context, name, name
 			return fmt.Errorf("service %s already uses different credentials. Remove the target service first, or migrate into a project without that service", name)
 		}
 	}
+	// Changing the username in the credentials would leave Kipper's tools
+	// using a different account from the one initialized in the engine.
+	if slices.Contains(kipperv1.CredentialKeys(serviceType), "USERNAME") &&
+		engineUsername(existing.Data) != engineUsername(incoming) {
+		return fmt.Errorf("service %s already runs as a different user. Remove the target service first, or migrate into a project without that service", name)
+	}
 	return nil
+}
+
+// engineUsername returns the credential username, defaulting to "kipper"
+// when it is empty or missing.
+func engineUsername(data map[string][]byte) string {
+	if username := string(data["USERNAME"]); username != "" {
+		return username
+	}
+	return "kipper"
 }
 
 // claimCredentials points the credentials Secret's controller reference at the
