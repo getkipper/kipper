@@ -1,7 +1,6 @@
 package migration
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -14,10 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/remotecommand"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -416,58 +412,62 @@ func buildImportCommand(svcType, serviceName string) ([]string, string) {
 	}
 }
 
-// estimateDatabaseSize checks the data directory size in the service pod.
+// estimateDatabaseSize measures how much data a dump of the service carries,
+// in bytes, from inside its pod.
 func (h *Handler) estimateDatabaseSize(ctx context.Context, namespace, serviceName, svcType string) (int64, error) {
-	pods, err := h.Client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", serviceName),
-	})
-	if err != nil || len(pods.Items) == 0 {
-		return 0, fmt.Errorf("no pod found")
-	}
-
-	dataPath := "/var/lib/postgresql/data"
-	switch svcType {
-	case "mysql":
-		dataPath = "/var/lib/mysql"
-	case "mongodb":
-		dataPath = "/data/db"
-	case "redis":
-		dataPath = "/data"
-	case "rabbitmq":
-		dataPath = "/var/lib/rabbitmq"
-	}
-
-	cmd := []string{"sh", "-c", fmt.Sprintf("du -sb %s 2>/dev/null | cut -f1", dataPath)}
-	req := h.Client.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(pods.Items[0].Name).
-		Namespace(namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: serviceName,
-			Command:   cmd,
-			Stdout:    true,
-			Stderr:    true,
-		}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(h.RESTConfig, "POST", req.URL())
+	pod, err := h.servicePod(ctx, namespace, serviceName)
 	if err != nil {
 		return 0, err
 	}
+	return estimateSize(svcType, func(cmd []string) (string, error) {
+		return h.execInPod(ctx, namespace, pod, serviceName, cmd, nil)
+	})
+}
 
-	var stdout, stderr bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}); err != nil {
+// estimateSize asks the engine for the size of the data it holds, and falls
+// back to the size of the data directory when it has no answer. The directory
+// also holds binary logs, redo logs and WAL, which no dump carries.
+func estimateSize(svcType string, run func(cmd []string) (string, error)) (int64, error) {
+	if cmd := logicalSizeCommand(svcType); cmd != nil {
+		if out, err := run(cmd); err == nil {
+			if size, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64); err == nil {
+				return size, nil
+			}
+		}
+	}
+	out, err := run([]string{"sh", "-c", fmt.Sprintf("du -sb %s 2>/dev/null | cut -f1", dataDirectory(svcType))})
+	if err != nil {
 		return 0, err
 	}
+	return strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+}
 
-	var size int64
-	if _, err := fmt.Sscanf(strings.TrimSpace(stdout.String()), "%d", &size); err != nil {
-		return 0, err
+// logicalSizeCommand prints the bytes of user data the engine holds, or is
+// nil for a type that has no such query.
+func logicalSizeCommand(svcType string) []string {
+	switch svcType {
+	case "mysql":
+		return []string{"sh", "-c", mysqlClient + `mysql -u root -N -B -e "SET SESSION information_schema_stats_expiry = 0; SELECT COALESCE(SUM(data_length), 0) FROM information_schema.tables WHERE table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')"`}
+	case "postgres":
+		return []string{"sh", "-c", `psql -U "$POSTGRES_USER" -d postgres -At -c "SELECT COALESCE(SUM(pg_database_size(datname)), 0) FROM pg_database WHERE NOT datistemplate"`}
+	default:
+		return nil
 	}
-	return size, nil
+}
+
+func dataDirectory(svcType string) string {
+	switch svcType {
+	case "mysql":
+		return "/var/lib/mysql"
+	case "mongodb":
+		return "/data/db"
+	case "redis":
+		return "/data"
+	case "rabbitmq":
+		return "/var/lib/rabbitmq"
+	default:
+		return "/var/lib/postgresql/data"
+	}
 }
 
 func buildManualMigrationSteps(svcType, serviceName, namespace string) []string {

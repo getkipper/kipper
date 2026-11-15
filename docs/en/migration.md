@@ -173,7 +173,7 @@ The plan shows everything before anything moves:
 - **Blockers** (red) that prevent migration from starting: target unreachable, version mismatch, not enough capacity, resources requiring two copies that the target cannot create, unconfirmed overwrites, an app with invalid autoscaling settings, or a 2FA factor that is missing or still inside its 7-day wait
 - **Warnings** (amber): autoscaled apps that keep serving through a freeze, missing notification channels
 - Capacity numbers: CPU, memory, and disk the projects need against what the target has free
-- **Data that will be skipped**: databases over the 500MB cap stay behind with manual steps. Volumes and service storage always move, chunked and verified, with no size cap
+- **Data that will be skipped**: databases whose data is over the 500MB cap stay behind with manual steps. MySQL and Postgres report their own data size, which leaves out the binary logs and WAL in the data directory; other engines, or one that does not answer, are measured on disk. Volumes and service storage always move, chunked and verified, with no size cap
 - What will migrate, item by item, with git apps marked "rebuilt from the branch head"
 - What never migrates (Dex users, route TLS certificates, share links, Postgres globals, build history)
 
