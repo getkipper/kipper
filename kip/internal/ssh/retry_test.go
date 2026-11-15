@@ -266,6 +266,9 @@ func TestDial_RetriesTheProbeAndNeverTheCommands(t *testing.T) {
 	require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	sleep = func(time.Duration) {}
+	t.Cleanup(func() { sleep = time.Sleep })
+
 	c, err := Dial(Config{Host: "demo.example.com", User: "root"})
 	require.NoError(t, err, "two dropped handshakes must not end the connection attempt")
 	require.NotNil(t, c)
@@ -274,6 +277,59 @@ func TestDial_RetriesTheProbeAndNeverTheCommands(t *testing.T) {
 	require.NoError(t, err)
 	probes := strings.Count(string(recorded), " true")
 	assert.GreaterOrEqual(t, probes, 3, "the probe is what gets retried")
+}
+
+// kip puts UFW's LIMIT rule on port 22, which refuses a seventh new connection
+// from one address within 30 seconds and counts the refused ones too. A burst
+// of kip commands hits it, so the probe keeps trying for longer than that
+// window before it gives up.
+func TestDial_OutlastsTheSSHRateLimit(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	stub := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> " + calls + "\n" +
+		"n=$(wc -l < " + calls + ")\n" +
+		"if [ \"$n\" -le 4 ]; then\n" +
+		"  echo 'ssh: connect to host 203.0.113.10 port 22: Connection refused' >&2\n" +
+		"  exit 255\n" +
+		"fi\n" +
+		"exit 0\n"
+	//nolint:gosec // a stub in the test's own temp dir has to be executable
+	require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var waited time.Duration
+	sleep = func(d time.Duration) { waited += d }
+	t.Cleanup(func() { sleep = time.Sleep })
+
+	_, err := Dial(Config{Host: "demo.example.com", User: "root"})
+
+	require.NoError(t, err, "four refusals inside the rate limit's window must not end the attempt")
+	assert.Greater(t, waited, 30*time.Second, "the retries span the whole window")
+}
+
+// Timeouts and unreachable hosts use the shorter retry window.
+func TestDial_GivesUpQuicklyOnAHostThatDoesNotAnswer(t *testing.T) {
+	for _, reason := range []string{"Operation timed out", "No route to host", "Network is unreachable"} {
+		t.Run(reason, func(t *testing.T) {
+			dir := t.TempDir()
+			stub := filepath.Join(dir, "ssh")
+			script := "#!/bin/sh\n" +
+				"echo 'ssh: connect to host 203.0.113.10 port 22: " + reason + "' >&2\n" +
+				"exit 255\n"
+			//nolint:gosec // a stub in the test's own temp dir has to be executable
+			require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			var waited time.Duration
+			sleep = func(d time.Duration) { waited += d }
+			t.Cleanup(func() { sleep = time.Sleep })
+
+			_, err := Dial(Config{Host: "demo.example.com", User: "root"})
+
+			require.Error(t, err)
+			assert.Less(t, waited, 5*time.Second)
+		})
+	}
 }
 
 // Nothing that changes the host is ever repeated, however the connection fails.
