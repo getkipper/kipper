@@ -69,6 +69,7 @@ spec:
             - traefik
             - velero
             - kipper-restore-drill
+            - kipper-builds
           excludedNamespaceScopedResources:
             - certificaterequests.cert-manager.io
             - orders.acme.cert-manager.io
