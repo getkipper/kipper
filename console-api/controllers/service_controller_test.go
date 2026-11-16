@@ -127,7 +127,7 @@ func TestReconcileStatefulSet_ProbesReadinessOfDatabases(t *testing.T) {
 		return corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)}}
 	}
 	cases := map[string]corev1.ProbeHandler{
-		"postgres": exec("pg_isready", "-U", "kipper", "-h", "127.0.0.1", "-p", "5432"),
+		"postgres": exec("pg_isready", "-U", "kipper", "-d", "postgres", "-h", "127.0.0.1", "-p", "5432"),
 		"mysql":    exec("mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp"),
 		"redis":    exec("sh", "-c", "redis-cli ping | grep -q PONG"),
 		"mongodb":  tcp(27017),
@@ -148,6 +148,26 @@ func TestReconcileStatefulSet_ProbesReadinessOfDatabases(t *testing.T) {
 			assert.Equal(t, int32(5), probe.TimeoutSeconds, "a busy database must not flap on the one-second default")
 		})
 	}
+}
+
+// The probe uses the engine's configured role and the postgres database created
+// by initdb to avoid logging failed connections for a missing role or database.
+func TestReconcileStatefulSet_ProbesPostgresAsTheSecretsUsername(t *testing.T) {
+	svc := bareService("postgres")
+	creds := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data:       map[string][]byte{"USERNAME": []byte("legacy"), "PASSWORD": []byte("secret")},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, creds).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	probe := statefulSetContainer(t, r).ReadinessProbe
+	require.NotNil(t, probe)
+	require.NotNil(t, probe.Exec)
+	assert.Equal(t, []string{"pg_isready", "-U", "legacy", "-d", "postgres", "-h", "127.0.0.1", "-p", "5432"}, probe.Exec.Command)
 }
 
 func TestReconcileStatefulSet_LeavesOtherServicesUnprobed(t *testing.T) {

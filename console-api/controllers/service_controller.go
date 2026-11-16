@@ -564,6 +564,11 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		image = servicecatalog.MinIOImage(version)
 	}
 
+	username, err := r.engineUsername(ctx, svc)
+	if err != nil {
+		return err
+	}
+
 	containerPorts := []corev1.ContainerPort{{Name: "main", ContainerPort: catalog.port}}
 	if catalog.ui != nil {
 		containerPorts = append(containerPorts, corev1.ContainerPort{Name: "ui", ContainerPort: catalog.ui.port})
@@ -577,7 +582,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: catalog.dataPath},
 		},
-		ReadinessProbe: readinessProbe(catalog.readiness),
+		ReadinessProbe: readinessProbe(catalog.readiness, username),
 	}
 
 	// Start from the type's default profile, then honour any explicit CR
@@ -596,10 +601,6 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		},
 	}
 
-	username, err := r.engineUsername(ctx, svc)
-	if err != nil {
-		return err
-	}
 	container.Env = catalog.envVars(svc.Name, username)
 
 	var podVolumes []corev1.Volume
@@ -1492,7 +1493,7 @@ type serviceCatalogEntry struct {
 	envVars         func(name, username string) []corev1.EnvVar
 	command         []string
 	args            []string
-	readiness       *corev1.ProbeHandler
+	readiness       func(username string) *corev1.ProbeHandler
 }
 
 // serviceCatalogUI describes the browseable UI a service ships.
@@ -1514,7 +1515,11 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		return serviceCatalogEntry{
 			image: "postgres", defaultVersion: "16-alpine", port: 5432, resourceProfile: "database",
 			dataPath: "/var/lib/postgresql/data", defaultStorage: "5Gi",
-			readiness: execCheck("pg_isready", "-U", "kipper", "-h", "127.0.0.1", "-p", "5432"),
+			readiness: func(username string) *corev1.ProbeHandler {
+				// Use the engine's role and the postgres database created by initdb
+				// to avoid logging a failed connection attempt on every probe.
+				return execCheck("pg_isready", "-U", username, "-d", "postgres", "-h", "127.0.0.1", "-p", "5432")
+			},
 			envVars: func(name, username string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "POSTGRES_USER", Value: username},
@@ -1528,7 +1533,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		return serviceCatalogEntry{
 			image: "mysql", defaultVersion: "8-oracle", port: 3306, resourceProfile: "database",
 			dataPath: "/var/lib/mysql", defaultStorage: "5Gi",
-			readiness: execCheck("mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp"),
+			readiness: anyUser(execCheck("mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp")),
 			envVars: func(name, username string) []corev1.EnvVar {
 				// The image reserves MYSQL_USER for an additional account and
 				// rejects root. Root uses MYSQL_ROOT_PASSWORD. Preserve the
@@ -1554,7 +1559,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			dataPath: "/data", defaultStorage: "1Gi",
 			// redis-cli exits 0 on an error reply such as LOADING, so the
 			// probe checks for the reply itself.
-			readiness: execCheck("sh", "-c", "redis-cli ping | grep -q PONG"),
+			readiness: anyUser(execCheck("sh", "-c", "redis-cli ping | grep -q PONG")),
 			envVars:   func(_, _ string) []corev1.EnvVar { return nil },
 		}
 	case "mongodb":
@@ -1563,7 +1568,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 			dataPath: "/data/db", defaultStorage: "5Gi",
 			// The image listens only on loopback while it initializes an empty
 			// data directory, so probing the pod's address waits for initialization.
-			readiness: tcpCheck(27017),
+			readiness: anyUser(tcpCheck(27017)),
 			envVars: func(name, username string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "MONGO_INITDB_ROOT_USERNAME", Value: username},
@@ -1575,7 +1580,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		return serviceCatalogEntry{
 			image: "rabbitmq", defaultVersion: "3-management-alpine", port: 5672, resourceProfile: "memory-heavy",
 			dataPath: "/var/lib/rabbitmq", defaultStorage: "1Gi",
-			readiness: tcpCheck(5672),
+			readiness: anyUser(tcpCheck(5672)),
 			envVars: func(name, username string) []corev1.EnvVar {
 				return []corev1.EnvVar{
 					{Name: "RABBITMQ_DEFAULT_USER", Value: username},
@@ -1653,15 +1658,16 @@ func stampWriter(obj metav1.Object, writer string) {
 	obj.SetAnnotations(annotations)
 }
 
-// readinessProbe returns a probe that runs check, or nil for a nil check.
+// readinessProbe returns a probe that runs check for an engine started as
+// username, or nil for a nil check.
 // Explicit timing and threshold values keep API server defaults from causing
 // repeated template updates.
-func readinessProbe(check *corev1.ProbeHandler) *corev1.Probe {
+func readinessProbe(check func(username string) *corev1.ProbeHandler, username string) *corev1.Probe {
 	if check == nil {
 		return nil
 	}
 	return &corev1.Probe{
-		ProbeHandler:        *check,
+		ProbeHandler:        *check(username),
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      5,
@@ -1672,6 +1678,11 @@ func readinessProbe(check *corev1.ProbeHandler) *corev1.Probe {
 
 func execCheck(command ...string) *corev1.ProbeHandler {
 	return &corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: command}}
+}
+
+// anyUser returns a readiness check that is the same for every engine username.
+func anyUser(check *corev1.ProbeHandler) func(string) *corev1.ProbeHandler {
+	return func(string) *corev1.ProbeHandler { return check }
 }
 
 func tcpCheck(port int32) *corev1.ProbeHandler {

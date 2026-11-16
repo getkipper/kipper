@@ -280,15 +280,14 @@ func (h *Handler) syncPostgresPassword(ctx context.Context, namespace, pod, serv
 	return err
 }
 
-// waitPostgresReady blocks until the target postgres real server is accepting
-// TCP connections. The first-time-init bootstrap server listens on the unix
-// socket only, so a forced-TCP check (-h 127.0.0.1) rules it out: pg_isready
-// gets no response from the socket-only bootstrap server and reports success
-// only once the real server listens on the port. pg_isready needs no
-// credentials, so this holds whatever the pod's host-auth policy is.
+// waitPostgresReady waits up to three minutes for the target PostgreSQL server
+// to accept TCP connections, or returns early if ctx is canceled. Checking TCP
+// excludes the bootstrap server, which listens only on a Unix socket during
+// initialization. pg_isready reports readiness independently of authentication,
+// so the check works with any host authentication policy.
 func (h *Handler) waitPostgresReady(ctx context.Context, namespace, pod, service, username string) error {
 	return h.waitDBServerReady(ctx, namespace, pod, service, "postgres",
-		[]string{"pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", username})
+		[]string{"pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", username, "-d", "postgres"})
 }
 
 // waitDBServerReady polls a readiness command until it exits zero, bounding
