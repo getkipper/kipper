@@ -64,6 +64,9 @@ type Handler struct {
 	// authorize a migration, and whether it already is.
 	StepUpStatus func(ctx context.Context, claims *middleware.Claims) (state string, eligibleAt time.Time, eligible bool, err error)
 
+	// execStream replaces the Kubernetes exec stream in tests.
+	execStream func(ctx context.Context, namespace, pod, container string, cmd []string, stdin io.Reader, stdout io.Writer) error
+
 	// receipts holds the issued plan receipts. In-memory is enough: a
 	// console-api restart invalidates them, and reviewing a fresh plan after
 	// a restart is the safe direction.

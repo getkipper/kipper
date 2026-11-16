@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -73,6 +74,7 @@ func (h *Handler) migratePostgres(ctx context.Context, session *Session, token *
 	})
 
 	var totalBytes int64
+	outgrew := false
 	for i, db := range databases {
 		if session.IsCancelled() {
 			return fmt.Errorf("migration canceled")
@@ -104,6 +106,12 @@ func (h *Handler) migratePostgres(ctx context.Context, session *Session, token *
 			},
 			namespace, pod, svc.Name,
 			[]string{"pg_dump", "-U", username, "--clean", "--if-exists", "--no-owner", "--no-privileges", db})
+		if dumpOutgrewTarget(sent, err) && !session.IsCancelled() {
+			slog.Warn("Migration dump exceeded the target's import limit and requires manual transfer.",
+				"service", namespace+"/"+svc.Name, "database", db, "error", err)
+			outgrew = true
+			break
+		}
 		if err != nil {
 			session.UpdateStep(importStep, func(s *Step) {
 				s.Status = StepFailed
@@ -118,9 +126,10 @@ func (h *Handler) migratePostgres(ctx context.Context, session *Session, token *
 		})
 	}
 
-	// A confirmed overwrite promises replacement, so databases that exist
-	// only on the target are dropped; without this the result is a merge
-	// that quietly keeps the target's old data.
+	// A confirmed overwrite promises replacement, so drop databases that exist
+	// only on the target to avoid retaining its old data. Manual imports replace
+	// only source databases, so pruning is also needed after an oversized dump
+	// stops the transfer early.
 	pruneResp, err := h.callTarget(token, "POST", fmt.Sprintf("/api/v1/migrate-target/%s/db-prune", session.ID), map[string]interface{}{
 		"service":   svc.Name,
 		"namespace": namespace,
@@ -132,6 +141,10 @@ func (h *Handler) migratePostgres(ctx context.Context, session *Session, token *
 			s.Error = fmt.Sprintf("removing target-only databases: %v", err)
 		})
 		return fmt.Errorf("removing target-only databases in %s: %w", svc.Name, err)
+	}
+	if outgrew {
+		h.leaveForManualSteps(ctx, session, namespace, svc, outgrewTargetDetail, exportStep, importStep)
+		return nil
 	}
 	var droppedNote string
 	if dropped, ok := pruneResp["dropped"].([]interface{}); ok && len(dropped) > 0 {
@@ -402,8 +415,8 @@ func (h *Handler) servicePod(ctx context.Context, namespace, serviceName string)
 }
 
 // execInPod runs a command in the named pod and returns its stdout. Stderr
-// is folded into the returned error. Commands are argv form throughout, so
-// no argument ever passes through a shell.
+// is included when the exec stream returns an error. Commands use argv form,
+// with shell interpretation only when the caller explicitly invokes a shell.
 func (h *Handler) execInPod(ctx context.Context, namespace, pod, container string, cmd []string, stdin io.Reader) (string, error) {
 	var stdout bytes.Buffer
 	if err := h.execInPodTo(ctx, namespace, pod, container, cmd, stdin, &stdout); err != nil {
@@ -416,6 +429,9 @@ func (h *Handler) execInPod(ctx context.Context, namespace, pod, container strin
 // given writer. Bulk transfers pass a pipe here so dumps stream instead of
 // accumulating in memory.
 func (h *Handler) execInPodTo(ctx context.Context, namespace, pod, container string, cmd []string, stdin io.Reader, stdout io.Writer) error {
+	if h.execStream != nil {
+		return h.execStream(ctx, namespace, pod, container, cmd, stdin, stdout)
+	}
 	req := h.Client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod).

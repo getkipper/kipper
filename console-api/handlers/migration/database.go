@@ -5,13 +5,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -181,16 +184,8 @@ func (h *Handler) migrateDatabaseData(ctx context.Context, session *Session, tok
 	// Estimate database size before dumping
 	estimatedSize, sizeErr := h.estimateDatabaseSize(ctx, namespace, svc.Name, svc.Spec.Type)
 	if sizeErr == nil && estimatedSize > maxAutoTransferBytes {
-		sizeMB := estimatedSize / (1024 * 1024)
-		session.MarkDataLeftBehind(namespace, svc.Name)
-		// Fetch manual steps before UpdateStep acquires the session lock so
-		// cancellation can proceed while these requests run.
-		manual := h.manualMigrationSteps(ctx, namespace, svc)
-		session.UpdateStep(stepName, func(s *Step) {
-			s.Status = StepSkipped
-			s.Detail = fmt.Sprintf("Database is ~%d MB: too large for automatic transfer", sizeMB)
-			s.ManualSteps = manual
-		})
+		h.leaveForManualSteps(ctx, session, namespace, svc,
+			fmt.Sprintf("Database is ~%d MB: too large for automatic transfer", estimatedSize/(1024*1024)), stepName, "")
 		return nil
 	}
 
@@ -250,6 +245,12 @@ func (h *Handler) migrateDatabaseData(ctx context.Context, session *Session, tok
 			"type":      {svc.Spec.Type},
 		},
 		namespace, podName, containerName, dumpCmd)
+	if dumpOutgrewTarget(sent, err) && !session.IsCancelled() {
+		slog.Warn("Migration dump exceeded the target's import limit and requires manual transfer.",
+			"service", namespace+"/"+svc.Name, "error", err)
+		h.leaveForManualSteps(ctx, session, namespace, svc, outgrewTargetDetail, stepName, importStep)
+		return nil
+	}
 	if err != nil {
 		session.UpdateStep(stepName, func(s *Step) {
 			s.Status = StepFailed
@@ -283,6 +284,64 @@ func (h *Handler) migrateDatabaseData(ctx context.Context, session *Session, tok
 // this only needs headroom for estimates that undershoot the actual dump.
 const maxDBImportBytes = 768 * 1024 * 1024
 
+var outgrewTargetDetail = fmt.Sprintf(
+	"The dump exceeded the target's %d MB limit per transfer. The target keeps a partial copy until the manual import below replaces it.",
+	maxDBImportBytes/(1024*1024))
+
+// errDumpTooLarge identifies a target's HTTP 413 response to an oversized dump.
+var errDumpTooLarge = errors.New("the dump exceeds the target's import limit")
+
+// dumpOutgrewTarget reports whether a transfer needs a manual import because
+// the target refused the dump as too large or was sent more than its limit.
+// The byte count also catches targets that report success after importing
+// only the first maxDBImportBytes bytes.
+func dumpOutgrewTarget(sent int64, err error) bool {
+	return sent > maxDBImportBytes || errors.Is(err, errDumpTooLarge)
+}
+
+// cappedBody records when its reader returns http.MaxBytesError. The exec
+// stream closes stdin on a read error, so the import can exit successfully
+// even when http.MaxBytesReader truncates the dump.
+type cappedBody struct {
+	r   io.Reader
+	cut atomic.Bool
+}
+
+func (b *cappedBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		b.cut.Store(true)
+	}
+	return n, err
+}
+
+func respondDumpTooLarge(w http.ResponseWriter) {
+	respondError(w, http.StatusRequestEntityTooLarge,
+		fmt.Sprintf("%v of %d MB, so only part of it was imported", errDumpTooLarge, maxDBImportBytes/(1024*1024)))
+}
+
+// leaveForManualSteps marks the export and any named import step as skipped,
+// attaching detail and manual transfer commands to the export step. It records
+// that the data stays on the source so bound apps arrive stopped on the target.
+func (h *Handler) leaveForManualSteps(ctx context.Context, session *Session, namespace string, svc *kipperv1.Service, detail, exportStep, importStep string) {
+	session.MarkDataLeftBehind(namespace, svc.Name)
+	// Fetch manual steps before UpdateStep acquires the session lock so
+	// cancellation can proceed while these requests run.
+	manual := h.manualMigrationSteps(ctx, namespace, svc)
+	session.UpdateStep(exportStep, func(s *Step) {
+		s.Status = StepSkipped
+		s.Detail = detail
+		s.ManualSteps = manual
+	})
+	if importStep != "" {
+		session.UpdateStep(importStep, func(s *Step) {
+			s.Status = StepSkipped
+			s.Detail = "Complete the manual transfer commands in the export step."
+		})
+	}
+}
+
 // ReceiveDBImportHandler receives a streamed database dump and pipes it into
 // the target cluster's service pod. Metadata arrives in query parameters and
 // the request body is the raw dump.
@@ -307,7 +366,7 @@ func (h *Handler) ReceiveDBImportHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	body := http.MaxBytesReader(w, r.Body, maxDBImportBytes)
+	body := &cappedBody{r: http.MaxBytesReader(w, r.Body, maxDBImportBytes)}
 
 	if dbType == "postgres" {
 		database := q.Get("database")
@@ -316,7 +375,12 @@ func (h *Handler) ReceiveDBImportHandler(w http.ResponseWriter, r *http.Request)
 			respondError(w, http.StatusBadRequest, "tables query parameter must be the source table count")
 			return
 		}
-		if err := h.importPostgresDatabase(ctx, namespace, service, database, tables, body); err != nil {
+		err = h.importPostgresDatabase(ctx, namespace, service, database, tables, body)
+		if body.cut.Load() {
+			respondDumpTooLarge(w)
+			return
+		}
+		if err != nil {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("import failed: %v", err))
 			return
 		}
@@ -351,7 +415,12 @@ func (h *Handler) ReceiveDBImportHandler(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := h.execInPodTo(ctx, namespace, podName, containerName, importCmd, body, io.Discard); err != nil {
+	err = h.execInPodTo(ctx, namespace, podName, containerName, importCmd, body, io.Discard)
+	if body.cut.Load() {
+		respondDumpTooLarge(w)
+		return
+	}
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("import failed: %v", err))
 		return
 	}

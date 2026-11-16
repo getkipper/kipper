@@ -32,6 +32,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // streamToTarget POSTs a raw byte stream to the target. Metadata travels in
 // the query string and the body is the stream itself: no base64, no JSON
 // envelope, constant memory on both sides regardless of payload size.
+// An HTTP 413 response returns an error wrapping errDumpTooLarge.
 func (h *Handler) streamToTarget(ctx context.Context, token *Token, path string, params url.Values, body io.Reader) error {
 	u := token.Endpoint + path
 	if len(params) > 0 {
@@ -63,6 +64,9 @@ func (h *Handler) streamToTarget(ctx context.Context, token *Token, path string,
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		return fmt.Errorf("target returned %d: %s: %w", resp.StatusCode, string(respBody), errDumpTooLarge)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("target returned %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -71,8 +75,8 @@ func (h *Handler) streamToTarget(ctx context.Context, token *Token, path string,
 
 // streamExecToTarget runs a command in a source pod and pipes its stdout
 // directly into a POST against the target, returning the bytes sent. The
-// exec and the upload run concurrently; whichever side fails first surfaces
-// as the returned error.
+// exec and the upload run concurrently. An upload error takes precedence
+// over an exec error.
 func (h *Handler) streamExecToTarget(ctx context.Context, token *Token, path string, params url.Values, namespace, pod, container string, cmd []string) (int64, error) {
 	pr, pw := io.Pipe()
 	counter := &countingReader{r: pr}
@@ -89,8 +93,7 @@ func (h *Handler) streamExecToTarget(ctx context.Context, token *Token, path str
 
 	sendErr := h.streamToTarget(ctx, token, path, params, counter)
 	// Unblock the exec writer if the upload ended before consuming the whole
-	// stream; on a clean transfer the pipe is already closed and this is a
-	// no-op.
+	// stream. On a clean transfer the pipe is already closed and this is a no-op.
 	_ = pr.CloseWithError(io.ErrClosedPipe)
 	execErr := <-execDone
 
