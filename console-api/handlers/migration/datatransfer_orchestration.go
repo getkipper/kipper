@@ -47,9 +47,9 @@ func transferID(sessionID, namespace, name string) string {
 // runDataTransfer drives one CR-driven data transfer to completion: it
 // stands up the receiver on the target, provisions the per-transfer token,
 // creates the DataTransfer CR for the reconciler, and mirrors CR progress
-// into the session step until the transfer settles. On success all transfer
-// resources on both clusters are cleaned up; on failure they stay for
-// inspection and the reaper's lease collects the target side.
+// into the session step until the transfer settles. It attempts cleanup on both
+// clusters on success or failure. Only a completed transfer allows the paused
+// target service to restart. The lease reaper collects leftover target resources.
 func (h *Handler) runDataTransfer(ctx context.Context, session *Session, token *Token, dt *kipperv1.DataTransfer, stepName string) error {
 	session.AddStep(Step{Name: stepName, Phase: "data", Status: StepRunning})
 
@@ -58,10 +58,9 @@ func (h *Handler) runDataTransfer(ctx context.Context, session *Session, token *
 			s.Status = StepFailed
 			s.Error = err.Error()
 		})
-		// Tear down both sides on failure instead of waiting for the target
-		// lease: this restarts any paused target service and reaps the
-		// receiver promptly. Runs on a fresh context so a cancelled parent
-		// does not skip cleanup.
+		// Clean up both sides promptly while leaving any paused target service
+		// stopped for inspection. A context independent of parent cancellation
+		// lets cleanup run even when the transfer was canceled.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		h.cleanupDataTransfer(cleanupCtx, session, token, dt, false)
@@ -193,7 +192,9 @@ func (h *Handler) runDataTransfer(ctx context.Context, session *Session, token *
 // whose owning migration session is no longer running. This replaces in-process
 // defers lost to a console-api restart. It runs at start and periodically:
 // paused source services scale back up unless fenced, and the orphaned CR
-// and its token secret are removed.
+// and its token secret are removed. Known sessions with target credentials also
+// allow receiver cleanup, leaving paused target services stopped for inspection.
+// The sweep runs until ctx is canceled. interval must be positive.
 func (h *Handler) SweepAbandonedTransfers(ctx context.Context, interval time.Duration) {
 	h.sweepAbandonedTransfersOnce(ctx)
 	ticker := time.NewTicker(interval)
@@ -216,13 +217,14 @@ func (h *Handler) sweepAbandonedTransfersOnce(ctx context.Context) {
 	for i := range transfers.Items {
 		dt := &transfers.Items[i]
 		session, ok := h.Sessions.Get(dt.Spec.SessionID)
-		if st := session.CurrentStatus(); ok && (st == SessionRunning || st == SessionVerifying) {
-			continue
+		if ok {
+			if st := session.CurrentStatus(); st == SessionRunning || st == SessionVerifying {
+				continue
+			}
 		}
-		// Tear down the target receiver too when the session is still known,
-		// so its paused service restarts now rather than on the 24h lease.
-		// Without the session secret only the source can be recovered, so
-		// the target falls back to its own lease reaper.
+		// Target credentials allow prompt receiver cleanup while leaving any
+		// paused target service stopped for inspection. Without them, target
+		// cleanup relies on its lease reaper and the 24-hour lease.
 		if ok && session.TargetAPI != "" && session.Secret != "" {
 			token := &Token{Endpoint: session.TargetAPI, Secret: session.Secret}
 			dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -289,12 +291,10 @@ func (h *Handler) sendToTargetDeleteCtx(ctx context.Context, token *Token, path 
 	return nil
 }
 
-// cleanupDataTransfer removes a completed transfer's resources on both
-// clusters. Failures here are logged into the step detail at most; a
-// leftover receiver is reaped by its lease.
-// cleanupDataTransfer tears down one transfer on both clusters. transferred
-// says the transfer finished and verified, which is the only state in which the
-// destination is known whole.
+// cleanupDataTransfer attempts to remove one transfer's resources on both
+// clusters. completed allows the target service to restart because the transfer
+// finished and verified, so the destination is known to be whole. Cleanup errors
+// are ignored. The lease reaper collects any leftover receiver.
 func (h *Handler) cleanupDataTransfer(ctx context.Context, session *Session, token *Token, dt *kipperv1.DataTransfer, completed bool) {
 	// The importer applies files to the live destination in place, so an
 	// interrupted commit leaves a tree that is part source and part target.
