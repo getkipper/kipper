@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -315,19 +316,31 @@ func TestWriteBackupDescriptionNamesValidationErrors(t *testing.T) {
 	assert.Contains(t, out.String(), "Validation: backup storage location 'default' is unavailable")
 }
 
-// sseCFixtures returns a backup location that encrypts with SSE-C and the
-// Secret holding its key.
-func sseCFixtures(key []byte) (*unstructured.Unstructured, *corev1.Secret) {
-	location := &unstructured.Unstructured{Object: map[string]any{
+// sseCFixtures returns a backup location at endpoint that encrypts with SSE-C,
+// configured the way kip installs one, and the Secret holding its key.
+func sseCFixtures(key []byte, endpoint string) (*unstructured.Unstructured, *corev1.Secret) {
+	return sseCLocation(map[string]any{"s3Url": endpoint, "s3ForcePathStyle": "true"}), sseCSecret(key)
+}
+
+// sseCLocation adds the SSE-C secret reference to config and returns a backup
+// location for the velero bucket using those settings.
+func sseCLocation(config map[string]any) *unstructured.Unstructured {
+	config["customerKeyEncryptionSecret"] = "kipper-backup-sse-key/customer-key"
+	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "velero.io/v1", "kind": "BackupStorageLocation",
 		"metadata": map[string]any{"name": "default", "namespace": "velero"},
-		"spec":     map[string]any{"config": map[string]any{"customerKeyEncryptionSecret": "kipper-backup-sse-key/customer-key"}},
+		"spec": map[string]any{
+			"objectStorage": map[string]any{"bucket": "velero"},
+			"config":        config,
+		},
 	}}
-	secret := &corev1.Secret{
+}
+
+func sseCSecret(key []byte) *corev1.Secret {
+	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "kipper-backup-sse-key", Namespace: "velero"},
 		Data:       map[string][]byte{"customer-key": key},
 	}
-	return location, secret
 }
 
 var testSSECKey = []byte("0123456789abcdef0123456789abcdef")
@@ -351,7 +364,7 @@ func TestDescribeBackupSendsTheSSECKey(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
-	location, secret := sseCFixtures(testSSECKey)
+	location, secret := sseCFixtures(testSSECKey, srv.URL)
 	dyn := describeClient(srv.URL, describedBackup("PartiallyFailed", 1, 0), location)
 	var out bytes.Buffer
 
@@ -383,21 +396,115 @@ func TestDescribeBackupKeepsTheSSECKeyFromAnywhereElse(t *testing.T) {
 		}
 	}))
 	defer plain.Close()
-	location, secret := sseCFixtures(testSSECKey)
+	other := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(keyHeader) != "" {
+			leaked = append(leaked, "another host")
+		}
+	}))
+	defer other.Close()
 
 	for _, tc := range []struct {
-		name, link string
-		client     *http.Client
+		name, endpoint, link string
+		client               *http.Client
+		want                 string
 	}{
-		{"a redirect", redirecting.URL, redirecting.Client()},
-		{"a plain HTTP link", plain.URL, plain.Client()},
+		{"a redirect", redirecting.URL, redirecting.URL, redirecting.Client(), "SSE-C key"},
+		{"a plain HTTP link", plain.URL, plain.URL, plain.Client(), "SSE-C key"},
+		{"another host", "https://objects.example.com", other.URL, other.Client(),
+			"the backup storage's download link names " + strings.TrimPrefix(other.URL, "https://") +
+				", which is not the backup location's endpoint objects.example.com, so kip does not send it the SSE-C key"},
 	} {
+		location, secret := sseCFixtures(testSSECKey, tc.endpoint)
 		dyn := describeClient(tc.link, describedBackup("PartiallyFailed", 1, 0), location)
 		var out bytes.Buffer
 
 		require.NoError(t, describeBackup(context.Background(), dyn, k8sfake.NewClientset(secret), "velero-daily-apps-20261021030000", &out, tc.client), tc.name)
 
-		assert.Contains(t, out.String(), "SSE-C key", tc.name)
+		assert.Contains(t, out.String(), tc.want, tc.name)
 	}
 	assert.Empty(t, leaked)
+}
+
+// Allowed download hosts come from s3Url or the region's AWS endpoint.
+// Virtual-hosted requests also allow the bucket's subdomain when
+// s3ForcePathStyle is false or unset.
+func TestSSECKeyGoesOnlyToTheLocationEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		config  map[string]any
+		allowed []string
+		refused []string
+	}{
+		{
+			name:    "path-style endpoint",
+			config:  map[string]any{"s3Url": "https://objects.example.com:8443", "s3ForcePathStyle": "true"},
+			allowed: []string{"https://objects.example.com:8443/velero/backups/x", "https://OBJECTS.example.com:8443/velero/backups/x"},
+			refused: []string{"https://velero.objects.example.com:8443/backups/x", "https://objects.example.com/velero/backups/x", "https://objects.example.com.example.org:8443/velero/backups/x"},
+		},
+		{
+			name:    "virtual-hosted endpoint",
+			config:  map[string]any{"s3Url": "https://objects.example.com"},
+			allowed: []string{"https://velero.objects.example.com/backups/x", "https://objects.example.com/velero/backups/x"},
+			refused: []string{"https://other.objects.example.com/backups/x", "https://velero.example.org/backups/x"},
+		},
+		{
+			name:    "Unicode endpoint",
+			config:  map[string]any{"s3Url": "https://σ.example.com", "s3ForcePathStyle": "true"},
+			refused: []string{"https://ς.example.com/velero/backups/x", "https://σ.example.com/velero/backups/x"},
+		},
+		{
+			name:    "scoped IPv6 endpoint",
+			config:  map[string]any{"s3Url": "https://[fe80::1%25LAN]:9000", "s3ForcePathStyle": "true"},
+			refused: []string{"https://[fe80::1%25lan]:9000/velero/backups/x", "https://[fe80::1%25LAN]:9000/velero/backups/x"},
+		},
+		{
+			name:    "uppercase endpoint",
+			config:  map[string]any{"s3Url": "https://OBJECTS.example.com", "s3ForcePathStyle": "true"},
+			allowed: []string{"https://objects.example.com/velero/backups/x"},
+		},
+		{
+			name:    "empty port",
+			config:  map[string]any{"s3Url": "https://objects.example.com:", "s3ForcePathStyle": "true"},
+			allowed: []string{"https://objects.example.com/velero/backups/x"},
+		},
+		{
+			name:    "AWS",
+			config:  map[string]any{"region": "eu-central-1"},
+			allowed: []string{"https://velero.s3.eu-central-1.amazonaws.com/backups/x", "https://s3.eu-central-1.amazonaws.com/velero/backups/x"},
+			refused: []string{"https://velero.s3.us-east-1.amazonaws.com/backups/x", "https://velero.example.org/backups/x"},
+		},
+	} {
+		dyn := describeClient("http://unused.invalid", sseCLocation(tc.config))
+
+		key, err := backupSSEKey(context.Background(), dyn, k8sfake.NewClientset(sseCSecret(testSSECKey)), *describedBackup("Completed", 0, 0))
+
+		require.NoError(t, err, tc.name)
+		require.NotNil(t, key, tc.name)
+		for _, link := range tc.allowed {
+			u, err := url.Parse(link)
+			require.NoError(t, err)
+			assert.NoError(t, key.checkDestination(u), link)
+		}
+		for _, link := range tc.refused {
+			u, err := url.Parse(link)
+			require.NoError(t, err)
+			assert.ErrorContains(t, key.checkDestination(u), "so kip does not send it the SSE-C key", link)
+		}
+	}
+}
+
+func TestSSECKeyNeedsTheLocationEndpoint(t *testing.T) {
+	dyn := describeClient("http://unused.invalid", sseCLocation(map[string]any{}))
+
+	_, err := backupSSEKey(context.Background(), dyn, k8sfake.NewClientset(sseCSecret(testSSECKey)), *describedBackup("Completed", 0, 0))
+
+	assert.EqualError(t, err, "backup location default sets neither s3Url nor region, so kip cannot tell which host may receive the SSE-C key")
+}
+
+func TestSSECKeyNamesTheASCIISpellingForAUnicodeEndpoint(t *testing.T) {
+	key := &locationSSEKey{key: testSSECKey, hosts: []string{"σ.example.com"}}
+	u, err := url.Parse("https://σ.example.com/velero/backups/x")
+	require.NoError(t, err)
+
+	assert.ErrorContains(t, key.checkDestination(u), "punycode")
 }
