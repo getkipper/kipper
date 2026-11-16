@@ -106,13 +106,13 @@ func dig(t *testing.T, m map[string]any, path ...string) any {
 func TestTraefikManifestPinsPatchedVersion(t *testing.T) {
 	values := traefikValues(t)
 
-	// version-gated chart logic must see the real running version, which it
-	// cannot derive from a digest, and the pulled image must be the patched
-	// v3.7.8 by digest (the chart's own appVersion v3.7.6 still has the
-	// ReplacePathRegex path-traversal auth-bypass CVE).
-	assert.Equal(t, "v3.7.8", dig(t, values, "versionOverride"))
-	assert.Equal(t, "v3.7.8", dig(t, values, "image", "tag"))
-	assert.Equal(t, "sha256:4299bbed850421258fc5448c2e0e6ad350981d4d335a68de11b92448aedbefe5",
+	// Keep chart version checks aligned with the image pinned by digest to
+	// patched v3.7.19 because the chart cannot infer its version from the digest.
+	// Versions v3.0.0 through v3.7.12 route rootless request targets as "/",
+	// bypassing path rules and path-scoped forwardAuth policies (GHSA-f52w-8j3h-j724).
+	assert.Equal(t, "v3.7.19", dig(t, values, "versionOverride"))
+	assert.Equal(t, "v3.7.19", dig(t, values, "image", "tag"))
+	assert.Equal(t, "sha256:aa942a00bce033c909bf1f7e861d93761be4b31a035f10d2410d33e38a8f41cf",
 		dig(t, values, "image", "digest"))
 
 	// The chart version pin itself (asserted on the HelmChart spec).

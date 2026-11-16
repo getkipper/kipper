@@ -30,22 +30,22 @@ spec:
   targetNamespace: traefik
   version: 41.0.2
   valuesContent: |-
-    # Pin the proxy image by digest to v3.7.8. The chart's own appVersion is
-    # v3.7.6, which still carries GHSA-cxjq-mrr5-89rv (path-traversal auth
-    # bypass in ReplacePathRegex) and GHSA-8rxv-jg7p-wvg3, both fixed in the
-    # v3.7.7/v3.7.8 patch line; a path-gating bypass is exactly the class this
-    # entrypoint must not reproduce. digest is what actually gets pulled
-    # (repository@digest, tag ignored for the ref). versionOverride tells the
-    # chart's version-gated logic the real version, which it cannot derive
-    # from a digest — the chart documents setting it alongside image.digest.
-    versionOverride: v3.7.8
+    # Pin v3.7.19 by digest to protect this entrypoint's path-based access controls.
+    # The chart defaults to v3.7.6. Versions v3.0.0 through v3.7.12 route rootless
+    # HTTP/1 request targets as "/" but forward them unchanged, bypassing router
+    # path rules and path-scoped forwardAuth policies (GHSA-f52w-8j3h-j724, fixed
+    # in v3.7.13). Version v3.7.18 fixes five additional security advisories.
+    # The chart pulls repository@digest regardless of the tag. As the chart
+    # documents, pair image.digest with versionOverride so version checks use
+    # the running version, which the chart cannot infer from a digest.
+    versionOverride: v3.7.19
     # Keep reporting disabled across chart upgrades.
     global:
       checkNewVersion: false
       sendAnonymousUsage: false
     image:
-      tag: v3.7.8
-      digest: sha256:4299bbed850421258fc5448c2e0e6ad350981d4d335a68de11b92448aedbefe5
+      tag: v3.7.19
+      digest: sha256:aa942a00bce033c909bf1f7e861d93761be4b31a035f10d2410d33e38a8f41cf
     ingressRoute:
       dashboard:
         enabled: false
