@@ -86,10 +86,35 @@ func selectedNamespace(cmd *cobra.Command, cluster *config.Cluster) string {
 	return cluster.ResolveNamespace(project, environment)
 }
 
+// exactNamespace returns the command's --namespace value, or "" when the flag
+// is unset or the command has none. Combining it with --project or
+// --environment returns an error, because those resolve through the cluster's
+// organization prefix and could name a different namespace.
+func exactNamespace(cmd *cobra.Command) (string, error) {
+	namespace, _ := cmd.Flags().GetString("namespace")
+	if namespace == "" {
+		return "", nil
+	}
+	if cmd.Flags().Changed("project") || cmd.Flags().Changed("environment") {
+		return "", fmt.Errorf("--namespace specifies the exact namespace. Omit --project and --environment when using it")
+	}
+	return namespace, nil
+}
+
+// resolveAppNamespace uses --namespace verbatim when the command has it and it
+// is set. Otherwise it resolves --project and --environment or the saved
+// project selection, and finally searches for the app by name.
 func resolveAppNamespace(cmd *cobra.Command, appName string) (string, *k8s.Client, error) {
+	namespace, err := exactNamespace(cmd)
+	if err != nil {
+		return "", nil, err
+	}
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return "", nil, err
+	}
+	if namespace != "" {
+		return namespace, k8sClient, nil
 	}
 
 	if ns := selectedNamespace(cmd, cluster); ns != "" {

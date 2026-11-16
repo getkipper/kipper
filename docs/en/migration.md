@@ -131,8 +131,8 @@ The token is valid for 24 hours and can only be used once.
 Migration leaves source apps running unless you stop them. Writes made after a database or volume is copied stay on the source. For production, stop the apps before starting migration and keep them stopped through domain cutover:
 
 ```bash
-kip app stop backend --for-migration --project shop --environment prod
-kip app stop worker --for-migration --project shop --environment prod
+kip app stop backend --for-migration --namespace shop-prod
+kip app stop worker --for-migration --namespace shop-prod
 ```
 
 `--for-migration` works for autoscaled apps too. It marks a new stop as a temporary write freeze on the source. On the target, the app uses its configured replica count and autoscaling settings, unless it needs a manual database restore. An already stopped app keeps its original stop record; see [Apps that arrive stopped](#apps-that-arrive-stopped).
@@ -140,9 +140,11 @@ kip app stop worker --for-migration --project shop --environment prod
 If migration is aborted, restart each app you froze on the source, for example:
 
 ```bash
-kip app start backend --project shop --environment prod
-kip app start worker --project shop --environment prod
+kip app start backend --namespace shop-prod
+kip app start worker --namespace shop-prod
 ```
+
+The console's commands use `--namespace` because migration preserves namespace names, while `--project` resolves them using the organization prefix configured for the CLI's current cluster.
 
 The plan lists apps that may still write and reports any checks it could not complete. At migration start, the check waits up to 30 seconds for stopped apps to finish shutting down. Any remaining apps appear in a "Write freeze check" warning.
 

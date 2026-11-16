@@ -90,14 +90,11 @@ func addTransferScopeFlags(cmd *cobra.Command) {
 // --environment on the current cluster. An explicit namespace combined with
 // either scope flag returns an error.
 func transferNamespace(cmd *cobra.Command) (string, error) {
-	namespace, _ := cmd.Flags().GetString("namespace")
-	if namespace == "" {
-		return resolveServiceNamespace(cmd), nil
+	namespace, err := exactNamespace(cmd)
+	if err != nil || namespace != "" {
+		return namespace, err
 	}
-	if cmd.Flags().Changed("project") || cmd.Flags().Changed("environment") {
-		return "", fmt.Errorf("--namespace specifies the exact namespace. Omit --project and --environment when using it")
-	}
-	return namespace, nil
+	return resolveServiceNamespace(cmd), nil
 }
 
 func runServiceImport(cmd *cobra.Command, args []string) error {

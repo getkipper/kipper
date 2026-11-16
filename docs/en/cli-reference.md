@@ -954,6 +954,7 @@ kip app start backend
 | `--reason` | `stop` | Optional stop reason, up to 500 bytes. On an already stopped app, only an explicit `--reason` changes the reason |
 | `--for-migration` | `stop` | Marks a new stop as a migration write freeze, which stays on the source. Existing stop records keep their original type |
 | `--project`, `--environment` | both | The app's project and environment |
+| `--namespace` | both | The app's exact namespace, used as given instead of resolving `--project` and `--environment` through the cluster's organization prefix. Cannot be combined with them |
 
 Stopping preserves the app’s configuration, replica count, autoscaling settings and data. Its route returns a "this app is stopped" page. For an app scaled to zero without a stop record and without autoscaling, use `kip app scale` to raise the count. See [Stopping and starting an app](/en/deploying-apps#stopping-and-starting-an-app).
 

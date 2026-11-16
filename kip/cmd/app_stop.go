@@ -41,10 +41,11 @@ func init() {
 	for _, c := range []*cobra.Command{appStopCmd, appStartCmd} {
 		c.Flags().String("project", "", "project name")
 		c.Flags().String("environment", "", "target environment")
+		c.Flags().String("namespace", "", "use this exact app namespace instead of resolving --project and --environment")
 		appCmd.AddCommand(c)
 	}
 	appStopCmd.Flags().String("reason", "", "why the app is stopped, shown wherever it is listed")
-	appStopCmd.Flags().Bool("for-migration", false, "stop the app as the write freeze before a migration; the migration does not carry this stop to the target")
+	appStopCmd.Flags().Bool("for-migration", false, "stop the app to freeze writes before migration. This stop applies only to the source cluster")
 }
 
 func runAppStop(cmd *cobra.Command, args []string) error {

@@ -88,11 +88,10 @@ func replicaSetAtZero(rs *appsv1.ReplicaSet) bool {
 // writeFreezeWarning lists possible source writers and commands to stop them.
 // It waits up to wait for stopped apps to drain and reports incomplete checks.
 func (h *Handler) writeFreezeWarning(ctx context.Context, projects []string, wait time.Duration) *Step {
-	type serving struct{ scope, ns, name string }
+	type serving struct{ ns, name string }
 	var live []serving
 	var unchecked []string
 	var stopping []*kipperv1.App
-	stoppingScope := map[*kipperv1.App]string{}
 	for _, project := range projects {
 		namespaces, err := h.getProjectNamespaces(ctx, project)
 		if goerrors.Is(err, errNoNamespaces) {
@@ -103,10 +102,6 @@ func (h *Handler) writeFreezeWarning(ctx context.Context, projects []string, wai
 			continue
 		}
 		for _, ns := range namespaces {
-			scope := h.appScope(ctx, ns)
-			if scope == "" {
-				scope = " --project " + project
-			}
 			var appList kipperv1.AppList
 			if err := h.CRClient.List(ctx, &appList, crclient.InNamespace(ns)); err != nil {
 				unchecked = append(unchecked, "namespace "+ns)
@@ -118,9 +113,8 @@ func (h *Handler) writeFreezeWarning(ctx context.Context, projects []string, wai
 				case appFrozen(ctx, h.Client, app):
 				case app.Spec.Stopped != nil:
 					stopping = append(stopping, app)
-					stoppingScope[app] = scope
 				default:
-					live = append(live, serving{scope, ns, app.Name})
+					live = append(live, serving{ns, app.Name})
 				}
 			}
 		}
@@ -142,7 +136,7 @@ func (h *Handler) writeFreezeWarning(ctx context.Context, projects []string, wai
 		stopping = still
 	}
 	for _, app := range stopping {
-		live = append(live, serving{stoppingScope[app], app.Namespace, app.Name})
+		live = append(live, serving{app.Namespace, app.Name})
 	}
 
 	if len(live) == 0 && len(unchecked) == 0 {
@@ -160,13 +154,13 @@ func (h *Handler) writeFreezeWarning(ctx context.Context, projects []string, wai
 	steps := []string{"# Stop each app before the data copy, so nothing writes after its copy:"}
 	for i, a := range live {
 		names[i] = a.ns + "/" + a.name
-		steps = append(steps, fmt.Sprintf("kip app stop %s --for-migration%s", a.name, a.scope))
+		steps = append(steps, fmt.Sprintf("kip app stop %s --for-migration%s", a.name, namespaceFlag(a.ns)))
 	}
 	steps = append(steps, "# The target receives the apps running. To undo the stop here after an aborted migration:")
 	for _, a := range live {
-		steps = append(steps, fmt.Sprintf("kip app start %s%s", a.name, a.scope))
+		steps = append(steps, fmt.Sprintf("kip app start %s%s", a.name, namespaceFlag(a.ns)))
 	}
-	detail := fmt.Sprintf("%s keep serving during the data copy; anything written there after its copy stays on this cluster", strings.Join(names, ", "))
+	detail := fmt.Sprintf("%s keep serving during the data copy. Anything written there after its copy stays on this cluster", strings.Join(names, ", "))
 	if len(unchecked) > 0 {
 		detail += fmt.Sprintf(". %s could not be checked, so there may be more", strings.Join(unchecked, ", "))
 	}
