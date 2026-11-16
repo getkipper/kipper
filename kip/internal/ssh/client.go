@@ -78,7 +78,9 @@ type Client struct {
 
 // Dial verifies SSH access and, for non-root users, passwordless sudo access
 // to a root Bash shell. An empty User defaults to root. Connection probes retry
-// transient transport failures. Authentication and sudo failures return an error.
+// transient transport failures and print one notice to stderr when retrying
+// refused or dropped connections. Exhausted retries, authentication failures,
+// and sudo failures return an error.
 func Dial(cfg Config) (*Client, error) {
 	c := &Client{cfg: cfg, controlPath: controlSocket(cfg)}
 
@@ -90,6 +92,7 @@ func Dial(cfg Config) (*Client, error) {
 	}
 	var err error
 	var out string
+	noticed := false
 	for attempt := 1; ; attempt++ {
 		out, err = c.attemptRaw(probe, nil, nil)
 		if err == nil || !neverReachedHost(err, out) {
@@ -98,6 +101,10 @@ func Dial(cfg Config) (*Client, error) {
 		wait, again := probeRetryWait(attempt, out)
 		if !again {
 			break
+		}
+		if !noticed && !unreachable(out) {
+			noticed = true
+			_, _ = fmt.Fprintf(retryNotice, "  !  %s is refusing SSH connections, perhaps because of its SSH rate limit. kip keeps trying for about 30 seconds.\n", cfg.Host)
 		}
 		sleep(wait)
 	}
@@ -125,6 +132,10 @@ var refusedWaits = []time.Duration{3 * time.Second, 8 * time.Second, 12 * time.S
 
 // sleep is time.Sleep, replaced in tests.
 var sleep = time.Sleep
+
+// retryNotice receives the one line Dial prints when it starts waiting out
+// refused connections.
+var retryNotice io.Writer = os.Stderr
 
 // probeRetryWait returns how long to wait before another attempt of a probe
 // that never reached the host, or false when it has been tried enough.

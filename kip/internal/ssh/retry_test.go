@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -301,11 +302,37 @@ func TestDial_OutlastsTheSSHRateLimit(t *testing.T) {
 	var waited time.Duration
 	sleep = func(d time.Duration) { waited += d }
 	t.Cleanup(func() { sleep = time.Sleep })
+	notices := captureRetryNotice(t)
 
 	_, err := Dial(Config{Host: "demo.example.com", User: "root"})
 
 	require.NoError(t, err, "four refusals inside the rate limit's window must not end the attempt")
 	assert.Greater(t, waited, 30*time.Second, "the retries span the whole window")
+	assert.Equal(t, "  !  demo.example.com is refusing SSH connections, perhaps because of its SSH rate limit. kip keeps trying for about 30 seconds.\n",
+		notices.String(), "the user hears once why kip is waiting")
+}
+
+// captureRetryNotice collects what Dial tells the user while it retries.
+func captureRetryNotice(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	retryNotice = &buf
+	t.Cleanup(func() { retryNotice = os.Stderr })
+	return &buf
+}
+
+func TestDial_SaysNothingWhenTheFirstAttemptConnects(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "ssh")
+	//nolint:gosec // a stub in the test's own temp dir has to be executable
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	notices := captureRetryNotice(t)
+
+	_, err := Dial(Config{Host: "demo.example.com", User: "root"})
+
+	require.NoError(t, err)
+	assert.Empty(t, notices.String())
 }
 
 // Timeouts and unreachable hosts use the shorter retry window.
@@ -323,11 +350,13 @@ func TestDial_GivesUpQuicklyOnAHostThatDoesNotAnswer(t *testing.T) {
 			var waited time.Duration
 			sleep = func(d time.Duration) { waited += d }
 			t.Cleanup(func() { sleep = time.Sleep })
+			notices := captureRetryNotice(t)
 
 			_, err := Dial(Config{Host: "demo.example.com", User: "root"})
 
 			require.Error(t, err)
 			assert.Less(t, waited, 5*time.Second)
+			assert.Empty(t, notices.String(), "a host that does not answer is not refusing connections")
 		})
 	}
 }
