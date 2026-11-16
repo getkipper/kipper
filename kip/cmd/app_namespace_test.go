@@ -74,8 +74,8 @@ func TestAppNamespaceRefusesAProjectAsWell(t *testing.T) {
 	}
 }
 
-func TestAppStopAndStartTakeAnExactNamespace(t *testing.T) {
-	for _, cmd := range []*cobra.Command{appStopCmd, appStartCmd} {
+func TestAppStopStartAndUpdateTakeAnExactNamespace(t *testing.T) {
+	for _, cmd := range []*cobra.Command{appStopCmd, appStartCmd, appUpdateCmd} {
 		assert.NotNil(t, cmd.Flags().Lookup("namespace"), "kip app %s has no --namespace flag", cmd.Name())
 	}
 }

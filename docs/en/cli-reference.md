@@ -859,6 +859,7 @@ kip app update backend --health-path /actuator/health/readiness --health-startup
 | `--closed` | No* | Publish only the route's public paths; use `--closed=false` to reopen. See [closing a route](/en/routing#closing-a-route-except-for-one-path) |
 | `--project` | No | Project name |
 | `--environment` | No | Target environment |
+| `--namespace` | No | Use the app's namespace exactly as given, bypassing namespace resolution from `--project`, `--environment`, and the cluster's organization prefix. This flag cannot be combined with `--project` or `--environment`. |
 
 \* Supply at least one update flag: `--image`, `--profile`, a CPU or memory flag, `--tuning auto`, `--redirect-from`, `--internal-path`, `--public-path`, `--closed`, `--health` or a `--health-*` flag.
 

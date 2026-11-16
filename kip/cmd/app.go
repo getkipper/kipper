@@ -171,6 +171,7 @@ func init() {
 	addHealthFlags(appUpdateCmd)
 	appUpdateCmd.Flags().String("project", "", "project name")
 	appUpdateCmd.Flags().String("environment", "", "target environment")
+	appUpdateCmd.Flags().String("namespace", "", "Use this exact app namespace, bypassing namespace resolution from --project and --environment.")
 
 	appLogsCmd.Flags().String("project", "", "project name")
 	appLogsCmd.Flags().String("environment", "", "target environment")

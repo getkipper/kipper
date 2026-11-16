@@ -210,3 +210,16 @@ func init() {
 		return gitreach.Reachable, ""
 	}
 }
+
+// TestImageCopyStepsNameTheExactNamespace verifies that copy steps preserve the
+// migrated namespace because kip may add an organization prefix to project names.
+func TestImageCopyStepsNameTheExactNamespace(t *testing.T) {
+	steps := strings.Join(buildManualImageCopySteps("shop-prod", []string{"web"}), "\n")
+
+	if !strings.Contains(steps, "kip app update web --namespace shop-prod --image <reachable-registry>/shop-prod/web:latest") {
+		t.Fatalf("the update step must name the exact namespace:\n%s", steps)
+	}
+	if strings.Contains(steps, "--project") {
+		t.Fatalf("--project resolves through the organization prefix:\n%s", steps)
+	}
+}
