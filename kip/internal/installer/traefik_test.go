@@ -244,5 +244,24 @@ func TestTraefikReadsItsCopyOfTheHopCertificate(t *testing.T) {
 	for _, a := range args {
 		got = append(got, a.(string))
 	}
-	assert.Equal(t, hopca.TraefikFileArgs, got)
+	assert.Subset(t, got, hopca.TraefikFileArgs)
+}
+
+// TestTraefikDropsHeadersWithAliasingNames checks alias filtering on every entry
+// point serving app routes. The API key middleware strips client-supplied
+// X-Kipper-Key-Prefix and X-Kipper-Key-Name headers. PHP and WSGI apps normalize
+// aliases such as X_Kipper_Key_Name to the same variable as the dashed header,
+// so entry points must drop aliases to prevent forged identities.
+func TestTraefikDropsHeadersWithAliasingNames(t *testing.T) {
+	values := traefikValues(t)
+
+	args, ok := dig(t, values, "additionalArguments").([]any)
+	require.True(t, ok)
+	var got []string
+	for _, a := range args {
+		got = append(got, a.(string))
+	}
+	assert.Contains(t, got, "--entryPoints.web.http.aliasHeadersStrategy=delete")
+	assert.Contains(t, got, "--entryPoints.websecure.http.aliasHeadersStrategy=delete")
+	assert.Contains(t, got, "--entryPoints.metrics.http.aliasHeadersStrategy=delete")
 }

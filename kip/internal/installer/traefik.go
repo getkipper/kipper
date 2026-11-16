@@ -106,6 +106,13 @@ spec:
           enabled: true
 `
 
+var aliasHeaderArgs = []string{
+	"--entryPoints.web.http.aliasHeadersStrategy=delete",
+	"--entryPoints.websecure.http.aliasHeadersStrategy=delete",
+	// Routes without an explicit entry point also use metrics within the cluster.
+	"--entryPoints.metrics.http.aliasHeadersStrategy=delete",
+}
+
 // renderTraefikManifest uses the trustedIPs YAML flow list and adds the
 // file-provider settings for the hop certificate. The appended settings belong
 // inside valuesContent, the HelmChart's final field, so their indentation matters.
@@ -120,6 +127,12 @@ func renderTraefikManifest(trustedIPs string) string {
 	fmt.Fprintf(&hop, "        mountPath: %s\n        readOnly: true\n", hopca.TraefikMountPath)
 	hop.WriteString("    additionalArguments:\n")
 	for _, arg := range hopca.TraefikFileArgs {
+		fmt.Fprintf(&hop, "      - %q\n", arg)
+	}
+	// Identity-header middleware matches dashed names. Some app runtimes treat
+	// underscore spellings as the same header, so drop aliases to prevent spoofing.
+	// This also drops underscore headers, as nginx does by default.
+	for _, arg := range aliasHeaderArgs {
 		fmt.Fprintf(&hop, "      - %q\n", arg)
 	}
 	return fmt.Sprintf(traefikManifestTemplate, trustedIPs, trustedIPs) + hop.String()
