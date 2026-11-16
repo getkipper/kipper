@@ -1119,3 +1119,70 @@ func TestGetBuildStatus_CompletedAtIsWhenTheBuildCompleted(t *testing.T) {
 	require.NotNil(t, status.CompletedAt)
 	assert.True(t, status.CompletedAt.Equal(&completed))
 }
+
+// The migration plan asks this before anything moves, so a repository that
+// refuses the app's own token blocks the plan rather than the target's build.
+func TestCloneRefusalAsksWithTheTokenTheBuildWouldPresent(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{ //nolint:gosec // k8s Secret object name, not a credential value
+			URL:               "https://git.example.com/shop/checkout.git",
+			Branch:            "release",
+			CredentialsSecret: "checkout-git-credentials",
+		}},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout-git-credentials", Namespace: "shop-test"},
+		Data:       map[string][]byte{"token": []byte("a-revoked-token")},
+	}
+	var asked struct{ url, branch, token string }
+	original := ReachGit
+	ReachGit = func(_ context.Context, url, branch, _, token string) (gitreach.Result, string) {
+		asked.url, asked.branch, asked.token = url, branch, token
+		return gitreach.NeedsCredential, "the access token was refused by the repository"
+	}
+	t.Cleanup(func() { ReachGit = original })
+
+	refusal, err := CloneRefusal(context.Background(), fake.NewClientset(secret), claimingOwners(t), app)
+
+	require.NoError(t, err)
+	assert.Contains(t, refusal, "refused")
+	assert.Equal(t, "https://git.example.com/shop/checkout.git", asked.url)
+	assert.Equal(t, "a-revoked-token", asked.token)
+	assert.Equal(t, "release", asked.branch)
+}
+
+func TestCloneRefusalLeavesAnUnansweredCheckToTheBuild(t *testing.T) {
+	original := ReachGit
+	ReachGit = func(context.Context, string, string, string, string) (gitreach.Result, string) {
+		return gitreach.Unknown, "the repository could not be reached from the cluster"
+	}
+	t.Cleanup(func() { ReachGit = original })
+	app := testApp()
+	app.Spec.Git.CredentialsSecret = ""
+
+	refusal, err := CloneRefusal(context.Background(), buildFakeClient(), testOwners(t), app)
+
+	require.NoError(t, err)
+	assert.Empty(t, refusal)
+}
+
+func TestCloneRefusalAsksAnonymouslyWithoutACredential(t *testing.T) {
+	asked := "unset"
+	original := ReachGit
+	ReachGit = func(_ context.Context, _, branch, _, token string) (gitreach.Result, string) {
+		asked = token
+		assert.Equal(t, "main", branch, "an app without a branch builds main")
+		return gitreach.NeedsCredential, "this repository is private, so it needs an access token"
+	}
+	t.Cleanup(func() { ReachGit = original })
+	app := testApp()
+	app.Spec.Git.CredentialsSecret = ""
+	app.Spec.Git.Branch = ""
+
+	refusal, err := CloneRefusal(context.Background(), buildFakeClient(), testOwners(t), app)
+
+	require.NoError(t, err)
+	assert.Empty(t, asked)
+	assert.Contains(t, refusal, "access token")
+}

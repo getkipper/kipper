@@ -84,6 +84,8 @@ type planResponse struct {
 	twoCopies            []string
 	sharedGitCredentials []gitCredentialUse
 	sourceCredentials    []sharedcred.Entry
+	cloneChecks          []*kipperv1.App
+	unboundWarnings      map[string]bool
 }
 
 // notMigratedList is the static "what does NOT move" block, mirrored from
@@ -142,9 +144,10 @@ func receiptUser(claims *middleware.Claims) string {
 }
 
 // planDigest binds a receipt to target identity, migration items, demand,
-// warnings, conflicts, and notification/domain choices. Numeric runs in item
-// details are normalized. Blockers and available capacity are checked afresh
-// at start rather than included in the digest.
+// warnings, conflicts, and notification and domain choices. It excludes
+// timing-dependent warnings marked in resp.unboundWarnings and normalizes numeric
+// runs in item details. Blockers and available capacity are checked again at
+// start rather than included in the digest.
 func planDigest(resp *planResponse) string {
 	// Ignore numeric drift in display details, such as estimated database size,
 	// while binding the receipt to statuses, migration choices, and exact IDs.
@@ -159,7 +162,12 @@ func planDigest(resp *planResponse) string {
 		sort.Strings(out)
 		return out
 	}
-	warnings := append([]string(nil), resp.Warnings...)
+	warnings := make([]string, 0, len(resp.Warnings))
+	for _, w := range resp.Warnings {
+		if !resp.unboundWarnings[w] {
+			warnings = append(warnings, w)
+		}
+	}
 	sort.Strings(warnings)
 	conflicts := append([]string(nil), resp.Conflicts...)
 	sort.Strings(conflicts)
@@ -410,6 +418,12 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		}
 	}
 
+	if warning := h.writeFreezeWarning(ctx, projects, 0); warning != nil {
+		resp.Warnings = append(resp.Warnings, warning.Detail)
+	}
+	// Run clone checks last among operations using ctx because slow git hosts
+	// can exhaust its deadline and change later results included in the digest.
+	h.checkClones(ctx, resp)
 	if targetAnswered {
 		h.checkTargetGitCredentials(token, resp)
 	}
@@ -420,10 +434,6 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		resp.Blockers = append(resp.Blockers, fmt.Sprintf(
 			"%s would arrive stopped, but the target's Kipper cannot keep a stop and would start them. Upgrade the target cluster first.",
 			strings.Join(resp.arriveStopped, ", ")))
-	}
-
-	if warning := h.writeFreezeWarning(ctx, projects, 0); warning != nil {
-		resp.Warnings = append(resp.Warnings, warning.Detail)
 	}
 
 	return resp
@@ -541,10 +551,13 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 				item.Detail = "rebuilt from the branch head on the target"
 				gitApps = append(gitApps, ns+"/"+app.Name)
 				use, ok, err := sharedGitCredentialUse(app, project, resp.sourceCredentials)
-				if err != nil {
+				switch {
+				case err != nil:
 					resp.Blockers = append(resp.Blockers, err.Error())
-				} else if ok {
+				case ok:
 					resp.sharedGitCredentials = append(resp.sharedGitCredentials, use)
+				default:
+					resp.cloneChecks = append(resp.cloneChecks, app.DeepCopy())
 				}
 			}
 			h.planAppDomain(app, ns, env, token, keep, resp.MoveBaseDomain, &item)

@@ -227,6 +227,44 @@ const gitCredentialUsername = "kipper"
 // without any of them reaching the network.
 var ReachGit = gitreach.Check
 
+// CloneRefusal validates the app's git source and checks repository access with
+// the build's credential, using main when no branch is configured. It returns a
+// refusal reason for an invalid source, rejected access, or an unsafe redirect,
+// and an error if the credential cannot be resolved.
+//
+// An empty reason means there is no git source or no known reason to reject the
+// clone, including when the repository check is inconclusive. Refusal reasons
+// omit the git URL because its query string can contain a token.
+func CloneRefusal(ctx context.Context, client kubernetes.Interface, owners nsowner.Reader, app *kipperv1.App) (string, error) {
+	git := app.Spec.Git
+	if git == nil {
+		return "", nil
+	}
+	branch := git.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	if err := validateGitSource(git.URL, branch); err != nil {
+		return fmt.Sprintf("its git source is invalid: %v", err), nil
+	}
+	var token string
+	if git.CredentialsSecret != "" {
+		authority, _, err := giturl.Canonical(git.URL)
+		if err != nil {
+			return fmt.Sprintf("its git URL cannot carry a token: %v", err), nil
+		}
+		resolved, err := resolveGitToken(ctx, client, owners, app, authority)
+		if err != nil {
+			return "", err
+		}
+		token = string(resolved)
+	}
+	if result, detail := ReachGit(ctx, git.URL, branch, gitCredentialUsername, token); result == gitreach.NeedsCredential || result == gitreach.Unsafe {
+		return detail, nil
+	}
+	return "", nil
+}
+
 // CreateBuildJob creates a Kubernetes Job that clones the Git repo and builds
 // a container image using Kaniko, then pushes it to the internal Zot registry.
 func CreateBuildJob(ctx context.Context, client kubernetes.Interface, owners nsowner.Reader, app *kipperv1.App, commitSHA string) (*batchv1.Job, error) {
