@@ -198,9 +198,9 @@ async function handleStartMigration() {
     phase.value = 'migrating'
     connectWebSocket()
   } catch (e: unknown) {
-    // A 409 means the target's state moved since the plan (e.g. a project
-    // appeared there); anything else surfaces the server's reason. Both
-    // paths go through a fresh plan — the old receipt is spent.
+    // Show the server's reason, such as a change on the target since planning
+    // or another migration in progress. Reload the plan after every failure
+    // because the previous receipt may have been consumed.
     const axiosErr = e as { response?: { status?: number; data?: { error?: string } } }
     toast.error(axiosErr.response?.data?.error || 'Failed to start migration')
     totpCode.value = ''

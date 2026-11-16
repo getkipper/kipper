@@ -72,6 +72,10 @@ type Handler struct {
 	// a restart is the safe direction.
 	receiptsMu sync.Mutex
 	receipts   map[string]planReceipt
+
+	// startMu keeps the active-session check and session creation atomic.
+	// StartHandler uses TryLock to reject concurrent starts immediately.
+	startMu sync.Mutex
 }
 
 // emitSecurityEvent forwards to the notifier when one is wired.
@@ -883,11 +887,12 @@ func (h *Handler) workloadsWithNothingRunning(ctx context.Context, namespace str
 
 // StartHandler initiates a migration from this cluster to a target.
 //
-// The checks run cheapest-and-least-destructive first: kill switch, request
-// shape, token decode, plan receipt, capacity — none of which consume
-// anything the operator cannot retry — and the TOTP claim goes last,
-// immediately before the accept call that spends the target's single-use
-// token. A precheck failure must never burn a code.
+// Returns 409 while another outgoing migration is starting, running, or awaiting verification.
+// After decoding the request, checks run from cheapest to most expensive: kill
+// switch, required fields, active migration, token, plan receipt, and live plan
+// including capacity. These checks preserve the receipt, TOTP code, and target
+// token for retries. The receipt is consumed next, followed by the TOTP claim
+// immediately before the accept call that spends the target's single-use token.
 // POST /api/v1/migration/start
 func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -913,6 +918,22 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Token == "" || len(req.Projects) == 0 {
 		respondError(w, http.StatusBadRequest, "token and projects are required")
+		return
+	}
+
+	// Hold the lock through session creation so only one start proceeds.
+	// Reject concurrent starts immediately because the live plan check alone
+	// can take a minute, followed by target acceptance.
+	if !h.startMu.TryLock() {
+		respondError(w, http.StatusConflict,
+			"another migration is starting on this cluster. Wait for it to start or fail, then check the Migration page")
+		return
+	}
+	defer h.startMu.Unlock()
+	if active := h.Sessions.LatestOutgoing(); active != nil {
+		respondError(w, http.StatusConflict, fmt.Sprintf(
+			"a migration to %s is already in progress on this cluster. Finish or cancel it on the Migration page before starting another migration",
+			active.TargetCluster))
 		return
 	}
 
@@ -949,9 +970,9 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusPreconditionFailed, strings.Join(current.Blockers, "; "))
 		return
 	}
-	// The recomputed digest binds the per-app dispositions and the Mode B flag,
-	// so a start request that tampers with keep/move choices no longer matches
-	// the reviewed plan and is refused here.
+	// The digest binds each app's domain choices and the option to adopt the
+	// source cluster's base domain, so altered keep/move choices invalidate
+	// the reviewed plan and cause the start request to be refused.
 	if planDigest(current) != h.receiptDigest(req.PlanReceipt) {
 		respondError(w, http.StatusConflict, "the migration plan changed since you reviewed it. Review the plan again")
 		return

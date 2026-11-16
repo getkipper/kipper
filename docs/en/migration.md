@@ -185,6 +185,8 @@ The Start button lives on the plan. Enter the 6-digit code from your authenticat
 
 Canceling later takes effect immediately, aborting whatever transfer is mid-stream.
 
+A cluster runs one outgoing migration at a time. While one is running or waiting for its cutover, Kipper refuses to start another and names the cluster the first one is moving to. Finish or cancel that migration first.
+
 ### 6. Monitor progress
 
 The migration view shows:

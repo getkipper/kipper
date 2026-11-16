@@ -6,6 +6,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import Migration from '../Migration.vue'
 import * as migrationApi from '@/api/migration'
 import { useProjectsStore } from '@/stores/projects'
+import { useToast } from '@/composables/useToast'
 
 vi.mock('@/api/client', () => ({
   default: {
@@ -140,5 +141,36 @@ describe('the migration plan', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="plan-redirect-hosts"]').text()).toContain('example.org')
+  })
+
+  // Only one outgoing migration runs at a time, and the server's refusal names
+  // the one in the way, so the page shows that reason.
+  it('shows why the server refused to start a second migration', async () => {
+    vi.mocked(migrationApi.getPlan).mockResolvedValue({
+      target_cluster: 'target.example.com',
+      target_endpoint: 'https://api.target.example.com',
+      blockers: [],
+      warnings: [],
+      will_migrate: [],
+      will_skip: [],
+      not_migrated: [],
+      conflicts: [],
+      receipt: 'r',
+    } as never)
+    const refusal = 'a migration to earlier.example.org is already in progress on this cluster'
+    vi.mocked(migrationApi.startMigration).mockRejectedValue({ response: { status: 409, data: { error: refusal } } })
+    const wrapper = await mountMigration()
+
+    await wrapper.findAll('button').find(b => b.text().includes('Migrate to another cluster'))!.trigger('click')
+    await wrapper.find('textarea, input[type="text"]').setValue('x'.repeat(40))
+    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await wrapper.findAll('button').find(b => b.text().includes('Review migration plan'))!.trigger('click')
+    await flushPromises()
+    await wrapper.find('input[placeholder="6-digit code"]').setValue('123456')
+    await wrapper.findAll('button').find(b => b.text().includes('Start migration'))!.trigger('click')
+    await flushPromises()
+
+    expect(migrationApi.startMigration).toHaveBeenCalled()
+    expect(useToast().toasts.value.map(t => t.message)).toContain(refusal)
   })
 })
