@@ -173,4 +173,58 @@ describe('the migration plan', () => {
     expect(migrationApi.startMigration).toHaveBeenCalled()
     expect(useToast().toasts.value.map(t => t.message)).toContain(refusal)
   })
+
+  // After a failed run, Cancel is the only way back to the start screen,
+  // even though the server preserves the status of a finished migration.
+  it('returns to the start screen when cancel finds the migration already ended', async () => {
+    vi.mocked(migrationApi.getActiveMigration).mockResolvedValue(session('running') as never)
+    const ended = 'The migration has already ended with status failed.'
+    vi.mocked(migrationApi.cancelMigration).mockRejectedValue({ response: { status: 409, data: { error: ended } } })
+    const wrapper = await mountMigration()
+
+    await wrapper.findAll('button').find(b => b.text().includes('Cancel migration'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Migrate to another cluster')
+    expect(useToast().toasts.value.map(t => t.message)).toContain(ended)
+  })
+
+  it('returns to the start screen when cancel finds the migration gone', async () => {
+    vi.mocked(migrationApi.getActiveMigration).mockResolvedValue(session('running') as never)
+    vi.mocked(migrationApi.cancelMigration).mockRejectedValue({ response: { status: 404, data: { error: 'session not found' } } })
+    const wrapper = await mountMigration()
+
+    await wrapper.findAll('button').find(b => b.text().includes('Cancel migration'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Migrate to another cluster')
+  })
+
+  it('keeps following the migration when a cutover holds it', async () => {
+    // A cutover refusal leaves the migration active, so the page must keep
+    // showing its progress.
+    vi.mocked(migrationApi.getActiveMigration).mockResolvedValue(session('running') as never)
+    const busy = 'A cutover is moving the custom domains.'
+    vi.mocked(migrationApi.cancelMigration).mockRejectedValue({ response: { status: 409, data: { error: busy, cutover_running: true } } })
+    const wrapper = await mountMigration()
+
+    await wrapper.findAll('button').find(b => b.text().includes('Cancel migration'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Creating apps (shop-prod)')
+    expect(wrapper.text()).not.toContain('Migrate to another cluster')
+    expect(useToast().toasts.value.map(t => t.message)).toContain(busy)
+  })
+
+  it('keeps following the migration when the cancel request itself fails', async () => {
+    vi.mocked(migrationApi.getActiveMigration).mockResolvedValue(session('running') as never)
+    vi.mocked(migrationApi.cancelMigration).mockRejectedValue(new Error('network down'))
+    const wrapper = await mountMigration()
+
+    await wrapper.findAll('button').find(b => b.text().includes('Cancel migration'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Creating apps (shop-prod)')
+    expect(wrapper.text()).not.toContain('Migrate to another cluster')
+  })
 })

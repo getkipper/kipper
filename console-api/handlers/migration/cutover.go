@@ -28,10 +28,15 @@ func (h *Handler) CutoverHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if status := session.CurrentStatus(); status != SessionVerifying {
+	if status, claimed := session.BeginCutover(); !claimed {
+		if status == SessionVerifying {
+			respondError(w, http.StatusConflict, "A cutover for this migration is already running.")
+			return
+		}
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("session is %s, not verifying", status))
 		return
 	}
+	defer session.EndCutover()
 
 	var req struct {
 		Force    bool   `json:"force,omitempty"`

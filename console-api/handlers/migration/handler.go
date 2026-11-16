@@ -647,6 +647,22 @@ func (h *Handler) applyTransferredSecret(ctx context.Context, sessionID string, 
 	return nil, fmt.Errorf("creating secret: %w", err)
 }
 
+// claimTargetEnd claims the session for a commit or abort with final status end.
+// It returns false and responds with HTTP 409 if the claim fails. After a
+// successful claim, the caller must call EndEnding.
+func claimTargetEnd(w http.ResponseWriter, session *Session, end SessionStatus) bool {
+	if session.BeginEnding(end) {
+		return true
+	}
+	status := session.CurrentStatus()
+	if status == SessionRunning || status == end {
+		respondError(w, http.StatusConflict, "A commit or abort for this migration is already running on this cluster.")
+	} else {
+		respondError(w, http.StatusConflict, fmt.Sprintf("This migration has already ended on this cluster with status %s.", status))
+	}
+	return false
+}
+
 // AbortHandler removes the Secrets this session created here that no
 // controller has adopted. The source calls it when a run fails or is
 // canceled, so an abandoned migration does not strand plaintext credentials
@@ -661,6 +677,10 @@ func (h *Handler) AbortHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if !claimTargetEnd(w, session, SessionCancelled) {
+		return
+	}
+	defer session.EndEnding()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -687,9 +707,9 @@ func (h *Handler) AbortHandler(w http.ResponseWriter, r *http.Request) {
 	// running on the source's credentials after a migration that never landed.
 	restored, restoreFailures := h.restoreJournaledSecrets(ctx, sessionID)
 
-	// Reap any transfer receivers this session stood up, restarting the
-	// services they paused. Without this an abort would leave a target
-	// database/object store stopped until its 24h lease expires.
+	// Reap any transfer receivers this session stood up, so they do not wait
+	// for their 24h lease. A service a receiver paused may hold a partial
+	// copy, so it stays stopped with a note saying why.
 	h.reapSessionTransfers(ctx, sessionID)
 
 	session.Finish(SessionCancelled, "")
@@ -1178,7 +1198,11 @@ func (h *Handler) ProgressHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// CancelHandler cancels a running migration.
+// CancelHandler cancels a running or verifying migration and stops any attached
+// transfer. It returns HTTP 404 for an unknown session or HTTP 409 if the session
+// has already ended or a cutover is running. The latter response includes
+// cutover_running so callers can keep tracking the active migration. Canceling
+// during verification also requests target cleanup asynchronously.
 // POST /api/v1/migration/{session}/cancel
 func (h *Handler) CancelHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session")
@@ -1188,11 +1212,30 @@ func (h *Handler) CancelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session.Finish(SessionCancelled, "")
+	from, cancelled := session.MarkCancelled()
+	if !cancelled {
+		if from == SessionRunning || from == SessionVerifying {
+			respondJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":           "A cutover is moving the custom domains. Wait for it to finish, then check the Migration page.",
+				"cutover_running": true,
+			})
+			return
+		}
+		respondError(w, http.StatusConflict, fmt.Sprintf("The migration has already ended with status %s.", from))
+		return
+	}
 	h.Sessions.Save(session)
-	// Aborts the in-flight dump or upload immediately; the transfer loop
-	// otherwise only notices at the next project boundary.
+	// Cancel the in-flight dump or upload so cancellation takes effect
+	// before the next project boundary.
 	session.Cancel()
+	// After entering verification, the run loop exits without checking for
+	// cancellation again, so this handler requests cleanup of unadopted Secrets,
+	// restoration of overwritten Secrets, and removal of transfer receivers.
+	if from == SessionVerifying {
+		go h.abortTarget(session, func(msg string, args ...interface{}) {
+			fmt.Printf("[migration %s] %s\n", shortID(session.ID), fmt.Sprintf(msg, args...))
+		})
+	}
 
 	// Cancel stays instantly available as a safety valve, so the loud,
 	// attributed record here is what makes misuse visible after the fact.

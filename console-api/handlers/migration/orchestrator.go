@@ -75,7 +75,7 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 	defer func() {
 		if r := recover(); r != nil {
 			stopSaver()
-			session.Finish(SessionFailed, fmt.Sprintf("panic: %v", r))
+			session.Fail(fmt.Sprintf("panic: %v", r))
 			log("panic: %v", r)
 			h.Sessions.Save(session)
 		}
@@ -94,9 +94,14 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 	res, err := h.resolveDomains(ctx, session)
 	if err != nil {
 		stopSaver()
-		session.Finish(SessionFailed, fmt.Sprintf("classifying app domains: %v", err))
-		log("failed to classify app domains: %v", err)
+		if session.Fail(fmt.Sprintf("classifying app domains: %v", err)) {
+			log("failed to classify app domains: %v", err)
+			h.Sessions.Save(session)
+			return
+		}
+		log("canceled while classifying app domains: %v", err)
 		h.Sessions.Save(session)
+		h.abortTarget(session, log)
 		return
 	}
 
@@ -118,8 +123,11 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 				return
 			}
 			stopSaver()
-			session.Finish(SessionFailed, err.Error())
-			log("failed: %v", err)
+			if session.Fail(err.Error()) {
+				log("failed: %v", err)
+			} else {
+				log("canceled mid-transfer: %v", err)
+			}
 			h.Sessions.Save(session)
 			h.abortTarget(session, log)
 			return
@@ -127,8 +135,13 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 	}
 
 	stopSaver()
+	if !session.EnterVerification() {
+		log("canceled before verification")
+		h.Sessions.Save(session)
+		h.abortTarget(session, log)
+		return
+	}
 	log("all projects migrated, entering verification")
-	session.SetStatus(SessionVerifying)
 	session.AddStep(Step{
 		Name:   "Team accounts (Dex users)",
 		Phase:  "verification",

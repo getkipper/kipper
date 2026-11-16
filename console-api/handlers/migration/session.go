@@ -129,7 +129,9 @@ type Session struct {
 	// cancel aborts the running transfer's context. Set by runMigration so a
 	// cancel takes effect mid-stream rather than at the next project
 	// boundary.
-	cancel context.CancelFunc
+	cancel      context.CancelFunc
+	cuttingOver bool
+	ending      bool
 }
 
 // SetCancel registers the running transfer's cancel function.
@@ -171,11 +173,97 @@ func (s *Session) IsCancelled() bool {
 	return s.CurrentStatus() == SessionCancelled
 }
 
-// SetStatus transitions the session status.
-func (s *Session) SetStatus(status SessionStatus) {
+// EnterVerification atomically moves a running session to verifying and returns
+// true. For any other status, it leaves the session unchanged and returns false,
+// preserving cancellation that occurs before verification.
+func (s *Session) EnterVerification() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Status = status
+	if s.Status != SessionRunning {
+		return false
+	}
+	s.Status = SessionVerifying
+	return true
+}
+
+// BeginCutover atomically claims a verifying session for one cutover request,
+// blocking cancellation until EndCutover releases the claim. It returns the
+// status observed under the lock and whether the claim succeeded. A false result
+// with verifying status means another cutover holds the claim. The caller must
+// release a successful claim with EndCutover.
+func (s *Session) BeginCutover() (SessionStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Status != SessionVerifying || s.cuttingOver {
+		return s.Status, false
+	}
+	s.cuttingOver = true
+	return s.Status, true
+}
+
+// EndCutover releases the claim acquired by BeginCutover.
+func (s *Session) EndCutover() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cuttingOver = false
+}
+
+// BeginEnding atomically claims a target session for a commit or abort and
+// returns true if its status is running or already matches end. Matching end
+// allows retries of failed cleanup. It returns false for any other status or
+// while another commit or abort holds the claim. The caller sets the final
+// status and must release a successful claim with EndEnding.
+func (s *Session) BeginEnding(end SessionStatus) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ending || (s.Status != SessionRunning && s.Status != end) {
+		return false
+	}
+	s.ending = true
+	return true
+}
+
+// EndEnding releases the claim acquired by BeginEnding.
+func (s *Session) EndEnding() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ending = false
+}
+
+// MarkCancelled atomically marks a running or verifying session as canceled and
+// records the completion time. It returns the status observed under the lock
+// before the attempt and whether cancellation succeeded. An active cutover or
+// any other status leaves the session unchanged. A false result with running or
+// verifying status means a cutover holds the session. Call Cancel to stop an
+// attached transfer.
+func (s *Session) MarkCancelled() (SessionStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cuttingOver || (s.Status != SessionRunning && s.Status != SessionVerifying) {
+		return s.Status, false
+	}
+	from := s.Status
+	s.Status = SessionCancelled
+	now := time.Now()
+	s.CompletedAt = &now
+	return from, true
+}
+
+// Fail atomically marks a running or verifying session as failed, records
+// errMsg and the completion time, and returns true. Other statuses leave the
+// session unchanged and return false, preserving cancellation even if the
+// transfer reports an error afterward.
+func (s *Session) Fail(errMsg string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Status != SessionRunning && s.Status != SessionVerifying {
+		return false
+	}
+	s.Status = SessionFailed
+	s.Error = errMsg
+	now := time.Now()
+	s.CompletedAt = &now
+	return true
 }
 
 // Finish moves the session into a terminal status, recording the error and
@@ -231,6 +319,24 @@ func (s *Session) RecordJournaledSecret(namespace, name string) {
 		}
 	}
 	s.JournaledSecrets[namespace] = append(s.JournaledSecrets[namespace], name)
+}
+
+// ForgetJournaledSecret removes an entry from the in-memory journal so abort
+// retries process only unfinished restores. Call it after restoring the original
+// and confirming deletion of its rollback copy. Persist the session separately.
+func (s *Session) ForgetJournaledSecret(namespace, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := s.JournaledSecrets[namespace]
+	for i, existing := range names {
+		if existing == name {
+			s.JournaledSecrets[namespace] = append(names[:i:i], names[i+1:]...)
+			break
+		}
+	}
+	if len(s.JournaledSecrets[namespace]) == 0 {
+		delete(s.JournaledSecrets, namespace)
+	}
 }
 
 // JournaledSecretsSnapshot returns a copy for iteration outside the lock.

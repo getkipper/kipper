@@ -294,7 +294,9 @@ func (h *Handler) restoreJournaledSecrets(ctx context.Context, sessionID string)
 			// place, still holding plaintext.
 			if err := h.deleteConfirmed(ctx, ns, backup.Name); err != nil {
 				failures = append(failures, fmt.Sprintf("%s/%s: original restored, but its rollback copy is still present: %v", ns, name, err))
+				continue
 			}
+			session.ForgetJournaledSecret(ns, name)
 		}
 	}
 	return restored, failures
@@ -401,6 +403,10 @@ func (h *Handler) CommitHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if !claimTargetEnd(w, session, SessionCompleted) {
+		return
+	}
+	defer session.EndEnding()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -422,8 +428,9 @@ func (h *Handler) CommitHandler(w http.ResponseWriter, r *http.Request) {
 
 // dropJournaledSecrets removes this session's backups once the migration has
 // committed and the overwrite is the intended state. Anything it could not
-// remove is returned so the caller can name it: a committed session is never
-// aborted, so nothing else comes back for these.
+// remove is returned so the caller can identify the remaining backups and retry
+// cleanup. A committed session can only repeat commit, so abort cannot restore
+// Secrets from these backups.
 func (h *Handler) dropJournaledSecrets(ctx context.Context, sessionID string) []string {
 	session, ok := h.Sessions.Get(sessionID)
 	if !ok {

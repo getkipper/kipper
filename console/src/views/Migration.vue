@@ -310,7 +310,26 @@ async function checkDNS() {
 
 async function handleCancel() {
   if (sessionId.value) {
-    await migrationApi.cancelMigration(sessionId.value)
+    try {
+      await migrationApi.cancelMigration(sessionId.value)
+    } catch (e: unknown) {
+      // A 409 indicates an ended migration or an active cutover. A 404 means
+      // this cluster has no record of the migration. Returning to the start
+      // screen is safe for ended or unknown migrations. Keep tracking progress
+      // during cutover or when other errors leave the status uncertain.
+      const axiosErr = e as { response?: { status?: number; data?: { error?: string; cutover_running?: boolean } } }
+      const status = axiosErr.response?.status
+      if (status === 409 && axiosErr.response?.data?.cutover_running) {
+        toast.info(axiosErr.response.data.error || 'A cutover is moving the custom domains.')
+        return
+      }
+      if (status === 409 || status === 404) {
+        toast.info(axiosErr.response?.data?.error || 'The migration has already ended.')
+      } else {
+        toast.error(axiosErr.response?.data?.error || 'Failed to cancel the migration')
+        return
+      }
+    }
   }
   phase.value = 'idle'
   steps.value = []
