@@ -114,7 +114,7 @@ When you no longer need access to a cluster:
 kip cluster remove client-project
 ```
 
-This removes the local cluster entry and kubeconfig. The server and other users' access remain in place.
+This removes the local cluster entry and kubeconfig. The server and other users' access remain in place. If you removed your current cluster, select another with `kip cluster use <name>` before running commands that use the current cluster.
 
 ## Connecting to databases
 

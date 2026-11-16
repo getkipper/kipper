@@ -72,7 +72,7 @@ func TestRemoveLocalClusterEntry_DropsClusterAndDeletesKubeconfig(t *testing.T) 
 	}
 	assert.Len(t, got.Clusters, 1)
 	assert.Equal(t, "other", got.Clusters[0].Name)
-	assert.Equal(t, "other", got.CurrentCluster, "current should fall back to remaining cluster")
+	assert.Empty(t, got.CurrentCluster, "no other cluster may become current without being chosen")
 	_, statErr := os.Stat(kubeconfig)
 	assert.True(t, os.IsNotExist(statErr), "kubeconfig file should have been deleted")
 	assert.NoFileExists(t, deviceKey, "the device key goes with the cluster")
@@ -126,7 +126,7 @@ func TestRemoveLocalClusterEntry_UnknownClusterIsNoOp(t *testing.T) {
 	assert.Equal(t, "stay", got.CurrentCluster)
 }
 
-func TestRemoveLocalClusterEntry_CurrentReassignedWhenRemovingCurrent(t *testing.T) {
+func TestRemoveLocalClusterEntry_LeavesNoClusterCurrentWhenRemovingCurrent(t *testing.T) {
 	withFakeHome(t)
 	cfg := &config.Config{
 		CurrentCluster: "first",
@@ -147,7 +147,7 @@ func TestRemoveLocalClusterEntry_CurrentReassignedWhenRemovingCurrent(t *testing
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	assert.Equal(t, "second", got.CurrentCluster)
+	assert.Empty(t, got.CurrentCluster)
 }
 
 // scratchKubeconfig returns a throwaway kubeconfig path. removeLocalClusterEntry

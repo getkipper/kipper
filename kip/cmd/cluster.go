@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,15 @@ func loadCurrentCluster() (*config.Cluster, *k8s.Client, error) {
 	return cluster, client, nil
 }
 
+// noClusterSelected returns instructions to select an existing cluster or
+// install one when none is configured.
+func noClusterSelected(cfg *config.Config) error {
+	if len(cfg.Clusters) > 0 {
+		return fmt.Errorf("no current cluster selected. Select one with 'kip cluster use <name>'. Run 'kip cluster list' to see available clusters")
+	}
+	return fmt.Errorf("no cluster configured. Run 'kip install' first")
+}
+
 // loadCurrentClusterConfig returns the cluster config without building a
 // k8s client. Used by host-level commands (e.g. `cluster harden`) that
 // reach the server over SSH and do not need kubeconfig.
@@ -40,7 +50,7 @@ func loadCurrentClusterConfig() (*config.Cluster, error) {
 
 	clusterName := resolveClusterName(cfg)
 	if clusterName == "" {
-		return nil, fmt.Errorf("no cluster configured. Run 'kip install' first")
+		return nil, noClusterSelected(cfg)
 	}
 
 	cluster := findCluster(cfg, clusterName)
@@ -70,6 +80,16 @@ func resolveClusterName(cfg *config.Config) string {
 
 	// 3. config default
 	return cfg.CurrentCluster
+}
+
+// sayHowToPickACluster prints selection instructions only when the config loads
+// successfully and contains clusters but has no current cluster.
+func sayHowToPickACluster(out io.Writer) {
+	cfg, err := config.Load()
+	if err != nil || cfg.CurrentCluster != "" || len(cfg.Clusters) == 0 {
+		return
+	}
+	say(out, "  No current cluster selected. Select one with: kip cluster use <name>\n\n")
 }
 
 // resolveSSHKey selects an explicit key from flag, KIP_SSH_KEY, then cluster

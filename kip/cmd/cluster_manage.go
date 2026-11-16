@@ -322,6 +322,9 @@ func runClusterExport(cmd *cobra.Command, _ []string) error {
 	if clusterName == "" {
 		clusterName = cfg.CurrentCluster
 	}
+	if clusterName == "" {
+		return noClusterSelected(cfg)
+	}
 
 	cluster := cfg.GetCluster(clusterName)
 	if cluster == nil {
@@ -837,11 +840,7 @@ func runClusterRemove(_ *cobra.Command, args []string) error {
 
 		cfg.Clusters = remaining
 		if cfg.CurrentCluster == name {
-			if len(cfg.Clusters) > 0 {
-				cfg.CurrentCluster = cfg.Clusters[0].Name
-			} else {
-				cfg.CurrentCluster = ""
-			}
+			cfg.CurrentCluster = ""
 		}
 		return nil
 	}); err != nil {
@@ -849,6 +848,7 @@ func runClusterRemove(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  ✔  Cluster %s removed\n\n", name)
+	sayHowToPickACluster(os.Stdout)
 	return nil
 }
 
