@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { BuildStatus } from '@/api/apps'
-import { gitCardState, imageCardState } from '../deployMethods'
+import { buildMessageTone, gitCardState, imageCardState } from '../deployMethods'
 
 const build = (over: Partial<BuildStatus> = {}): BuildStatus => ({
   git_configured: false,
@@ -46,6 +46,17 @@ describe('gitCardState', () => {
 
   it('is error when the latest build failed', () => {
     expect(gitCardState(build({ git_configured: true, phase: 'Failed' }))).toBe('error')
+  })
+})
+
+describe('buildMessageTone', () => {
+  it('shows a queued build as waiting, not as an error', () => {
+    expect(buildMessageTone('Pending')).toBe('info')
+  })
+
+  it('warns about a discarded build and flags a failed one', () => {
+    expect(buildMessageTone('Discarded')).toBe('warning')
+    expect(buildMessageTone('Failed')).toBe('danger')
   })
 })
 

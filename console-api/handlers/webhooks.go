@@ -504,7 +504,14 @@ func (wh *Webhooks) CancelBuild(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
-// BuildLogs streams the build logs for the latest build pod.
+// buildLogPollInterval is how often the log stream checks whether a build has
+// started and whether its next stage is ready to read.
+var buildLogPollInterval = 2 * time.Second
+
+// BuildLogs streams the logs of the app's newest build, stage by stage. It
+// follows that build's own pod, saying so while the build waits for a slot or
+// for its pod to start. Only an app with no build Job falls back to the newest
+// build pod.
 // GET /api/v1/projects/{name}/apps/{app}/build/logs
 func (wh *Webhooks) BuildLogs(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")
@@ -512,9 +519,20 @@ func (wh *Webhooks) BuildLogs(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	pod, err := builder.GetBuildPod(ctx, wh.Client, project, appName)
+	job, err := builder.LatestBuildJob(ctx, wh.Client, project, appName)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "no build found")
+		respondError(w, http.StatusInternalServerError, "failed to read the app's builds")
+		return
+	}
+	var pod *corev1.Pod
+	if job == nil {
+		pod, err = builder.GetBuildPod(ctx, wh.Client, project, appName)
+		if err != nil {
+			respondError(w, http.StatusNotFound, "no build found")
+			return
+		}
+	} else if pod, err = builder.BuildPodOf(ctx, wh.Client, job); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to read the app's builds")
 		return
 	}
 
@@ -523,10 +541,40 @@ func (wh *Webhooks) BuildLogs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	flusher, ok := w.(http.Flusher)
+	writeLine := func(line string) {
+		_, _ = fmt.Fprintln(w, line)
+		if ok {
+			flusher.Flush()
+		}
+	}
 
-	// Only follow active pods. Completed pods have all their logs
-	// available immediately — following them hangs the connection.
-	podRunning := pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending
+	if pod == nil {
+		queued := builder.BuildQueued(job)
+		switch {
+		case builder.BuildFinished(job):
+			writeLine("This build has no log to show. Its pod was removed after the build ended, or the build ended before its pod started.")
+			return
+		case queued:
+			writeLine(builder.QueuedBuildMessage())
+		default:
+			writeLine("Starting the build.")
+		}
+		pod, err = builder.WaitForBuildPod(ctx, wh.Client, job, buildLogPollInterval)
+		if err != nil {
+			if ctx.Err() == nil {
+				writeLine("--- could not read the build ---")
+			}
+			return
+		}
+		if pod == nil {
+			if queued {
+				writeLine("This build left the queue without starting. It may have been canceled or replaced by a newer build.")
+			} else {
+				writeLine("This build ended before its pod started. It may have been canceled or replaced by a newer build.")
+			}
+			return
+		}
+	}
 
 	// Stream logs from all containers (init + main). Build a fresh slice
 	// so we don't mutate pod.Spec.InitContainers' underlying array.
@@ -536,23 +584,43 @@ func (wh *Webhooks) BuildLogs(w http.ResponseWriter, r *http.Request) {
 	tailLines := int64(1000)
 
 	for _, c := range allContainers {
+		// A stage's log cannot be read before the stage starts.
+		pod, err = builder.WaitForBuildStage(ctx, wh.Client, pod, c.Name, buildLogPollInterval)
+		if err != nil {
+			switch {
+			case ctx.Err() != nil:
+			case errors.IsNotFound(err):
+				writeLine("--- the build's pod was removed before the build finished ---")
+			default:
+				writeLine("--- could not read the build ---")
+			}
+			return
+		}
+		// Build pods never restart, so a stage that has not started in a
+		// finished pod never will.
+		if !builder.BuildStageStarted(pod, c.Name) {
+			return
+		}
+
 		// The build pod lives in the isolated build namespace, not the tenant's
-		// project namespace, so logs must be read from where GetBuildPod found it.
+		// project namespace, so logs must be read from the pod's own namespace.
+		// Following a finished pod's log would hang the connection.
 		logReq := wh.Client.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
 			Container: c.Name,
-			Follow:    podRunning,
+			Follow:    !builder.BuildPodFinished(pod),
 			TailLines: &tailLines,
 		})
 
 		stream, streamErr := logReq.Stream(ctx)
 		if streamErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			writeLine(fmt.Sprintf("--- %s ---\ncould not read this stage's log", c.Name))
 			continue
 		}
 
-		_, _ = fmt.Fprintf(w, "--- %s ---\n", c.Name)
-		if ok {
-			flusher.Flush()
-		}
+		writeLine(fmt.Sprintf("--- %s ---", c.Name))
 
 		buf := make([]byte, 4096)
 		for {

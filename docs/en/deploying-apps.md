@@ -181,7 +181,7 @@ git:
 
 To raise the default for every build on a cluster instead of per app, set `BUILD_MEMORY_LIMIT` (and optionally `BUILD_CPU_LIMIT`) on the console-api. A per-app setting always wins over the cluster default.
 
-By default, a cluster runs one build at a time. Further builds wait in a queue with a `Pending` status and start in request order as slots become available. That keeps several pushes, or a migration that rebuilds every git app at once, from running a small node out of memory. On a cluster with room for more, set `BUILD_MAX_CONCURRENT` on the console-api to the number of builds it may run side by side:
+By default, a cluster runs one build at a time. Further builds wait in a queue with a `Pending` status and start in request order as slots become available. That keeps several pushes, or a migration that rebuilds every git app at once, from running a small node out of memory. A waiting build has no log yet, so the console and `kip app build-logs` say it is waiting for a build slot and show its log once it starts. `kip app build-logs` stops following a build that has not started after 30 minutes, and the build keeps its place in the queue. On a cluster with room for more, set `BUILD_MAX_CONCURRENT` on the console-api to the number of builds it may run side by side:
 
 ```bash
 kip cluster env console-api BUILD_MAX_CONCURRENT=2

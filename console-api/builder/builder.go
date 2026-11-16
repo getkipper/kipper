@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +53,28 @@ func buildTimeout() time.Duration {
 		return d
 	}
 	return defaultBuildTimeout
+}
+
+// defaultMaxConcurrentBuilds limits builds to one at a time unless overridden.
+// Each build can use its full memory limit, 2 GiB by default, so serial builds
+// leave more memory for apps on small nodes.
+const defaultMaxConcurrentBuilds = 1
+
+// MaxConcurrentBuilds reads BUILD_MAX_CONCURRENT on each call and returns 1
+// when the value is unset, invalid, or less than 1.
+func MaxConcurrentBuilds() int {
+	if n, err := strconv.Atoi(os.Getenv("BUILD_MAX_CONCURRENT")); err == nil && n > 0 {
+		return n
+	}
+	return defaultMaxConcurrentBuilds
+}
+
+// QueuedBuildMessage describes the wait for a slot using the current build limit.
+func QueuedBuildMessage() string {
+	if n := MaxConcurrentBuilds(); n > 1 {
+		return fmt.Sprintf("Waiting for a build slot. This cluster runs up to %d builds at a time.", n)
+	}
+	return "Waiting for a build slot. Builds run one at a time on this cluster."
 }
 
 // buildLimits resolves the kaniko build container's CPU and memory limits.
@@ -998,15 +1021,110 @@ func GetBuildPod(ctx context.Context, client kubernetes.Interface, namespace, ap
 		return nil, fmt.Errorf("no build pod found for %s", appName)
 	}
 
-	// Return the most recent pod
-	latest := &pods.Items[0]
-	for i := range pods.Items {
-		if pods.Items[i].CreationTimestamp.After(latest.CreationTimestamp.Time) {
-			latest = &pods.Items[i]
+	return newestPod(pods.Items), nil
+}
+
+// WaitForBuildPod checks immediately, then polls every interval for pods in
+// job.Namespace labeled with job.Name, returning the newest by creation time.
+// It returns nil without an error if no pod is found and the Job has finished
+// or been deleted, as can happen after cancellation or replacement.
+// Lookup errors and context cancellation end the wait with an error.
+func WaitForBuildPod(ctx context.Context, client kubernetes.Interface, job *batchv1.Job, interval time.Duration) (*corev1.Pod, error) {
+	for {
+		pod, err := BuildPodOf(ctx, client, job)
+		if err != nil || pod != nil {
+			return pod, err
+		}
+		current, err := client.BatchV1().Jobs(job.Namespace).Get(ctx, job.Name, metav1.GetOptions{})
+		if k8serrors.IsNotFound(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading build job %s: %w", job.Name, err)
+		}
+		if BuildFinished(current) {
+			return nil, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
 		}
 	}
+}
 
-	return latest, nil
+// BuildPodOf returns the newest pod of a build Job, or nil while it has none.
+func BuildPodOf(ctx context.Context, client kubernetes.Interface, job *batchv1.Job) (*corev1.Pod, error) {
+	pods, err := client.CoreV1().Pods(job.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: batchv1.JobNameLabel + "=" + job.Name,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing build pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return nil, nil
+	}
+	return newestPod(pods.Items), nil
+}
+
+// WaitForBuildStage polls the build pod every interval until the named
+// container is running or has terminated, or the pod has finished, and returns
+// the pod as last read. Lookup errors, including a removed pod, and context
+// cancellation end the wait with an error.
+func WaitForBuildStage(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, container string, interval time.Duration) (*corev1.Pod, error) {
+	for !BuildStageStarted(pod, container) && !BuildPodFinished(pod) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+		}
+		current, err := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("reading build pod %s: %w", pod.Name, err)
+		}
+		pod = current
+	}
+	return pod, nil
+}
+
+// BuildStageStarted reports whether the named container of a build pod is
+// running or has terminated, so its log can be read.
+func BuildStageStarted(pod *corev1.Pod, container string) bool {
+	statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, s := range statuses {
+		if s.Name == container {
+			return s.State.Running != nil || s.State.Terminated != nil
+		}
+	}
+	return false
+}
+
+// BuildPodFinished reports whether a build pod has succeeded or failed.
+func BuildPodFinished(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
+}
+
+func newestPod(pods []corev1.Pod) *corev1.Pod {
+	latest := &pods[0]
+	for i := range pods {
+		if pods[i].CreationTimestamp.After(latest.CreationTimestamp.Time) {
+			latest = &pods[i]
+		}
+	}
+	return latest
+}
+
+// BuildQueued reports whether a build Job is still waiting in the build queue.
+// Builds are created suspended and the build controller resumes them.
+func BuildQueued(job *batchv1.Job) bool {
+	return job.Spec.Suspend != nil && *job.Spec.Suspend && !BuildFinished(job)
+}
+
+// BuildFinished reports whether a build Job has completed or failed,
+// including through a condition alone.
+func BuildFinished(job *batchv1.Job) bool {
+	return job.Status.Succeeded > 0 || job.Status.Failed > 0 ||
+		jobCondition(job, batchv1.JobComplete) != nil || failedCondition(job) != nil
 }
 
 // CancelBuild deletes every unfinished build Job for an app, running or still
@@ -1069,10 +1187,10 @@ func CancelBuilds(ctx context.Context, client kubernetes.Interface, namespace, a
 	return nil
 }
 
-// GetBuildStatus returns the status of the app's newest build Job, or nil if
-// no build exists. Equal creation times select the lexicographically greatest
-// Job name. Job listing errors are returned.
-func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace, appName string) (*kipperv1.AppBuildStatus, error) {
+// LatestBuildJob returns the app's newest build Job, or nil if no build
+// exists. Equal creation times select the lexicographically greatest Job name.
+// Job listing errors are returned.
+func LatestBuildJob(ctx context.Context, client kubernetes.Interface, namespace, appName string) (*batchv1.Job, error) {
 	jobs, err := client.BatchV1().Jobs(buildsNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: buildSelector(namespace, appName),
 	})
@@ -1094,6 +1212,17 @@ func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace,
 		case jobs.Items[i].CreationTimestamp.Equal(&latest.CreationTimestamp) && jobs.Items[i].Name > latest.Name:
 			latest = &jobs.Items[i]
 		}
+	}
+	return latest, nil
+}
+
+// GetBuildStatus returns the status of the app's newest build Job, as
+// LatestBuildJob selects it, or nil if no build exists. A build waiting in the
+// queue reports Pending with QueuedBuildMessage. Job listing errors are returned.
+func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace, appName string) (*kipperv1.AppBuildStatus, error) {
+	latest, err := LatestBuildJob(ctx, client, namespace, appName)
+	if err != nil || latest == nil {
+		return nil, err
 	}
 
 	status := &kipperv1.AppBuildStatus{
@@ -1128,6 +1257,9 @@ func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace,
 		}
 	case latest.Status.Active > 0:
 		status.Phase = "Building"
+	case BuildQueued(latest):
+		status.Phase = "Pending"
+		status.Message = QueuedBuildMessage()
 	default:
 		status.Phase = "Pending"
 	}

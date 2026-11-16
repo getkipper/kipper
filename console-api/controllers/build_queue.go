@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
-	"strconv"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -18,21 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/builder"
 )
-
-// defaultMaxConcurrentBuilds is how many builds run at once when the cluster
-// sets no BUILD_MAX_CONCURRENT. A build may use its whole memory limit, 2 GiB
-// by default, so a small node fits one next to its apps.
-const defaultMaxConcurrentBuilds = 1
-
-// maxConcurrentBuilds reads BUILD_MAX_CONCURRENT, falling back to the default
-// for an unset or unusable value.
-func maxConcurrentBuilds() int {
-	if n, err := strconv.Atoi(os.Getenv("BUILD_MAX_CONCURRENT")); err == nil && n > 0 {
-		return n
-	}
-	return defaultMaxConcurrentBuilds
-}
 
 // queueRecheckInterval controls polling while a deleting Job or a leftover pod
 // holds a slot. Pod completion alone produces no build event.
@@ -153,7 +138,7 @@ func (r *BuildReconciler) releaseQueuedBuilds(ctx context.Context, namespace str
 			}
 			continue
 		}
-		if running >= maxConcurrentBuilds() {
+		if running >= builder.MaxConcurrentBuilds() {
 			full = true
 			continue
 		}

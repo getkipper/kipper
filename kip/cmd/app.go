@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -877,12 +878,7 @@ func runAppRebuild(cmd *cobra.Command, args []string) error {
 // two projects may each hold an app of the same name and their builds share one
 // namespace.
 func latestBuildPod(ctx context.Context, clientset kubernetes.Interface, appName, appNamespace string) (*corev1.Pod, error) {
-	selector := fmt.Sprintf("%s=%s,%s=%s,%s=%s",
-		labels.AppRef, appName,
-		labels.Build, labels.BuildTrue,
-		labels.SourceNamespace, appNamespace)
-
-	pods, err := clientset.CoreV1().Pods(labels.BuildsNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	pods, err := clientset.CoreV1().Pods(labels.BuildsNamespace).List(ctx, metav1.ListOptions{LabelSelector: buildSelector(appName, appNamespace)})
 	if err != nil {
 		// Distinct from an empty list. Reporting a refused or failed request as
 		// "no build found" sends the reader hunting for a build that may be
@@ -895,13 +891,144 @@ func latestBuildPod(ctx context.Context, clientset kubernetes.Interface, appName
 			appName, appNamespace, appName)
 	}
 
-	latest := pods.Items[0]
-	for _, p := range pods.Items[1:] {
-		if p.CreationTimestamp.After(latest.CreationTimestamp.Time) {
-			latest = p
+	return newestPod(pods.Items), nil
+}
+
+// buildStartWait bounds how long kip app build-logs waits for a build that has
+// no pod yet, so a build stuck in the queue cannot hold the command forever.
+const buildStartWait = 30 * time.Minute
+
+// buildPodToFollow returns the pod of the app's newest build Job. While that
+// Job has no pod, it writes a notice to out saying whether the build waits for
+// a slot or is starting, then polls at interval for up to startWait. A Job
+// that finishes or is deleted without a pod, a wait that runs out, lookup
+// failures and context cancellation return an error. Only an app with no build
+// Job falls back to latestBuildPod.
+func buildPodToFollow(ctx context.Context, clientset kubernetes.Interface, appName, appNamespace string, out io.Writer, interval, startWait time.Duration) (*corev1.Pod, error) {
+	jobs, err := clientset.BatchV1().Jobs(labels.BuildsNamespace).List(ctx, metav1.ListOptions{LabelSelector: buildSelector(appName, appNamespace)})
+	if err != nil {
+		return nil, fmt.Errorf("listing builds for %q in %s: %w", appName, labels.BuildsNamespace, err)
+	}
+	job := newestBuildJob(jobs.Items)
+	if job == nil {
+		return latestBuildPod(ctx, clientset, appName, appNamespace)
+	}
+
+	pod, err := buildPodOf(ctx, clientset, job)
+	if err != nil || pod != nil {
+		return pod, err
+	}
+	queued := buildQueued(job)
+	switch {
+	case buildJobFinished(job):
+		return nil, fmt.Errorf("the build of %s has no log to show. Its pod was removed after the build ended, or the build ended before its pod started. "+
+			"Run 'kip app rebuild %s' to start a new build", appName, appName)
+	case queued:
+		_, _ = fmt.Fprintf(out, "  Waiting for a build slot. The build of %s starts once the builds ahead of it finish.\n", appName)
+	default:
+		_, _ = fmt.Fprintf(out, "  Starting the build of %s.\n", appName)
+	}
+
+	// The bound covers the requests too, so a stalled API call cannot outlast it.
+	waitCtx, cancel := context.WithTimeout(ctx, startWait)
+	defer cancel()
+	stopped := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("the build of %s did not start within %s, so kip stopped following it. The build keeps its place in the queue. "+
+			"Run 'kip app build-logs %s' to follow it again", appName, startWait, appName)
+	}
+	for {
+		select {
+		case <-waitCtx.Done():
+			return nil, stopped()
+		case <-time.After(interval):
+		}
+		pod, err := buildPodOf(waitCtx, clientset, job)
+		if waitCtx.Err() != nil {
+			return nil, stopped()
+		}
+		if err != nil || pod != nil {
+			return pod, err
+		}
+		current, err := clientset.BatchV1().Jobs(labels.BuildsNamespace).Get(waitCtx, job.Name, metav1.GetOptions{})
+		if waitCtx.Err() != nil {
+			return nil, stopped()
+		}
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("reading build %s: %w", job.Name, err)
+		}
+		if err != nil || buildJobFinished(current) {
+			if queued {
+				return nil, fmt.Errorf("the build of %s left the queue without starting. It may have been canceled or replaced by a newer build. "+
+					"Run 'kip app build-logs %s' to follow the newest build", appName, appName)
+			}
+			return nil, fmt.Errorf("the build of %s ended before its pod started. It may have been canceled or replaced by a newer build. "+
+				"Run 'kip app build-logs %s' to follow the newest build", appName, appName)
 		}
 	}
-	return &latest, nil
+}
+
+// buildPodOf returns the newest pod of a build Job, or nil while it has none.
+func buildPodOf(ctx context.Context, clientset kubernetes.Interface, job *batchv1.Job) (*corev1.Pod, error) {
+	pods, err := clientset.CoreV1().Pods(labels.BuildsNamespace).List(ctx, metav1.ListOptions{LabelSelector: batchv1.JobNameLabel + "=" + job.Name})
+	if err != nil {
+		return nil, fmt.Errorf("listing the pods of build %s: %w", job.Name, err)
+	}
+	if len(pods.Items) == 0 {
+		return nil, nil
+	}
+	return newestPod(pods.Items), nil
+}
+
+func buildSelector(appName, appNamespace string) string {
+	return fmt.Sprintf("%s=%s,%s=%s,%s=%s",
+		labels.AppRef, appName,
+		labels.Build, labels.BuildTrue,
+		labels.SourceNamespace, appNamespace)
+}
+
+// newestBuildJob returns the newest Job, or nil for an empty list.
+// Creation-time ties select the lexicographically greatest name, matching console-api.
+func newestBuildJob(jobs []batchv1.Job) *batchv1.Job {
+	var newest *batchv1.Job
+	for i := range jobs {
+		j := &jobs[i]
+		if newest == nil || j.CreationTimestamp.After(newest.CreationTimestamp.Time) ||
+			(j.CreationTimestamp.Equal(&newest.CreationTimestamp) && j.Name > newest.Name) {
+			newest = j
+		}
+	}
+	return newest
+}
+
+func newestPod(pods []corev1.Pod) *corev1.Pod {
+	newest := &pods[0]
+	for i := range pods {
+		if pods[i].CreationTimestamp.After(newest.CreationTimestamp.Time) {
+			newest = &pods[i]
+		}
+	}
+	return newest
+}
+
+// buildQueued reports whether a build Job still waits for console-api to
+// resume it, which it does when a build slot frees up.
+func buildQueued(job *batchv1.Job) bool {
+	return job.Spec.Suspend != nil && *job.Spec.Suspend && !buildJobFinished(job)
+}
+
+func buildJobFinished(job *batchv1.Job) bool {
+	if job.Status.Succeeded > 0 || job.Status.Failed > 0 {
+		return true
+	}
+	for _, c := range job.Status.Conditions {
+		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 func runAppBuildLogs(cmd *cobra.Command, args []string) error {
@@ -915,7 +1042,7 @@ func runAppBuildLogs(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	clientset := k8sClient.Clientset()
 
-	latest, err := latestBuildPod(ctx, clientset, appName, appNamespace)
+	latest, err := buildPodToFollow(ctx, clientset, appName, appNamespace, os.Stdout, 2*time.Second, buildStartWait)
 	if err != nil {
 		return err
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1185,4 +1186,115 @@ func TestCloneRefusalAsksAnonymouslyWithoutACredential(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, asked)
 	assert.Contains(t, refusal, "access token")
+}
+
+func TestGetBuildStatus_QueuedBuildSaysItWaitsForASlot(t *testing.T) {
+	labels := map[string]string{appLabel: "my-app", buildLabel: "true", sourceNamespaceLabel: "project-test"}
+	job := func(suspended bool) *batchv1.Job {
+		return &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-app-build-3", Namespace: buildsNamespace, Labels: labels},
+			Spec:       batchv1.JobSpec{Suspend: &suspended},
+		}
+	}
+	cases := []struct {
+		name      string
+		limit     string
+		suspended bool
+		want      string
+	}{
+		{"queued, default limit", "", true, "Waiting for a build slot. Builds run one at a time on this cluster."},
+		{"queued, raised limit", "3", true, "Waiting for a build slot. This cluster runs up to 3 builds at a time."},
+		{"released, pod not created yet", "", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BUILD_MAX_CONCURRENT", tc.limit)
+			status, err := GetBuildStatus(context.Background(), fake.NewClientset(job(tc.suspended)), "project-test", "my-app")
+			require.NoError(t, err)
+			require.NotNil(t, status)
+			assert.Equal(t, "Pending", status.Phase, "the phase other readers gate on stays Pending")
+			assert.Equal(t, tc.want, status.Message)
+		})
+	}
+}
+
+func TestMaxConcurrentBuilds(t *testing.T) {
+	for value, want := range map[string]int{"": 1, "2": 2, "0": 1, "-1": 1, "many": 1} {
+		t.Setenv("BUILD_MAX_CONCURRENT", value)
+		assert.Equal(t, want, MaxConcurrentBuilds(), "BUILD_MAX_CONCURRENT=%q", value)
+	}
+}
+
+func TestWaitForBuildPod(t *testing.T) {
+	labels := map[string]string{appLabel: "my-app", buildLabel: "true", sourceNamespaceLabel: "project-test"}
+	queued := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "my-app-build-new", Namespace: buildsNamespace, Labels: labels}}
+	pod := func(name, job string) *corev1.Pod {
+		podLabels := map[string]string{batchv1.JobNameLabel: job}
+		for k, v := range labels {
+			podLabels[k] = v
+		}
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildsNamespace, Labels: podLabels}}
+	}
+
+	t.Run("returns the pod once the queue releases the build", func(t *testing.T) {
+		client := fake.NewClientset(queued, pod("my-app-build-old-x1", "my-app-build-old"))
+		done := make(chan *corev1.Pod, 1)
+		go func() {
+			got, err := WaitForBuildPod(context.Background(), client, queued, time.Millisecond)
+			assert.NoError(t, err)
+			done <- got
+		}()
+		time.Sleep(20 * time.Millisecond)
+		_, err := client.CoreV1().Pods(buildsNamespace).Create(context.Background(), pod("my-app-build-new-x1", "my-app-build-new"), metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		select {
+		case got := <-done:
+			require.NotNil(t, got)
+			assert.Equal(t, "my-app-build-new-x1", got.Name, "an older build's pod was returned for the queued build")
+		case <-time.After(5 * time.Second):
+			t.Fatal("WaitForBuildPod did not return after the build's pod appeared")
+		}
+	})
+
+	t.Run("returns nil when the build leaves the queue without starting", func(t *testing.T) {
+		got, err := WaitForBuildPod(context.Background(), fake.NewClientset(), queued, time.Millisecond)
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("stops when the context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := WaitForBuildPod(ctx, fake.NewClientset(queued), queued, time.Hour)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+func TestWaitForBuildStage(t *testing.T) {
+	waiting := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}
+	pod := func(phase corev1.PodPhase, state corev1.ContainerState) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-app-build-1-x1", Namespace: buildsNamespace},
+			Status:     corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{{Name: "kaniko", State: state}}},
+		}
+	}
+
+	t.Run("returns once the stage runs", func(t *testing.T) {
+		running := pod(corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+		got, err := WaitForBuildStage(context.Background(), fake.NewClientset(running), pod(corev1.PodPending, waiting), "kaniko", time.Millisecond)
+		require.NoError(t, err)
+		assert.True(t, BuildStageStarted(got, "kaniko"))
+	})
+
+	t.Run("returns a finished pod whose stage never ran", func(t *testing.T) {
+		got, err := WaitForBuildStage(context.Background(), fake.NewClientset(), pod(corev1.PodFailed, waiting), "kaniko", time.Hour)
+		require.NoError(t, err)
+		assert.False(t, BuildStageStarted(got, "kaniko"))
+	})
+
+	t.Run("reports a removed pod", func(t *testing.T) {
+		_, err := WaitForBuildStage(context.Background(), fake.NewClientset(), pod(corev1.PodPending, waiting), "kaniko", time.Millisecond)
+		assert.True(t, k8serrors.IsNotFound(err), "got %v", err)
+	})
 }
