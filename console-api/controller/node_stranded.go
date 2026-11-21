@@ -44,7 +44,7 @@ func (rc *ResourceController) nodeDownReason(ctx context.Context, node *corev1.N
 		part := s.label
 		if err == nil {
 			if copies := stranded.CopiesOfAll(s.volumes, node.Name, replicas); len(copies) > 0 {
-				part += ", current copy on " + strings.Join(copies, ", ")
+				part += ", another copy on " + strings.Join(copies, ", ")
 			} else {
 				part += ", no other node holds a current copy"
 			}

@@ -74,7 +74,7 @@ func TestStatusNamesStrandedServicesWithTheirCopyAndTheFenceCommand(t *testing.T
 	var out bytes.Buffer
 	reportStranded(context.Background(), &out, client, replicaClient(replicaObject("r1", "pvc-1", "server-1", healthy)), nil)
 	assert.Contains(t, out.String(), "Stranded:")
-	assert.Contains(t, out.String(), "db (shop) on worker-1: current copy on server-1")
+	assert.Contains(t, out.String(), "db (shop) on worker-1: another copy on server-1")
 	assert.Contains(t, out.String(), "kip node fence worker-1")
 }
 
@@ -102,7 +102,43 @@ func TestStatusListsServicesTheFenceStopped(t *testing.T) {
 	}
 	var out bytes.Buffer
 	reportStranded(context.Background(), &out, fake.NewSimpleClientset(objects...), replicaClient(), nil)
-	assert.Contains(t, out.String(), "kip service start db")
+	assert.Contains(t, out.String(), "Its other copies may be older. Start it on them with 'kip service start db --accept-stale-data'")
+}
+
+func TestStatusSendsAServiceWhoseOnlyCopyIsOnTheWorkerToTheRejoin(t *testing.T) {
+	objects := []runtime.Object{
+		strandedNode("server-1", corev1.ConditionTrue),
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop", Annotations: map[string]string{
+			installer.FenceStopAnnotation: `{"node":"worker-1","replicas":1,"reason":"only-copy","volumes":["pvc-1"]}`}}},
+	}
+	var out bytes.Buffer
+	reportStranded(context.Background(), &out, fake.NewSimpleClientset(objects...), replicaClient(), nil)
+	assert.Contains(t, out.String(), "At least one of its volumes has its only copy on worker-1. Start it after worker-1 rejoins with 'kip node add")
+}
+
+func TestStatusNamesTheConsentFlagForAServiceWhoseCopiesMayLackWrites(t *testing.T) {
+	objects := []runtime.Object{
+		strandedNode("server-1", corev1.ConditionTrue),
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop", Annotations: map[string]string{
+			installer.FenceStopAnnotation: `{"node":"worker-1","replicas":1,"reason":"unverified","volumes":["pvc-1"]}`}}},
+	}
+	var out bytes.Buffer
+	reportStranded(context.Background(), &out, fake.NewSimpleClientset(objects...), replicaClient(), nil)
+	assert.Contains(t, out.String(), "kip service start db --accept-stale-data")
+	assert.Contains(t, out.String(), "may lack writes made through worker-1")
+}
+
+func TestStatusSendsAServiceWithAMissingVolumeToTheRejoinEvenWithDoubt(t *testing.T) {
+	objects := []runtime.Object{
+		strandedNode("server-1", corev1.ConditionTrue),
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop", Annotations: map[string]string{
+			installer.FenceStopAnnotation: `{"node":"worker-1","replicas":1,"reason":"only-copy","volumes":["pvc-1","pvc-2"],"mayLackWrites":true}`}}},
+	}
+	var out bytes.Buffer
+	reportStranded(context.Background(), &out, fake.NewSimpleClientset(objects...), replicaClient(), nil)
+	assert.NotContains(t, out.String(), "kip service start db", "no consent brings back a volume whose only copy is on the worker")
+	assert.Contains(t, out.String(), "Start it after worker-1 rejoins with 'kip node add")
+	assert.Contains(t, out.String(), "Rejoining requires consent to give up writes that may be missing from its other copies")
 }
 
 func TestStatusPrintsNothingWhenEveryNodeIsReady(t *testing.T) {

@@ -40,6 +40,8 @@ type fakeFenceCluster struct {
 	onDelVA    func()
 	stops      map[string]installer.FenceStopMark
 	owners     map[string]bool
+	later      *installer.FenceView
+	views      int
 	// Fail before the matching write to simulate interruption after failSkip matches.
 	failOn   string
 	failSkip int
@@ -82,9 +84,14 @@ func (c *fakeFenceCluster) SaveRecord(rec installer.NodeRecord) error {
 func (c *fakeFenceCluster) Node(string) (installer.FenceNode, error) { return c.node, nil }
 func (c *fakeFenceCluster) KubeletAnswers(string) (bool, error)      { return c.kubelet, c.kubeletErr }
 func (c *fakeFenceCluster) View(string) (installer.FenceView, error) {
+	c.views++
 	v := c.view
+	if c.later != nil && c.views > 1 {
+		v = *c.later
+	}
+	services := v.Services
 	v.Services = nil
-	for _, s := range c.view.Services {
+	for _, s := range services {
 		if m, ok := c.stops[s.Namespace+"/"+s.StatefulSet]; ok {
 			s.Stop = &m
 		}
@@ -99,6 +106,16 @@ func (c *fakeFenceCluster) Stop(ns, name string, mark installer.FenceStopMark) e
 	c.add("stop:" + ns + "/" + name)
 	mark.Replicas = max(mark.Replicas, 1)
 	c.stops[ns+"/"+name] = mark
+	return nil
+}
+func (c *fakeFenceCluster) MarkMayLackWrites(ns, name string) error {
+	m, ok := c.stops[ns+"/"+name]
+	if !ok {
+		return errors.New("no stop mark on " + ns + "/" + name)
+	}
+	c.add("doubt:" + ns + "/" + name)
+	m.MayLackWrites = true
+	c.stops[ns+"/"+name] = m
 	return nil
 }
 func (c *fakeFenceCluster) Start(ns, name string) error {
@@ -275,17 +292,22 @@ func dbService() installer.FenceService {
 	return installer.FenceService{Namespace: "shop", StatefulSet: "db", Pods: []string{"db-0"}, Volumes: []string{"pvc-1"}}
 }
 
+func singleCopy() map[string]installer.VolumeCopies {
+	return map[string]installer.VolumeCopies{"pvc-1": {Wanted: 1, Placed: 1}}
+}
+
 func TestFenceOverSSHInterlocksBeforeItStopsAndTaintsLast(t *testing.T) {
 	ft := newFenceTest(worker(installer.NodeStateReady))
 	ft.cluster.view = installer.FenceView{Services: []installer.FenceService{dbService()},
-		Replicas: []stranded.Replica{{Name: "r1", Volume: "pvc-1", Node: "server-1", HealthyAt: healthy}}}
+		Replicas: []stranded.Replica{{Name: "r1", Volume: "pvc-1", Node: "server-1", HealthyAt: healthy}}, Copies: singleCopy()}
 	ft.cluster.running["shop/db-0"] = "server-1"
 
 	require.NoError(t, ft.run("worker-1"))
 	fencing, interlock, killall, taint := index(ft.log, "save:fencing"), index(ft.log, "interlock"), index(ft.log, "killall"), index(ft.log, "taint")
 	assert.True(t, fencing >= 0 && fencing < interlock && interlock < killall && killall < taint, "the record, then the interlock, then killall, then the taint: %q", ft.log)
 	assert.Equal(t, "save:fenced", ft.log[len(ft.log)-1])
-	assert.Equal(t, -1, index(ft.log, "stop:shop/db"), "a service with a current copy elsewhere is not stopped")
+	assert.Equal(t, -1, index(ft.log, "stop:shop/db"), "a service whose single copy is elsewhere is not stopped")
+	assert.Contains(t, ft.out.String(), "db (shop) runs again on server-1, on the only copy of its data")
 	rec := ft.record()
 	assert.Equal(t, installer.NodeStateFenced, rec.State)
 	assert.Equal(t, installer.FenceMethodKillall, rec.Fence.Method)
@@ -500,6 +522,7 @@ func TestFenceStopsAStaleServiceBeforeTheTaintAndKeepsItStoppedWithoutConsent(t 
 	assert.Equal(t, installer.FenceStopStale, rec.Fence.Stopped[0].Reason)
 	assert.Empty(t, rec.Fence.Stopped[0].Consent)
 	assert.Contains(t, ft.out.String(), "kip node fence worker-1 --accept-stale-data")
+	assert.Contains(t, ft.out.String(), "A rejoin with 'kip node add 203.0.113.11' asks the same question first", "a rejoin is no way to keep the newer writes")
 }
 
 func TestFenceStartsAStaleServiceOnlyAfterConsentIsRecorded(t *testing.T) {
@@ -514,6 +537,85 @@ func TestFenceStartsAStaleServiceOnlyAfterConsentIsRecorded(t *testing.T) {
 	assert.Empty(t, ft.record().Fence.Stopped, "the entry leaves the record once the service started")
 	assert.Contains(t, ft.out.String(), "db (shop) runs again on server-1, on older copies of its data")
 	assert.NotContains(t, ft.out.String(), "data current up to")
+}
+
+// partitionView models two copies still marked healthy after a network
+// partition prevented the engine on worker-1 from recording that the server's
+// copy had failed.
+func partitionView() installer.FenceView {
+	return installer.FenceView{Services: []installer.FenceService{dbService()},
+		Replicas: []stranded.Replica{
+			{Name: "r1", Volume: "pvc-1", Node: "server-1", HealthyAt: healthy},
+			{Name: "r2", Volume: "pvc-1", Node: "worker-1", HealthyAt: healthy},
+		},
+		Copies: map[string]installer.VolumeCopies{"pvc-1": {Wanted: 2, Placed: 2}}}
+}
+
+func TestFenceStopsAServiceWhoseOtherCopyMayLackPartitionWrites(t *testing.T) {
+	ft := newFenceTest(worker(installer.NodeStateReady))
+	ft.fence.Yes = true
+	ft.fence.Interactive = false
+	ft.cluster.view = partitionView()
+	ft.cluster.running["shop/db-0"] = "server-1"
+	require.NoError(t, ft.run("worker-1"))
+	assert.True(t, index(ft.log, "stop:shop/db") >= 0 && index(ft.log, "stop:shop/db") < index(ft.log, "taint"), "%q", ft.log)
+	assert.Equal(t, -1, index(ft.log, "start:shop/db"), "healthy markers alone never start it")
+	rec := ft.record()
+	require.Len(t, rec.Fence.Stopped, 1)
+	assert.Equal(t, installer.FenceStopUnverified, rec.Fence.Stopped[0].Reason)
+	mark := ft.cluster.stops["shop/db"]
+	assert.Equal(t, installer.FenceStopUnverified, mark.Reason)
+	assert.True(t, mark.MayLackWrites)
+	out := ft.out.String()
+	assert.Contains(t, out, "Stopped db (shop): it wrote through worker-1, so its copies on other nodes may lack writes worker-1 made after it lost contact with the cluster")
+	assert.Contains(t, out, "db (shop) stays stopped: writes worker-1 made after it lost contact with the cluster may exist only on worker-1")
+	assert.Contains(t, out, "kip node fence worker-1 --accept-stale-data")
+	assert.NotContains(t, out, "current up to")
+}
+
+func TestFenceStartsAPartitionedServiceOnlyAfterConsent(t *testing.T) {
+	ft := newFenceTest(worker(installer.NodeStateReady))
+	ft.fence.Yes = true
+	ft.fence.Interactive = false
+	ft.fence.AcceptStale = true
+	ft.cluster.view = partitionView()
+	ft.cluster.running["shop/db-0"] = "server-1"
+	require.NoError(t, ft.run("worker-1"))
+	require.True(t, index(ft.log, "start:shop/db") > index(ft.log, "taint"), "%q", ft.log)
+	assert.Contains(t, ft.out.String(), "db (shop) runs again on server-1, using copies that may lack writes made through worker-1. You accepted this risk")
+	assert.NotContains(t, ft.out.String(), "fell behind", "kip cannot verify whether writes were lost, so the report must preserve that uncertainty")
+
+	asking := newFenceTest(worker(installer.NodeStateReady))
+	asking.fence.Yes = true
+	asking.answer = false
+	asking.cluster.view = partitionView()
+	require.NoError(t, asking.run("worker-1"))
+	require.Len(t, asking.asked, 1)
+	assert.Contains(t, asking.asked[0], "Writes that exist only on worker-1 are then lost")
+	assert.Contains(t, asking.out.String(), "db (shop) wrote through worker-1. kip cannot tell whether these copies hold every write")
+	assert.Equal(t, -1, index(asking.log, "start:shop/db"))
+}
+
+func TestFenceRecordsDoubtFoundWhenItResumes(t *testing.T) {
+	rec := fencedWorker()
+	rec.Fence.Stopped = []config.FenceStop{{Namespace: "shop", StatefulSet: "db", Reason: installer.FenceStopOnlyCopy}}
+	ft := newFenceTest(rec)
+	ft.host = nil
+	ft.answer = false
+	ft.cluster.node.OutOfService = true
+	ft.cluster.view = partitionView()
+	ft.cluster.view.Services[0].Pods = nil
+	ft.cluster.stops["shop/db"] = installer.FenceStopMark{Node: "worker-1", Replicas: 1, Reason: installer.FenceStopOnlyCopy, Volumes: []string{"pvc-1"}}
+	require.NoError(t, ft.run("worker-1"))
+	assert.True(t, logged(ft.log, "doubt:shop/db"), "%q", ft.log)
+	assert.True(t, ft.cluster.stops["shop/db"].MayLackWrites)
+	assert.Equal(t, -1, index(ft.log, "start:shop/db"))
+
+	// Once the inventory shows one copy, the recorded doubt still holds.
+	ft.cluster.view.Replicas = ft.cluster.view.Replicas[:1]
+	ft.cluster.view.Copies = singleCopy()
+	require.NoError(t, ft.run("worker-1"))
+	assert.Equal(t, -1, index(ft.log, "start:shop/db"))
 }
 
 func TestFenceReusesConsentOnlyWhileTheCopiesAreUnchanged(t *testing.T) {
@@ -713,6 +815,7 @@ func TestFenceReportsAServiceWithoutPodsWithoutWaiting(t *testing.T) {
 	ft.cluster.view = installer.FenceView{
 		Services: []installer.FenceService{{Namespace: "shop", StatefulSet: "db", Volumes: []string{"pvc-1"}}},
 		Replicas: []stranded.Replica{{Name: "r1", Volume: "pvc-1", Node: "server-1", HealthyAt: healthy}},
+		Copies:   singleCopy(),
 	}
 	require.NoError(t, ft.run("worker-1"))
 	assert.Contains(t, ft.out.String(), "db (shop) had no pod on worker-1, so there is none to move")
