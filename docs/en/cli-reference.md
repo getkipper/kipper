@@ -859,6 +859,7 @@ kip app update backend --health-path /actuator/health/readiness --health-startup
 | `--closed` | No* | Publish only the route's public paths; use `--closed=false` to reopen. See [closing a route](/en/routing#closing-a-route-except-for-one-path) |
 | `--project` | No | Project name |
 | `--environment` | No | Target environment |
+| `--namespace` | No | Use the app's namespace exactly as given, bypassing namespace resolution from `--project`, `--environment`, and the cluster's organization prefix. This flag cannot be combined with `--project` or `--environment`. |
 
 \* Supply at least one update flag: `--image`, `--profile`, a CPU or memory flag, `--tuning auto`, `--redirect-from`, `--internal-path`, `--public-path`, `--closed`, `--health` or a `--health-*` flag.
 
@@ -954,6 +955,7 @@ kip app start backend
 | `--reason` | `stop` | Optional stop reason, up to 500 bytes. On an already stopped app, only an explicit `--reason` changes the reason |
 | `--for-migration` | `stop` | Marks a new stop as a migration write freeze, which stays on the source. Existing stop records keep their original type |
 | `--project`, `--environment` | both | The app's project and environment |
+| `--namespace` | both | The app's exact namespace, used as given instead of resolving `--project` and `--environment` through the cluster's organization prefix. Cannot be combined with them |
 
 Stopping preserves the app’s configuration, replica count, autoscaling settings and data. Its route returns a "this app is stopped" page. For an app scaled to zero without a stop record and without autoscaling, use `kip app scale` to raise the count. See [Stopping and starting an app](/en/deploying-apps#stopping-and-starting-an-app).
 
@@ -1381,6 +1383,8 @@ kip credentials allow git-acme-tools --project acme
 kip credentials allow git-acme-tools --project acme --project blog
 kip credentials revoke git-acme-tools --project blog
 ```
+
+A project must exist on the cluster to prevent typos from creating grants that never match. To grant access before a migration creates the project, use `--allow-missing-project`. This stores the name exactly as given, without an org prefix, and displays a notice that the project does not exist yet.
 
 A build refused for want of a grant says so and names the command:
 

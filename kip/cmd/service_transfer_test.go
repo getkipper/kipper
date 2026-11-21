@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -187,4 +188,29 @@ func captureStderr(t *testing.T, fn func()) string {
 	out, err := io.ReadAll(r)
 	require.NoError(t, err)
 	return string(out)
+}
+
+// A migration keeps namespace names, while --project is resolved through this
+// workstation's org prefix for the cluster. --namespace names the namespace
+// exactly, so the same command reaches the same service on both clusters.
+func TestTransferNamespaceIsTakenExactly(t *testing.T) {
+	cmd := &cobra.Command{}
+	addTransferScopeFlags(cmd)
+	require.NoError(t, cmd.Flags().Set("namespace", "acme-shop-prod"))
+
+	ns, err := transferNamespace(cmd)
+
+	require.NoError(t, err)
+	assert.Equal(t, "acme-shop-prod", ns)
+}
+
+func TestTransferNamespaceRefusesAProjectAsWell(t *testing.T) {
+	cmd := &cobra.Command{}
+	addTransferScopeFlags(cmd)
+	require.NoError(t, cmd.Flags().Set("namespace", "shop-prod"))
+	require.NoError(t, cmd.Flags().Set("project", "shop"))
+
+	_, err := transferNamespace(cmd)
+
+	assert.ErrorContains(t, err, "--namespace")
 }

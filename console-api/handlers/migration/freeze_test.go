@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,8 +90,11 @@ func TestWriteFreezeWarning(t *testing.T) {
 
 	require.NotNil(t, step)
 	assert.Contains(t, step.Detail, "shop-prod/web")
-	assert.Contains(t, step.ManualSteps, "kip app stop web --for-migration --project shop --environment prod")
-	assert.Contains(t, step.ManualSteps, "kip app start web --project shop --environment prod")
+	// --project would resolve through the organization prefix of whichever
+	// cluster kip points at, so the steps name the namespace exactly.
+	assert.Contains(t, step.ManualSteps, "kip app stop web --for-migration --namespace shop-prod")
+	assert.Contains(t, step.ManualSteps, "kip app start web --namespace shop-prod")
+	assert.NotContains(t, strings.Join(step.ManualSteps, "\n"), "--project")
 }
 
 func TestWriteFreezeWarning_QuietOnceEveryAppIsFrozen(t *testing.T) {

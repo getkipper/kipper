@@ -6,6 +6,8 @@ package backupscope
 import (
 	"path"
 	"strings"
+
+	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 // DrillNamespace is where kip backup drill restores a namespace's services and
@@ -13,9 +15,10 @@ import (
 const DrillNamespace = "kipper-restore-drill"
 
 // ExcludedNamespaces returns the namespaces that backups of user workloads
-// skip: system namespaces with regenerable state, Velero's namespace and the
-// restore drill namespace. Excluding Velero prevents it from backing up the
-// MinIO PVC that stores its own output, which can leave a backup in InProgress.
+// skip: system namespaces with regenerable state, Velero's namespace, the
+// restore drill namespace, and the build namespace. Excluding Velero prevents
+// it from backing up the MinIO PVC that stores its own output, which can leave
+// a backup in InProgress.
 // Each call returns a fresh slice.
 func ExcludedNamespaces() []string {
 	return []string{
@@ -28,6 +31,7 @@ func ExcludedNamespaces() []string {
 		"traefik",
 		"velero",
 		DrillNamespace,
+		labels.BuildsNamespace,
 	}
 }
 

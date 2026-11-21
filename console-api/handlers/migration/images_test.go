@@ -158,6 +158,14 @@ func TestCreateApp_GitAppGetsPlaceholderAndBuild(t *testing.T) {
 	if jobs.Items[0].Labels["kipper.run/build"] != "true" {
 		t.Fatal("triggered job must carry the build label")
 	}
+	// The App's status must name the awaited build so the queue can report
+	// why it discarded that build when its git source changes.
+	if err := h.CRClient.Get(context.Background(), crclient.ObjectKey{Namespace: "shop-prod", Name: "backend"}, &app); err != nil {
+		t.Fatalf("getting created app: %v", err)
+	}
+	if app.Status.Build == nil || app.Status.Build.Phase != "Pending" || app.Status.Build.Build != jobs.Items[0].Name {
+		t.Fatalf("build status = %+v, want Pending naming %s", app.Status.Build, jobs.Items[0].Name)
+	}
 }
 
 // An image-based app keeps its image untouched and triggers no build.
@@ -200,5 +208,18 @@ func TestCreateApp_ImageAppUnchanged(t *testing.T) {
 func init() {
 	builder.ReachGit = func(context.Context, string, string, string, string) (gitreach.Result, string) {
 		return gitreach.Reachable, ""
+	}
+}
+
+// TestImageCopyStepsNameTheExactNamespace verifies that copy steps preserve the
+// migrated namespace because kip may add an organization prefix to project names.
+func TestImageCopyStepsNameTheExactNamespace(t *testing.T) {
+	steps := strings.Join(buildManualImageCopySteps("shop-prod", []string{"web"}), "\n")
+
+	if !strings.Contains(steps, "kip app update web --namespace shop-prod --image <reachable-registry>/shop-prod/web:latest") {
+		t.Fatalf("the update step must name the exact namespace:\n%s", steps)
+	}
+	if strings.Contains(steps, "--project") {
+		t.Fatalf("--project resolves through the organization prefix:\n%s", steps)
 	}
 }

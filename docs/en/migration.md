@@ -37,7 +37,7 @@ Migration is a console feature with visual progress. The flow:
 |---|---|
 | Project CRs | Created on target, namespaces auto-provisioned |
 | Kubernetes Secrets | Transferred directly with their types intact (env vars, registry auth). Two kinds travel differently: see the two rows below |
-| Service CRs | Created on target, StatefulSets auto-provisioned. A service's credentials travel inside the same handover, so the target owns them from the moment they land and its engine starts on the password your data was written with |
+| Service CRs | Created on target, StatefulSets auto-provisioned. A service's credentials travel inside the same handover, so the target owns them from the moment they land and its engine starts with the username and password your data was written with |
 | Per-binding credentials | Rebuilt on the target from the service's credentials, so they are not sent. They are a projection of the shared credentials with the binding's own database applied, and each workload's controller renders its own |
 | Postgres data | Each database dumped with pg_dump and restored into the same database name, then verified by table count. Dumps stream directly between the clusters. On a confirmed overwrite, databases that exist only on the target are dropped, so the result is a replacement rather than a merge |
 | MySQL / MongoDB data | Exported via mysqldump (including routines, events, and triggers) / mongodump, imported on target |
@@ -57,7 +57,7 @@ Before anything moves, the source checks the target has enough free CPU, memory,
 
 - System components (Traefik, cert-manager, Longhorn, Dex), which already exist on the target from `kip install`
 - User accounts (Dex). The migration shows a reminder with the `kip user import` steps; the target starts with only its bootstrap admin
-- TLS certificates, because cert-manager issues new ones on the target
+- TLS certificates that Kipper requested for its routes, because the target requests new ones. Any other TLS Secret, such as a certificate you uploaded or one from a Certificate of your own, migrates with the other secrets
 - Postgres globals. Databases move one by one, so roles other than the service user, role passwords and settings, and database-level settings (`ALTER DATABASE ... SET`) stay behind. Kipper-managed services use a single service user and are unaffected
 - Service share links. The grants and their signing key stay on the source cluster, and an old link fails closed on the target. Mint fresh links after the cutover
 - Build history (git apps are rebuilt fresh on the target)
@@ -131,8 +131,8 @@ The token is valid for 24 hours and can only be used once.
 Migration leaves source apps running unless you stop them. Writes made after a database or volume is copied stay on the source. For production, stop the apps before starting migration and keep them stopped through domain cutover:
 
 ```bash
-kip app stop backend --for-migration --project shop --environment prod
-kip app stop worker --for-migration --project shop --environment prod
+kip app stop backend --for-migration --namespace shop-prod
+kip app stop worker --for-migration --namespace shop-prod
 ```
 
 `--for-migration` works for autoscaled apps too. It marks a new stop as a temporary write freeze on the source. On the target, the app uses its configured replica count and autoscaling settings, unless it needs a manual database restore. An already stopped app keeps its original stop record; see [Apps that arrive stopped](#apps-that-arrive-stopped).
@@ -140,9 +140,11 @@ kip app stop worker --for-migration --project shop --environment prod
 If migration is aborted, restart each app you froze on the source, for example:
 
 ```bash
-kip app start backend --project shop --environment prod
-kip app start worker --project shop --environment prod
+kip app start backend --namespace shop-prod
+kip app start worker --namespace shop-prod
 ```
+
+The console's commands use `--namespace` because migration preserves namespace names, while `--project` resolves them using the organization prefix configured for the CLI's current cluster.
 
 The plan lists apps that may still write and reports any checks it could not complete. At migration start, the check waits up to 30 seconds for stopped apps to finish shutting down. Any remaining apps appear in a "Write freeze check" warning.
 
@@ -170,12 +172,12 @@ On the **source cluster's** console, go to **Migration** and click **Migrate to 
 The plan shows everything before anything moves:
 
 - The consent line: which projects, databases, and secrets go to which cluster at which endpoint
-- **Blockers** (red) that prevent migration from starting: target unreachable, version mismatch, not enough capacity, resources requiring two copies that the target cannot create, unconfirmed overwrites, an app with invalid autoscaling settings, or a 2FA factor that is missing or still inside its 7-day wait
+- **Blockers** (red) that prevent migration from starting: target unreachable, version mismatch, not enough capacity, resources requiring two copies that the target cannot create, unconfirmed overwrites, an app with invalid autoscaling settings, a git app whose repository rejects its token or requires a missing token, or a 2FA factor that is missing or still inside its 7-day wait
 - **Warnings** (amber): autoscaled apps that keep serving through a freeze, missing notification channels
 - Capacity numbers: CPU, memory, and disk the projects need against what the target has free
-- **Data that will be skipped**: databases over the 500MB cap stay behind with manual steps. Volumes and service storage always move, chunked and verified, with no size cap
+- **Data that will be skipped**: databases whose data is over the 500MB cap stay behind with manual steps. MySQL and Postgres report their own data size, which leaves out the binary logs and WAL in the data directory. Other engines, or engines that do not answer, are measured on disk. Volumes and service storage always move, chunked and verified, with no size cap
 - What will migrate, item by item, with git apps marked "rebuilt from the branch head"
-- What never migrates (Dex users, TLS certificates, share links, Postgres globals, build history)
+- What never migrates (Dex users, route TLS certificates, share links, Postgres globals, build history)
 
 If a project already exists on the target, confirm the overwrite by typing its name on the plan; the plan then refreshes with the overwrite applied as a warning.
 
@@ -184,6 +186,8 @@ If a project already exists on the target, confirm the overwrite by typing its n
 The Start button lives on the plan. Enter the 6-digit code from your authenticator app and click **Start migration**. A plan is startable for 15 minutes; after that, review a fresh one.
 
 Canceling later takes effect immediately, aborting whatever transfer is mid-stream.
+
+A cluster runs one outgoing migration at a time. While one is running or waiting for its cutover, Kipper refuses to start another and names the cluster the first one is moving to. Finish or cancel that migration first.
 
 ### 6. Monitor progress
 
@@ -210,7 +214,7 @@ A run that skipped data (an oversized database) finishes as **completed with ski
 
 After migration completes, apps are live on temporary `*.kipper.run` subdomains. The verification dashboard shows each app with its temporary URL and status, straight from the target cluster.
 
-Git-built apps rebuild on the target during this phase. Until a build finishes, the app serves a "building" page and the dashboard shows the build phase next to it. Use **Refresh** to see builds complete.
+Git-built apps rebuild on the target during this phase. By default, the target runs one build at a time, so a project with many git apps takes about the sum of their build times. Waiting builds show `Pending`. Set `BUILD_MAX_CONCURRENT` on the target to allow more concurrent builds. Until a build finishes, the app serves a "building" page and the dashboard shows the build phase next to it. Use **Refresh** to see builds complete.
 
 Click each URL to verify the app works correctly. Check that pages load, database connections work, and functionality is intact.
 
@@ -218,7 +222,7 @@ Click each URL to verify the app works correctly. Check that pages load, databas
 
 When everything looks good, enter a fresh authenticator code and click **Everything looks good, apply custom domains**. The cutover repoints production domains, so it carries the same 2FA requirement as the start. Kipper applies the original route configuration and shows the exact DNS records to change.
 
-The cutover refuses to run while a git rebuild is still going or has failed: the custom domain would serve the "building" page instead of the app. The console lists the unfinished builds and offers **Cut over anyway** for the case where an app can go live later.
+The cutover refuses to run while a git rebuild is still going or has failed: the custom domain would serve the "building" page instead of the app. The console lists the unfinished builds and offers **Cut over anyway** for the case where an app can go live later. A build you start on the target yourself after the migration's own, such as a rebuild once a missing grant is in place, counts once it succeeds.
 
 Complete verification and cutover within 7 days of starting the migration. After that the target stops accepting the session and the routes have to be applied by hand.
 
@@ -228,12 +232,14 @@ If a route fails to apply, the cutover stops and reports which one. The session 
 
 ## Limitations
 
-- **Database size**: Databases up to ~500MB transfer automatically. Larger ones are skipped with manual instructions shown in the progress view. The dump streams between the clusters with a one-hour budget per database, so the cap is about transfer time on a normal uplink rather than memory.
+- **Database size**: Databases up to ~500MB transfer automatically. Larger ones are skipped, and the progress view shows `kip service export` and `kip service import` commands for them. Postgres and MySQL get one command pair per database, and MongoDB gets one pair for the whole service. A dump can exceed the estimated data size, for example when dumping a MySQL table of numbers. The target accepts at most 768MB per transfer, so a dump that exceeds this limit stops partway through and requires the same manual steps. The target keeps the partial copy until the manual import replaces it, and the apps bound to that database arrive stopped. Each command pair runs on one line, with the import starting only after the export succeeds. The dump filename includes the namespace, so you can run the steps for several projects in one directory. If kip cannot safely pass a database name on the command line, a comment replaces that database's command pair. Run the commands from a machine that can reach both clusters. They use `--namespace` to preserve the migration's namespace names, because `--project` would add your CLI's organization prefix. Each import includes `--drop`, so retrying after a failure replaces data loaded by that attempt. Export preserves existing dump files, so delete any dump file left by the failed attempt before running the command pair again. Importing into a missing database creates it and, on MySQL, grants the service user access. Other MySQL accounts and their grants remain on the source when using these commands. Create them manually on the target. Each database dump streams directly into the target's import through a single HTTP request. The target's ingress allows 60 seconds by default to read the entire request, including the dump. Exceeding this limit fails the migration. Use `kip service export` and `kip service import` to transfer the data through the Kubernetes API, which bypasses this ingress timeout.
 - **Volumes and service storage have no size cap**: Shared volumes move through a chunked transfer that verifies every file and resumes from the last completed chunk after a network or pod failure within the run. MinIO and OpenSearch storage moves the same way as raw bytes; the service pauses on both clusters for the duration of its transfer and restarts automatically. If the console API itself restarts mid-run, the migration fails, both clusters clean up and restart paused services on their own, and a fresh migration retransfers the data.
 - **Stop apps before migrating**: The data transfer copies each volume once. Writes that land while a transfer runs are not picked up, so stop the source apps with `kip app stop --for-migration` first. The plan screen reminds you when source apps can still write.
-- **Redirect domains move at cutover**: An app's route carries one serving hostname plus any [redirect domains](/en/domains#redirect-domains). During the verification phase the target serves neither; both switch over together at cutover, and each redirect domain's DNS record must be repointed just like the main hostname's.
+- **Redirect domains move at cutover**: An app's route carries one serving hostname plus any [redirect domains](/en/domains#redirect-domains). The target starts serving both together at cutover, after the verification phase. Each redirect domain's DNS record must be repointed just like the main hostname's. The plan lists each moving app's redirect domains under its hostname, and the DNS screen checks each one. An app whose hostname stays on the source, such as one on the source's own base domain, keeps its redirect domains there as well.
 - **Target volumes use the declared size**: A volume on a [local-storage](/en/nano) cluster has no size limit, so it can hold more than its service declares. The target volume is created at the declared size, so increase the declared size with `kip service update <name> --storage <size>` before migrating if the data has outgrown it.
 - **Shared volumes require a Longhorn target**: A target cluster with local storage rejects shared volumes and apps that mount them. The plan screen does not flag these incompatibilities yet. Move projects that use shared volumes to a target with Longhorn storage.
+- **Shared git credentials stay on each cluster**: A git app that builds with a shared credential needs that credential on the target too, allowed for the app's project. The plan asks the target and blocks until it is, naming the command to run there. A target on a Kipper release without this check gets a warning listing the grants to make instead. The command carries `--allow-missing-project`, which takes the project name exactly as the migration creates it and works before the project exists: `kip credentials allow --project <project> --allow-missing-project -- <name>`.
+- **Git apps must be clonable**: The plan checks each git app's repository for its configured branch using the token that travels with the app, if configured. If the repository refuses access, the plan blocks migration and explains why. Fix the app's git source or token and plan again. If the source cannot reach a repository, the target's build checks access. An app using a shared credential builds with the target's own copy, so the plan checks that the target has the credential for the repository's server and allows the project to use it.
 - **Git apps build the branch head**: The rebuild on the target checks out the configured branch fresh. If the branch moved since the last deploy on the source, the target runs the newer code.
 - **Active connections**: Apps on the source cluster continue running during migration. There is no automatic traffic cutover. DNS changes propagate gradually. Writes that land on the source after its data was copied stay there, which is why the guide says to freeze writes first.
 
@@ -253,10 +259,10 @@ If the database import fails, the Service CR still exists on the target. Export 
 
 ```bash
 # Pointed at the source cluster: export
-kip service export mydb --file dump.dump --project blog --environment prod
+kip service export mydb --file dump.dump --namespace blog-prod
 
-# Pointed at the target cluster: import
-kip service import mydb --file dump.dump --project blog --environment prod
+# On the target cluster, import and replace data loaded by a failed attempt.
+kip service import mydb --drop --file dump.dump --namespace blog-prod
 ```
 
 Both commands stream through the Kubernetes API, so they work from any machine with cluster access. See [Importing and exporting data](/en/services#importing-and-exporting-data) for formats and options. This is also the path for databases too large for the automated transfer.

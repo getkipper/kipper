@@ -50,6 +50,9 @@ func runClusterHosts(cmd *cobra.Command, _ []string) error {
 	if clusterName == "" {
 		clusterName = cfg.CurrentCluster
 	}
+	if clusterName == "" {
+		return noClusterSelected(cfg)
+	}
 	if cfg.GetCluster(clusterName) == nil {
 		return fmt.Errorf("cluster %q not found", clusterName)
 	}

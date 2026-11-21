@@ -6,6 +6,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/config"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -243,4 +244,16 @@ func TestImportTreatsNoHostKeysAtAllAsAge(t *testing.T) {
 
 	assert.False(t, legacy.present())
 	require.NoError(t, legacy.validate())
+}
+
+func TestClusterExportAsksForAClusterWhenNoneIsCurrent(t *testing.T) {
+	withFakeHome(t)
+	require.NoError(t, config.Save(&config.Config{Clusters: []config.Cluster{{Name: "shop", Domain: "example.com"}}}))
+	cmd := &cobra.Command{RunE: runClusterExport}
+	cmd.Flags().String("cluster", "", "")
+
+	err := runClusterExport(cmd, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip cluster use <name>")
 }

@@ -1,12 +1,16 @@
 package migration
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/controller/pkg/labels"
@@ -86,7 +90,7 @@ func TestTransferableSecret_LeavesAPublishedEnvironmentBehind(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, transferableSecret(tc.secret, map[string]bool{}))
+			assert.Equal(t, tc.want, transferableSecret(tc.secret, map[string]bool{}, nil))
 		})
 	}
 }
@@ -94,5 +98,47 @@ func TestTransferableSecret_LeavesAPublishedEnvironmentBehind(t *testing.T) {
 func TestTransferableSecret_LeavesAServiceCertificateBehind(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db-tls", Labels: map[string]string{labels.TLSFor: "db"}}}
 
-	assert.False(t, transferableSecret(secret, nil), "the target cluster issues its own key from its own CA")
+	assert.False(t, transferableSecret(secret, nil, nil), "the target cluster issues its own key from its own CA")
+}
+
+// Only the certificates Kipper's own routes request stay behind: the target's
+// cert-manager writes those names again. Every other TLS Secret travels, even
+// one from the same issuer, because nothing on the target recreates it.
+func TestTransferableSecret_LeavesOnlyRouteCertificatesBehind(t *testing.T) {
+	ingress := func(name, secretName string, managed bool) *networkingv1.Ingress {
+		ing := &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "shop-prod",
+				Annotations: map[string]string{"cert-manager.io/cluster-issuer": "letsencrypt-prod"},
+			},
+			Spec: networkingv1.IngressSpec{TLS: []networkingv1.IngressTLS{{Hosts: []string{name + ".example.com"}, SecretName: secretName}}},
+		}
+		if managed {
+			ing.Labels = map[string]string{"app.kubernetes.io/managed-by": "kipper"}
+		}
+		return ing
+	}
+	issuedBy := func(name string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "shop-prod", Annotations: map[string]string{
+				"cert-manager.io/certificate-name": name,
+				"cert-manager.io/issuer-kind":      "ClusterIssuer",
+				"cert-manager.io/issuer-name":      "letsencrypt-prod",
+			}},
+			Type: corev1.SecretTypeTLS,
+		}
+	}
+	h := &Handler{Client: fake.NewSimpleClientset(
+		ingress("web", "web-tls", true),
+		ingress("partner", "partner-tls", false),
+	)}
+
+	routeCerts, err := h.routeCertificates(context.Background(), "shop-prod")
+	require.NoError(t, err)
+
+	uploaded := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "own-cert"}, Type: corev1.SecretTypeTLS}
+	assert.False(t, transferableSecret(issuedBy("web-tls"), nil, routeCerts), "the target issues the certificate for the route it serves there")
+	assert.True(t, transferableSecret(issuedBy("partner-tls"), nil, routeCerts), "a certificate for a route the user runs themselves must travel")
+	assert.True(t, transferableSecret(issuedBy("external-tls"), nil, routeCerts), "a certificate from a Certificate of the user's own must travel")
+	assert.True(t, transferableSecret(uploaded, nil, routeCerts), "a certificate the user uploaded must travel")
 }

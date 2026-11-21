@@ -65,7 +65,7 @@ func TestCredentialsAllowGrantsAProject(t *testing.T) {
 		sharedcred.Entry{Name: "forge", Server: "git.example.com", Username: "deploy", Token: "a-token"}))
 	var out bytes.Buffer
 
-	require.NoError(t, grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "forge", []string{"shop"}, &out))
+	require.NoError(t, grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "forge", []string{"shop"}, false, &out))
 
 	entries := storedEntries(t, clientset)
 	require.Len(t, entries, 1)
@@ -79,7 +79,7 @@ func TestCredentialsAllowKeepsTheStoredToken(t *testing.T) {
 	clientset := k8sfake.NewClientset(sharedCredentialSecret(t,
 		sharedcred.Entry{Name: "forge", Server: "git.example.com", Username: "deploy", Token: "a-token"}))
 
-	require.NoError(t, grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "forge", []string{"shop"}, &bytes.Buffer{}))
+	require.NoError(t, grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "forge", []string{"shop"}, false, &bytes.Buffer{}))
 
 	entries := storedEntries(t, clientset)
 	assert.Equal(t, "a-token", entries[0].Token, "the grant lost the token it was not given")
@@ -101,7 +101,7 @@ func TestCredentialsRevokeRemovesAProject(t *testing.T) {
 func TestCredentialsAllowRefusesAnUnknownCredential(t *testing.T) {
 	clientset := k8sfake.NewClientset(sharedCredentialSecret(t, sharedcred.Entry{Name: "forge"}))
 
-	err := grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "missing", []string{"shop"}, &bytes.Buffer{})
+	err := grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "missing", []string{"shop"}, false, &bytes.Buffer{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing")
@@ -119,7 +119,7 @@ func TestCredentialsAllowPointsAtTheRegistryCommandForARegistryName(t *testing.T
 				`[{"name":"ghcr","server":"ghcr.io","username":"deploy","password":"p"}]`)},
 		})
 
-	err := grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "ghcr", []string{"shop"}, &bytes.Buffer{})
+	err := grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "ghcr", []string{"shop"}, false, &bytes.Buffer{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kip registry allow",
@@ -131,7 +131,7 @@ func TestCredentialsAllowPrintsTheResultingList(t *testing.T) {
 		sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"blog"}}))
 	var out bytes.Buffer
 
-	require.NoError(t, grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "forge", []string{"shop"}, &out))
+	require.NoError(t, grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "forge", []string{"shop"}, false, &out))
 
 	printed := out.String()
 	assert.Contains(t, printed, "blog")
@@ -149,7 +149,7 @@ func TestCredentialsAllowRefusesAProjectThatDoesNotExist(t *testing.T) {
 	// The wrong case is the case that matters: the name is compared exactly at
 	// build time, so "Shop" is a grant that can never match the "shop" the
 	// namespace label carries.
-	err := grantSharedCredential(context.Background(), clientset, dyn, "forge", []string{"Shop"}, &bytes.Buffer{})
+	err := grantSharedCredential(context.Background(), clientset, dyn, "forge", []string{"Shop"}, false, &bytes.Buffer{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `no project "Shop"`)
@@ -160,11 +160,32 @@ func TestCredentialsAllowRefusesAProjectThatDoesNotExist(t *testing.T) {
 	assert.Empty(t, entries[0].AllowedProjects, "a refused grant was stored anyway")
 }
 
+func TestCredentialsAllowRefusalNamesTheFlagForAProjectStillToCome(t *testing.T) {
+	clientset := k8sfake.NewClientset(sharedCredentialSecret(t, sharedcred.Entry{Name: "forge"}))
+
+	err := grantSharedCredential(context.Background(), clientset, projectsExist("blog"), "forge", []string{"shop"}, false, &bytes.Buffer{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--allow-missing-project", "the refusal does not say how to grant a project that arrives later")
+}
+
+// A migration creates the project on the target, and its first build needs the
+// grant already in place, so the grant has to be possible beforehand.
+func TestCredentialsAllowStoresAProjectStillToComeWhenAsked(t *testing.T) {
+	clientset := k8sfake.NewClientset(sharedCredentialSecret(t, sharedcred.Entry{Name: "forge"}))
+	var out bytes.Buffer
+
+	require.NoError(t, grantSharedCredential(context.Background(), clientset, projectsExist("blog"), "forge", []string{"shop"}, true, &out))
+
+	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"))
+	assert.Contains(t, out.String(), "shop does not exist on this cluster yet", "the grant does not say that the project is missing")
+}
+
 func TestCredentialsAllowStoresAProjectThatExists(t *testing.T) {
 	clientset := k8sfake.NewClientset(sharedCredentialSecret(t, sharedcred.Entry{Name: "forge"}))
 	dyn := dynamicfake.NewSimpleDynamicClient(projectScheme(), projectCR("shop"))
 
-	require.NoError(t, grantSharedCredential(context.Background(), clientset, dyn, "forge", []string{"shop"}, &bytes.Buffer{}))
+	require.NoError(t, grantSharedCredential(context.Background(), clientset, dyn, "forge", []string{"shop"}, false, &bytes.Buffer{}))
 
 	entries := storedEntries(t, clientset)
 	assert.True(t, entries[0].AllowsProject("shop"))
@@ -196,7 +217,7 @@ func TestCredentialsAllowNamesTheRegistryCredentialInTheRemedy(t *testing.T) {
 		})
 	dyn := dynamicfake.NewSimpleDynamicClient(projectScheme(), projectCR("shop"))
 
-	err := grantSharedCredential(context.Background(), clientset, dyn, "ghcr", []string{"shop"}, &bytes.Buffer{})
+	err := grantSharedCredential(context.Background(), clientset, dyn, "ghcr", []string{"shop"}, false, &bytes.Buffer{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kip registry allow ghcr",
@@ -220,7 +241,7 @@ func TestCredentialsAllowKeepsARealFailureVisible(t *testing.T) {
 	})
 	dyn := dynamicfake.NewSimpleDynamicClient(projectScheme(), projectCR("shop"))
 
-	err := grantSharedCredential(context.Background(), clientset, dyn, "ghcr", []string{"shop"}, &bytes.Buffer{})
+	err := grantSharedCredential(context.Background(), clientset, dyn, "ghcr", []string{"shop"}, false, &bytes.Buffer{})
 
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "registry credential",
@@ -238,6 +259,15 @@ func TestRevokeRemovesTheProjectAsTypedAndAsTheClusterKnowsIt(t *testing.T) {
 
 	assert.Contains(t, forms, "shop", "a bare name left by an older writer cannot be revoked")
 	assert.Contains(t, forms, "acme-shop", "the name a grant is stored under cannot be revoked")
+}
+
+// A migration creates the project under the source's name, with no prefix of
+// the target's org, so a grant made ahead of it has to name exactly that.
+func TestGrantedNamesKeepAProjectStillToComeAsTyped(t *testing.T) {
+	org := &config.Cluster{Org: "acme"}
+
+	assert.Equal(t, []string{"acme-shop"}, grantedNames(org, []string{"shop"}, false))
+	assert.Equal(t, []string{"shop"}, grantedNames(org, []string{"shop"}, true))
 }
 
 func TestRevocableFormsDoesNotRepeatANameThatNeedsNoPrefix(t *testing.T) {

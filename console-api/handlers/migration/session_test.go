@@ -143,3 +143,48 @@ func TestSessionStore_DeleteRemovesSecret(t *testing.T) {
 		t.Fatal("deleted session must not be restored")
 	}
 }
+
+// TestEnterVerificationKeepsACancelledSessionCancelled covers cancellation
+// after the last project is copied and before verification starts. Restoring
+// the verifying status would block later starts until the user cancels again.
+func TestEnterVerificationKeepsACancelledSessionCancelled(t *testing.T) {
+	s := &Session{ID: "s1", Status: SessionRunning}
+	_, _ = s.MarkCancelled()
+
+	if s.EnterVerification() {
+		t.Fatal("a canceled session entered verification")
+	}
+	if got := s.CurrentStatus(); got != SessionCancelled {
+		t.Fatalf("status = %s, want canceled", got)
+	}
+
+	running := &Session{ID: "s2", Status: SessionRunning}
+	if !running.EnterVerification() || running.CurrentStatus() != SessionVerifying {
+		t.Fatalf("a running session must enter verification, got %s", running.CurrentStatus())
+	}
+}
+
+// TestFailKeepsACancelledSessionCancelled covers errors reported after
+// cancellation, such as a domain lookup interrupted by the canceled context.
+// The session keeps its canceled status.
+func TestFailKeepsACancelledSessionCancelled(t *testing.T) {
+	s := &Session{ID: "s1", Status: SessionRunning}
+	_, _ = s.MarkCancelled()
+
+	if s.Fail("classifying app domains: context canceled") {
+		t.Fatal("a canceled session was marked failed")
+	}
+	if got := s.CurrentStatus(); got != SessionCancelled {
+		t.Fatalf("status = %s, want canceled", got)
+	}
+	if s.Error != "" {
+		t.Fatalf("error = %q, want none on a canceled session", s.Error)
+	}
+
+	for _, status := range []SessionStatus{SessionRunning, SessionVerifying} {
+		open := &Session{ID: "s2", Status: status}
+		if !open.Fail("boom") || open.CurrentStatus() != SessionFailed || open.Error != "boom" || open.CompletedAt == nil {
+			t.Fatalf("a %s session must fail, got %s", status, open.CurrentStatus())
+		}
+	}
+}

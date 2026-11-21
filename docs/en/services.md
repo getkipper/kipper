@@ -569,7 +569,7 @@ Accepted formats per engine:
 | postgres | `pg_dump -F c` custom dumps or plain SQL (plain or gzipped) | custom-format dump (`.dump`) |
 | mysql | SQL scripts (plain or gzipped) | gzipped SQL (`.sql.gz`) |
 
-The format is detected from the file's content. Postgres and MySQL default to the service's own database; pass `--database` to target a different one. A MongoDB archive restores the databases it contains; add `--database` and `--source-database` together to rename on restore:
+The format is detected from the file's content. Postgres and MySQL default to the service's own database. Pass `--database` to target a different one. A database that does not exist yet is created, and on MySQL the service user is granted access to it. A Postgres archive is restored without its original owners and grants, so everything it creates belongs to the service user. A MongoDB archive restores the databases it contains. Add `--database` and `--source-database` together to rename on restore:
 
 ```bash
 kip service import mongodb --file prod-backup.archive.gz --database acme --source-database prod
@@ -589,6 +589,8 @@ kip service export mydb --file nightly.dump --database app
   ✔  Exported nightly.dump (12.4 MiB)
   Restore with: kip service import mydb --file nightly.dump
 ```
+
+Both commands find the service using `--project` and `--environment`, which kip resolves with the cluster's organization prefix. Use `--namespace` to specify the exact service namespace. The migration's manual steps use this flag to reach the same service on both clusters.
 
 The dump contains the whole database, so the export creates a file with owner-only read and write permissions and rejects existing regular files. You can also write to an existing device or pipe such as `/dev/stdout` to send the dump to another tool.
 

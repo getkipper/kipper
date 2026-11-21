@@ -66,7 +66,7 @@ On an allowed request, the gate adds two headers identifying the caller before i
 - `X-Kipper-Key-Prefix` is the key's stable public handle, for example `ab12cd34`. Use this as the consumer identifier in your own logs and per-tenant logic.
 - `X-Kipper-Key-Name` is the display name you gave the key, when it has one.
 
-On the ingress route, client-supplied copies of these headers are stripped before the gate sets them. Direct connections to the pod bypass that protection; restrict those connections before relying on the headers for authorization.
+On the ingress route, client-supplied copies of these headers, including underscore variants such as `X_Kipper_Key_Name`, are stripped before the gate sets them (see [Request header names](/en/routing#request-header-names)). Direct connections to the pod bypass that protection. Restrict those connections before relying on the headers for authorization.
 
 ## Expiry
 

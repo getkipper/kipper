@@ -38,7 +38,7 @@ import * as api from '@/api/apps'
 import type { AppStop } from '@/api/types'
 import type { AppLink, AutoscaleConfig } from '@/api/apps'
 import { sizingNotice, trackedMetrics } from '@/utils/capacity'
-import { gitCardState as deriveGitCardState, imageCardState as deriveImageCardState } from '@/utils/deployMethods'
+import { buildMessageTone, gitCardState as deriveGitCardState, imageCardState as deriveImageCardState } from '@/utils/deployMethods'
 import { formatDateTime } from '@/utils/datetime'
 import { isSensitiveEnvVar } from '@/utils/sensitiveEnv'
 import EnvVariableValue from './EnvVariableValue.vue'
@@ -1442,6 +1442,11 @@ async function handleDismissRecommendation() {
 
 // Source / Build
 const buildStatus = ref<api.BuildStatus | null>(null)
+const buildMessageText = {
+  info: 'text-slate-700 dark:text-slate-300',
+  warning: 'text-amber-800 dark:text-slate-300',
+  danger: 'text-red-700 dark:text-slate-300',
+}
 const buildLoading = ref(false)
 const sourceDetailsOpen = ref(false)
 const rebuilding = ref(false)
@@ -3435,9 +3440,9 @@ function openOptimise() {
 
                 <NoticeCallout
                   v-if="buildStatus.message"
-                  :tone="buildStatus.phase === 'Discarded' ? 'warning' : 'danger'"
+                  :tone="buildMessageTone(buildStatus.phase)"
                   class="p-2 text-xs"
-                  :class="buildStatus.phase === 'Discarded' ? 'text-amber-800 dark:text-slate-300' : 'text-red-700 dark:text-slate-300'"
+                  :class="buildMessageText[buildMessageTone(buildStatus.phase)]"
                 >
                   {{ buildStatus.message }}
                 </NoticeCallout>

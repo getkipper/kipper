@@ -89,16 +89,15 @@ func startTestTarget(onAccept func()) *httptest.Server {
 
 // issueMatchingReceipt issues a receipt whose digest matches the live plan,
 // the way the plan endpoint would.
-func issueMatchingReceipt(t *testing.T, h *Handler, claims *middleware.Claims, token *Token, projects, overwrites []string) string {
+func issueMatchingReceipt(t *testing.T, h *Handler, claims *middleware.Claims, token *Token, projects []string) string {
 	t.Helper()
-	current := h.buildPlan(context.Background(), claims, token, projects, overwrites, nil, false)
+	current := h.buildPlan(context.Background(), claims, token, projects, nil, nil, false)
 	receipt, err := h.issueReceipt(planReceipt{
-		User:       receiptUser(claims),
-		TokenFP:    tokenFingerprint(token),
-		Projects:   canonicalProjects(projects),
-		Overwrites: canonicalProjects(overwrites),
-		Digest:     planDigest(current),
-		ExpiresAt:  time.Now().Add(planReceiptTTL),
+		User:      receiptUser(claims),
+		TokenFP:   tokenFingerprint(token),
+		Projects:  canonicalProjects(projects),
+		Digest:    planDigest(current),
+		ExpiresAt: time.Now().Add(planReceiptTTL),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +118,7 @@ func TestStartFailsClosedWithoutStepUp(t *testing.T) {
 	}
 	token, tokenStr := testToken(t, target.URL)
 	claims := planClaims("admin@example.com")
-	receipt := issueMatchingReceipt(t, h, claims, token, []string{"shop"}, nil)
+	receipt := issueMatchingReceipt(t, h, claims, token, []string{"shop"})
 
 	rec := postStart(t, h, map[string]interface{}{
 		"token":        tokenStr,
@@ -149,7 +148,7 @@ func TestStartRefusesBadCode(t *testing.T) {
 	}
 	token, tokenStr := testToken(t, target.URL)
 	claims := planClaims("admin@example.com")
-	receipt := issueMatchingReceipt(t, h, claims, token, []string{"shop"}, nil)
+	receipt := issueMatchingReceipt(t, h, claims, token, []string{"shop"})
 
 	rec := postStart(t, h, map[string]interface{}{
 		"token":        tokenStr,
@@ -217,7 +216,7 @@ func TestStartPrecheckFailureKeepsReceipt(t *testing.T) {
 	}
 	token, tokenStr := testToken(t, target.URL)
 	claims := planClaims("admin@example.com")
-	receipt := issueMatchingReceipt(t, h, claims, token, []string{"shop"}, nil)
+	receipt := issueMatchingReceipt(t, h, claims, token, []string{"shop"})
 
 	// The target goes away between plan and start: recomputation reports a
 	// blocker and refuses.

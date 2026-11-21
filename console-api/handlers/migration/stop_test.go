@@ -132,7 +132,7 @@ func TestMigrateApps_SendsTheStopEachAppCarries(t *testing.T) {
 			listed = &session.Steps[i]
 		}
 	}
-	if listed == nil || !strings.Contains(strings.Join(listed.ManualSteps, "\n"), "kip app start worker --project shop --environment prod") {
+	if listed == nil || !strings.Contains(strings.Join(listed.ManualSteps, "\n"), "kip app start worker --namespace shop-prod") {
 		t.Errorf("the completion screen does not say how to start them: %+v", listed)
 	}
 }
