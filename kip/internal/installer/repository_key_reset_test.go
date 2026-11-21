@@ -1052,3 +1052,11 @@ func TestRepositoryKeyResetKeepsVelerosReasonWhenLaterReadsFail(t *testing.T) {
 	assert.Contains(t, err.Error(), "Velero reports: Access Denied. Run", "one period between Velero's text and kip's")
 	assert.NotContains(t, err.Error(), "transport diagnostic")
 }
+
+func TestResetNamesWhyAnEndpointWithCredentialsIsRefused(t *testing.T) {
+	_, err := cleanupEndpoint(liveLocation{s3URL: "https://key:secret@s3.example.com"}) //nolint:gosec // G101: a synthetic credentials fixture
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "secret")
+	assert.Contains(t, err.Error(), "user information")
+}

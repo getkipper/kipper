@@ -285,7 +285,7 @@ func (r *RepositoryKeyReset) sameLocation() error {
 		return err
 	}
 	if live.bucket != r.Bucket || endpoint != r.Endpoint {
-		return fmt.Errorf("the backup location changed from bucket %s at %s to bucket %s at %s since kip asked for confirmation", r.Bucket, r.Endpoint, live.bucket, endpoint)
+		return fmt.Errorf("the backup location changed from bucket %s at %s to bucket %s at %s since kip asked for confirmation", r.Bucket, DisplayEndpoint(r.Endpoint), live.bucket, DisplayEndpoint(endpoint))
 	}
 	return nil
 }
@@ -300,7 +300,7 @@ func cleanupEndpoint(live liveLocation) (string, error) {
 		return "https://s3." + live.region + ".amazonaws.com", nil
 	}
 	if _, ok := plainEndpoint(live.s3URL); !ok {
-		return "", fmt.Errorf("the backup location's endpoint %q is not an HTTP or HTTPS URL without a path", live.s3URL)
+		return "", fmt.Errorf("the backup location's endpoint %s must be an HTTP or HTTPS URL with only a host and an optional root slash. Remove any user information, path beyond the root slash, query or fragment. Store credentials in the backup location's credentials Secret", DisplayEndpoint(live.s3URL))
 	}
 	return normalizeEndpoint(live.s3URL), nil
 }

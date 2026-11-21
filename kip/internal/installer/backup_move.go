@@ -48,8 +48,10 @@ func (l StorageLocation) sameBucket(o StorageLocation) bool {
 }
 
 // String names the bucket and its store, such as "backups at AWS S3".
+// DisplayEndpoint formats the endpoint, omitting URL user information, queries
+// and fragments.
 func (l StorageLocation) String() string {
-	return l.Bucket + " at " + describeEndpoint(l.Endpoint)
+	return l.Bucket + " at " + DisplayEndpoint(l.Endpoint)
 }
 
 // BackupStorageMove records an unfinished move so it can resume from its last phase.
@@ -60,6 +62,10 @@ type BackupStorageMove struct {
 	StartedAt    string          `json:"startedAt"`
 	SSEGenerated bool            `json:"sseGenerated,omitempty"`
 }
+
+// Cancelable reports whether kip backup storage set --abort can cancel the move.
+// Cancellation is allowed only during preparation, before the switch begins.
+func (m BackupStorageMove) Cancelable() bool { return m.Phase == movePreparing }
 
 // PreviousLocation is the location a cluster moved away from, kept until
 // kip backup storage retire-previous.

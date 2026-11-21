@@ -148,11 +148,19 @@ type backupTarget struct {
 // https://s3.example.com name the same location.
 func normalizeEndpoint(s3URL string) string { return strings.TrimRight(s3URL, "/") }
 
-func describeEndpoint(s3URL string) string {
-	if s3URL == "" {
+// DisplayEndpoint strips URL user information, queries and fragments for display.
+// It preserves the scheme, host and path, then removes trailing slashes.
+// It returns "AWS S3" for an empty endpoint and "(withheld, not a URL)" when
+// URL parsing fails or the host is empty.
+func DisplayEndpoint(endpoint string) string {
+	if endpoint == "" {
 		return "AWS S3"
 	}
-	return normalizeEndpoint(s3URL)
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "(withheld, not a URL)"
+	}
+	return normalizeEndpoint((&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String())
 }
 
 // newBackupTarget describes the location cfg configures, or in-cluster MinIO
@@ -182,7 +190,7 @@ func newBackupTarget(cfg *BackupStorageConfig, minioPassword string) (backupTarg
 		if !ok {
 			// Defer listing restrictions so upgrades can reuse an endpoint
 			// that Velero already accepts. A move or a missing key may need a listing.
-			t.noList = fmt.Sprintf("listing bucket contents requires an HTTP or HTTPS endpoint with no credentials, path, query or fragment. Got %q", cfg.Endpoint)
+			t.noList = fmt.Sprintf("listing bucket contents requires an HTTP or HTTPS endpoint with no credentials, path, query or fragment. Got %s", DisplayEndpoint(cfg.Endpoint))
 			return t, nil
 		}
 		scheme, host = u.Scheme, u.Host
@@ -319,11 +327,11 @@ func refuseMoveToPopulatedBucket(client CommandRunner, check *bucketCheck) error
 	populated, err := check.populated()
 	if err != nil {
 		return fmt.Errorf("backups move from bucket %s at %s to bucket %s at %s, which kip must check for existing backups first: %w. Re-run kip install with the storage credentials",
-			liveBucket, describeEndpoint(liveURL), check.target.bucket, describeEndpoint(check.target.s3URL), err)
+			liveBucket, DisplayEndpoint(liveURL), check.target.bucket, DisplayEndpoint(check.target.s3URL), err)
 	}
 	if populated {
 		return fmt.Errorf("backups move from bucket %s at %s to bucket %s at %s, which already holds backups, possibly another cluster's. Point this cluster at an empty bucket",
-			liveBucket, describeEndpoint(liveURL), check.target.bucket, describeEndpoint(check.target.s3URL))
+			liveBucket, DisplayEndpoint(liveURL), check.target.bucket, DisplayEndpoint(check.target.s3URL))
 	}
 	return nil
 }

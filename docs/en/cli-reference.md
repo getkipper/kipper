@@ -1418,7 +1418,7 @@ CLI credential reads require Kubernetes permission to read the relevant Secret. 
 
 ## kip backup {#kip-backup}
 
-Create, list, and restore cluster backups using Velero.
+Create, list, and restore cluster backups using Velero. Velero's resources live in the `velero` namespace, outside the scope of project roles. The `kip backup` commands therefore require cluster admin rights or access granted to that namespace. A drill also creates and deletes its own namespace, so it requires permission to create and delete namespaces.
 
 ```bash
 kip backup create                                                   # backup user namespaces (system namespaces excluded by default)
@@ -1430,6 +1430,7 @@ kip backup describe velero-daily-apps-20260413030000                # how a back
 kip backup restore weekly-20260413
 kip backup restore weekly-20260413 --namespace blog-prod      # restore one namespace
 kip backup schedules                                                # list scheduled backups
+kip backup storage show                                             # bucket, region, endpoint and encryption of the backup location
 kip backup storage resize --size 30Gi                               # grow the in-cluster MinIO volume
 kip backup storage set --bucket example-new-backups --region hel1 ...  # send future backups to another empty external bucket
 kip backup storage retire-previous                                  # forget the previous backup location
@@ -1451,6 +1452,8 @@ The `nano` profile blocks `kip backup drill` because running a second copy of a 
 `kip backup sse-key export` does the same for the SSE-C key of a cluster whose backups use SSE-C, writing it as base64 text that `--backup-storage-sse-c-key-file` reads back. With `--previous kipper-backup-sse-key-previous-<timestamp>`, it exports the old key that kip saved when a key file replaced an unused SSE-C key. See [SSE-C](/en/installation#backup-sse-c).
 
 `kip backup repository-key reset` replaces the key. It deletes every backup in the bucket, because the old ones cannot be read with a new key, then takes a full backup from each schedule. It asks for the bucket's name before deleting anything. Use `--yes` to skip the prompt. Like `kip cluster encrypt-secrets`, it requires SSH access to the server. See [The backup repository key](/en/installation#backup-repository-key).
+
+`kip backup storage show` prints where Velero writes backups: in-cluster MinIO, or the external bucket with its region and endpoint. It also shows how the store encrypts the backup objects: SSE-C, SSE-S3, the provider's default, or not at all for in-cluster MinIO, which stores them as written. Volume data in the objects is encrypted with the backup repository key in every case. It reports whether the location is read-only and whether the credentials Secret exists. For Velero, it shows when the server last checked the location or reports that the server is stopped. During or after `kip backup storage set`, it shows any unfinished move and recorded previous bucket. It never prints credentials or keys.
 
 `kip backup storage resize` grows the in-cluster MinIO backup volume and waits up to five minutes for it to report the requested capacity. Run it again with the same size to resume waiting. The size must be at least the volume's current storage request. Manage external backup storage through its provider.
 

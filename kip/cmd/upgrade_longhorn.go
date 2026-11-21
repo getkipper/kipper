@@ -291,7 +291,7 @@ func backupLocationProblem(ctx context.Context, cs kubernetes.Interface, dyn dyn
 		host = u.Hostname()
 	}
 	if host == "" {
-		return fmt.Sprintf("%skip cannot read the endpoint %q of Velero's backup location. %s", need, endpoint, longhornBackupFix), nil
+		return fmt.Sprintf("%skip cannot read the endpoint %s of Velero's backup location. %s", need, installer.DisplayEndpoint(endpoint), longhornBackupFix), nil
 	}
 	nsList, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {

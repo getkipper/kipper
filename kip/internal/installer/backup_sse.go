@@ -424,7 +424,7 @@ func CheckSSECStorage(cfg *BackupStorageConfig) error {
 			"Native AWS S3 backups are already encrypted with SSE-S3, so leave --backup-storage-sse-c off")
 	}
 	if !strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
-		return fmt.Errorf("SSE-C needs an HTTPS endpoint, because S3 refuses customer keys sent over plain HTTP. Got %q", cfg.Endpoint)
+		return fmt.Errorf("SSE-C needs an HTTPS endpoint, because S3 refuses customer keys sent over plain HTTP. Got %s", DisplayEndpoint(cfg.Endpoint))
 	}
 	return nil
 }

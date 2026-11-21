@@ -460,6 +460,8 @@ flowchart LR
 - Local `~/.kip/config.yaml` records mode + bucket + region + endpoint, never the keys
 - With SSE-C, which `kip install` turns on where the store supports it, the store encrypts Velero's own objects with a key in the `kipper-backup-sse-key` Secret, and volume data stays encrypted by the backup repository key. See [SSE-C](/en/installation#backup-sse-c)
 
+`kip backup storage show` shows whether backups go to in-cluster MinIO or an external bucket. For external storage, it prints the bucket, region and endpoint. It also shows the configured object encryption. For Velero, it shows when the server last checked the location or reports that the server is stopped. Credentials are never printed.
+
 To rotate keys later, run `kip install` again with the updated credentials file pointing at the same host. That replaces the Secret in place. Note it re-runs the rest of the install too, which is not free: see [what an upgrade moves](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not).
 
 ## Move backups to another bucket {#move-backup-storage}
