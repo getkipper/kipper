@@ -106,7 +106,7 @@ func readLonghornSnapshot(client CommandRunner) (longhornSnapshot, error) {
 	} {
 		out, err := client.Run(read.query)
 		if err != nil {
-			return snap, fmt.Errorf("reading %s: %w", read.what, err)
+			return snap, failedRead("reading "+read.what, out, err)
 		}
 		if err := read.parse(jsonPayload(out), &snap); err != nil {
 			return snap, fmt.Errorf("reading %s: %w", read.what, err)

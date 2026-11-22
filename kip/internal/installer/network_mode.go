@@ -524,7 +524,7 @@ func clusterNetworks(server CommandRunner) (map[string]netip.Prefix, error) {
 
 	out, err := server.Run(`kubectl get nodes -l ` + ServerNodeLabel + `=true -o jsonpath='{.items[*].spec.podCIDR}' 2>/dev/null`)
 	if err != nil {
-		return nil, fmt.Errorf("reading the cluster's pod network: %w", err)
+		return nil, failedRead("reading the cluster's pod network", out, err)
 	}
 	ranges := strings.Fields(out)
 	if len(ranges) == 0 {
@@ -538,7 +538,7 @@ func clusterNetworks(server CommandRunner) (map[string]netip.Prefix, error) {
 	}
 	out, err = server.Run(`kubectl get service kubernetes -n default -o jsonpath='{.spec.clusterIP}' 2>/dev/null`)
 	if err != nil {
-		return nil, fmt.Errorf("reading the cluster's Service network: %w", err)
+		return nil, failedRead("reading the cluster's Service network", out, err)
 	}
 	if a, err := netip.ParseAddr(strings.TrimSpace(out)); err != nil || !service.Contains(a) {
 		return nil, fmt.Errorf("the kubernetes Service address %q is outside %s, so kip cannot determine the cluster networks", strings.TrimSpace(out), service)

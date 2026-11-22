@@ -226,15 +226,15 @@ func veleroWritesExternally(client CommandRunner) (bool, error) {
 		if identityAbsentFromKubectl(out) {
 			return false, nil
 		}
-		return false, fmt.Errorf("reading Velero's backup location: %w: %s", err, strings.TrimSpace(out))
+		return false, failedRead("reading Velero's backup location", out, err)
 	}
 	start := strings.Index(out, "bsl[")
 	if start < 0 {
-		return false, fmt.Errorf("reading Velero's backup location: unexpected output %q", strings.TrimSpace(out))
+		return false, fmt.Errorf("reading Velero's backup location: unexpected output of %d bytes. The output is hidden because it may contain credentials", len(out))
 	}
 	end := strings.Index(out[start:], "]")
 	if end < 0 {
-		return false, fmt.Errorf("reading Velero's backup location: unexpected output %q", strings.TrimSpace(out))
+		return false, fmt.Errorf("reading Velero's backup location: unexpected output of %d bytes. The output is hidden because it may contain credentials", len(out))
 	}
 	return out[start+len("bsl["):start+end] != inClusterMinIOURL, nil
 }
@@ -335,7 +335,7 @@ const recordLegacyStorageCommand = `s=$(kubectl get platformconfig platform -o j
 func ReadPlatformStateViaSSH(client CommandRunner) (PlatformState, error) {
 	out, err := client.Run("kubectl get platformconfig platform -o " + platformStateJSONPath)
 	if err != nil {
-		return PlatformState{}, fmt.Errorf("reading PlatformConfig over SSH: %w", err)
+		return PlatformState{}, failedRead("reading PlatformConfig over SSH", out, err)
 	}
 	return parsePlatformStateJSONPath(out), nil
 }

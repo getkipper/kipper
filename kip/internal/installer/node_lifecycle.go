@@ -28,7 +28,13 @@ type LeaseServer interface {
 
 // ErrNodeLeaseLost reports that this run no longer holds the node lease, so
 // the command it was about to run did not start.
-var ErrNodeLeaseLost = errors.New("this kip run no longer holds the node lifecycle lease, so it stopped before changing anything else. Run the command again")
+var ErrNodeLeaseLost error = leaseRefusal("this kip run no longer holds the node lifecycle lease, so it stopped before changing anything else. Run the command again")
+
+// leaseRefusal reports a command refused by the node lease using fixed text
+// that is safe to display without exposing command output.
+type leaseRefusal string
+
+func (e leaseRefusal) Error() string { return string(e) }
 
 const (
 	leaseAcquired = "kipper-node-lease-acquired"
@@ -291,7 +297,7 @@ func fencedResult(out string, err error, fenced, command string) (string, error)
 	case strings.Contains(out, leaseLost):
 		return "", ErrNodeLeaseLost
 	case strings.Contains(out, leaseHostBusy):
-		return "", fmt.Errorf("a command from an interrupted kip node run is still running on this host after %d seconds. Run this command again once it has finished", leaseWaitSecs)
+		return "", leaseRefusal(fmt.Sprintf("a command from an interrupted kip node run is still running on this host after %d seconds. Run this command again once it has finished", leaseWaitSecs))
 	}
 	return out, fenceHidden{err: err, fenced: fenced, command: command}
 }
@@ -307,7 +313,15 @@ func (e fenceHidden) Error() string {
 	return strings.Replace(e.err.Error(), strconv.Quote(e.fenced), strconv.Quote(e.command), 1)
 }
 
-func (e fenceHidden) Unwrap() error { return e.err }
+// Unwrap returns the runner's underlying cause, or its error if it has no cause,
+// as fencedError does. Skipping the runner's wrapper lets callers omit the fence
+// script and command output, which may contain a join token or a kubeconfig.
+func (e fenceHidden) Unwrap() error {
+	if cause := errors.Unwrap(e.err); cause != nil {
+		return cause
+	}
+	return e.err
+}
 
 // readLine builds a shell substitution that reads one line from stdin, or
 // returns empty output at EOF or after leaseQuietSecs. The shell reads one

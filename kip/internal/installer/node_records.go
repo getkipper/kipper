@@ -109,7 +109,7 @@ func ReadNodeRecords(client CommandRunner) ([]NodeRecord, error) {
 	out, err := client.Run(fmt.Sprintf("kubectl -n %s get configmap %s --ignore-not-found -o jsonpath='{.data}' 2>/dev/null",
 		NodeRecordsNamespace, NodeRecordsConfigMap))
 	if err != nil {
-		return nil, fmt.Errorf("reading the node records: %w", err)
+		return nil, failedRead("reading the node records", out, err)
 	}
 	return parseNodeRecords(out)
 }
@@ -258,7 +258,7 @@ func UnrecordedIdentities(nodes []NodeIdentity, records []NodeRecord) ([]string,
 func listNodeIdentities(client CommandRunner) (string, error) {
 	out, err := client.Run(`kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}|{.status.nodeInfo.machineID}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return "", fmt.Errorf("listing nodes: %w", err)
+		return "", failedRead("listing nodes", out, err)
 	}
 	return out, nil
 }

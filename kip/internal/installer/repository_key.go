@@ -231,7 +231,7 @@ func prepareBackupRepository(client CommandRunner, target backupTarget, check *b
 
 	out, err := client.Run("kubectl -n velero get secret " + repositoryKeySecret + " --ignore-not-found -o name 2>/dev/null")
 	if err != nil {
-		return fmt.Errorf("checking for the backup repository key: %w", err)
+		return failedRead("checking for the backup repository key", out, err)
 	}
 	if strings.TrimSpace(out) == "secret/"+repositoryKeySecret {
 		if key != nil {
@@ -350,14 +350,14 @@ type liveLocation struct {
 func liveBackupLocation(client CommandRunner) (liveLocation, error) {
 	crd, err := client.Run("kubectl get crd backupstoragelocations.velero.io --ignore-not-found -o name 2>/dev/null")
 	if err != nil {
-		return liveLocation{}, fmt.Errorf("checking for Velero: %w", err)
+		return liveLocation{}, failedRead("checking for Velero", crd, err)
 	}
 	if strings.TrimSpace(crd) == "" {
 		return liveLocation{}, nil
 	}
 	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}|{.spec.config.customerKeyEncryptionSecret}|{.spec.config.region}|{.spec.objectStorage.prefix}|{.spec.accessMode}' 2>/dev/null`)
 	if err != nil {
-		return liveLocation{}, fmt.Errorf("reading the current backup location: %w", err)
+		return liveLocation{}, failedRead("reading the current backup location", out, err)
 	}
 	fields := strings.SplitN(strings.TrimSpace(out), "|", 6)
 	for len(fields) < 6 {
@@ -444,7 +444,7 @@ func waitForJobLogs(client CommandRunner, job, what string, timeout time.Duratio
 	for {
 		status, err := client.Run(fmt.Sprintf("kubectl -n velero get job %s -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null", job))
 		if err != nil {
-			return "", fmt.Errorf("waiting for %s: %w", what, err)
+			return "", failedRead(fmt.Sprintf("waiting for %s", what), status, err)
 		}
 		if succeeded, failed, _ := strings.Cut(strings.TrimSpace(status), "/"); succeeded == "1" || failed == "1" {
 			break
@@ -457,7 +457,7 @@ func waitForJobLogs(client CommandRunner, job, what string, timeout time.Duratio
 
 	logs, err := client.Run(fmt.Sprintf("kubectl -n velero logs job/%s --tail=20", job))
 	if err != nil {
-		return "", fmt.Errorf("reading the result of %s: %w", what, err)
+		return "", failedRead("reading the result of "+what, logs, err)
 	}
 	return logs, nil
 }

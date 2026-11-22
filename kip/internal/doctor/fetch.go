@@ -10,9 +10,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/getkipper/kipper/controller/pkg/hopca"
+	"github.com/getkipper/kipper/kip/internal/readfailure"
 )
 
 // Runner runs a shell command on the cluster's server and returns its output.
+// Failed commands must return all captured output in the string result. Errors
+// must not include additional command output because readfailure.Error preserves
+// the error when the returned output is blank.
 type Runner interface {
 	Run(command string) (string, error)
 }
@@ -149,26 +153,26 @@ func FetchOverSSH(r Runner) Snapshot {
 	}
 
 	if out, err := r.Run("kubectl get clusteridentities.kipper.run cluster --ignore-not-found -o jsonpath='{.spec.gateway.clusterHost}' " + requestTimeout); err != nil {
-		snap.Missing[PartClusterHost] = commandError(err)
+		snap.Missing[PartClusterHost] = commandError(out, err)
 	} else {
 		snap.ClusterHost = withoutWarnings(out)
 	}
 
 	if out, err := r.Run("kubectl get platformconfigs.kipper.run platform --ignore-not-found -o jsonpath='{.spec.profile}' " + requestTimeout); err != nil {
-		snap.Missing[PartProfile] = commandError(err)
+		snap.Missing[PartProfile] = commandError(out, err)
 	} else {
 		snap.Profile = withoutWarnings(out)
 	}
 
 	if out, err := r.Run("kubectl get platformconfigs.kipper.run platform --ignore-not-found -o jsonpath='{.spec.storage}' " + requestTimeout); err != nil {
-		snap.Missing[PartStorage] = commandError(err)
+		snap.Missing[PartStorage] = commandError(out, err)
 	} else {
 		snap.Storage = withoutWarnings(out)
 	}
 
 	// Filter locally so a failed kubectl command remains distinguishable from an empty log.
 	if out, err := r.Run(fmt.Sprintf("kubectl -n %s logs deploy/console-api --since=48h --timestamps %s", hopNamespace, requestTimeout)); err != nil {
-		snap.Missing[PartHeartbeat] = commandError(err)
+		snap.Missing[PartHeartbeat] = commandError(out, err)
 	} else {
 		var lines []string
 		for _, line := range nonEmptyLines(out) {
@@ -190,7 +194,7 @@ func FetchOverSSH(r Runner) Snapshot {
 func runJSON(r Runner, command string, into any) error {
 	out, err := r.Run(command)
 	if err != nil {
-		return commandError(err)
+		return commandError(out, err)
 	}
 	// kubectl can print warnings ahead of the document, and the runner merges them into the output.
 	if i := strings.IndexByte(out, '{'); i > 0 {
@@ -215,8 +219,10 @@ func readSecretKey(r Runner, namespace, name, key string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-func commandError(err error) error {
-	return fmt.Errorf("%s", strings.TrimSpace(err.Error()))
+// commandError describes a failed kubectl command without its output, which
+// the SSH runner repeats in err and which can hold object data.
+func commandError(out string, err error) error {
+	return readfailure.Error("kubectl", out, err)
 }
 
 // withoutWarnings drops the warning lines kubectl prints ahead of a value.

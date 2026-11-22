@@ -153,7 +153,7 @@ func SurveyRepositoryKeyReset(client CommandRunner) (*RepositoryKeyReset, error)
 	r.Backups = backups
 	out, err := client.Run("kubectl -n velero get backuprepositories.velero.io -o name 2>/dev/null")
 	if err != nil {
-		return nil, fmt.Errorf("listing Velero's backup repositories: %w", err)
+		return nil, failedRead("listing Velero's backup repositories", out, err)
 	}
 	r.Repositories = len(nonEmptyLines(out))
 
@@ -198,7 +198,7 @@ func resettableLocation(client CommandRunner) (liveLocation, string, error) {
 func countBackupLocations(client CommandRunner) (int, error) {
 	out, err := client.Run("kubectl -n velero get backupstoragelocations.velero.io -o name 2>/dev/null")
 	if err != nil {
-		return 0, fmt.Errorf("listing Velero's backup locations: %w", err)
+		return 0, failedRead("listing Velero's backup locations", out, err)
 	}
 	return len(nonEmptyLines(out)), nil
 }
@@ -210,7 +210,7 @@ func countBackupLocations(client CommandRunner) (int, error) {
 func unscopedSchedule(client CommandRunner) (string, error) {
 	out, err := client.Run(`kubectl -n velero get schedules.velero.io -l app.kubernetes.io/instance=velero,app.kubernetes.io/managed-by=Helm -o jsonpath='{range .items[*]}{.metadata.name}={.spec.template.excludedNamespaceScopedResources}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return "", fmt.Errorf("listing backup schedules: %w", err)
+		return "", failedRead("listing backup schedules", out, err)
 	}
 	for _, line := range nonEmptyLines(out) {
 		name, excluded, _ := strings.Cut(line, "=")
@@ -231,7 +231,7 @@ func unscopedSchedule(client CommandRunner) (string, error) {
 func scopeSchedules(client CommandRunner) error {
 	out, err := client.Run("kubectl -n velero get schedules.velero.io -l app.kubernetes.io/instance=velero,app.kubernetes.io/managed-by=Helm -o name 2>/dev/null")
 	if err != nil {
-		return fmt.Errorf("listing backup schedules: %w", err)
+		return failedRead("listing backup schedules", out, err)
 	}
 	patch, err := json.Marshal(map[string]any{"spec": map[string]any{"template": map[string]any{
 		"excludedNamespaceScopedResources": backupscope.TransientResources(),
@@ -323,7 +323,7 @@ func veleroWork(client CommandRunner) (backups int, running string, err error) {
 	for _, kind := range []string{"backups", "restores"} {
 		out, err := client.Run("kubectl -n velero get " + kind + `.velero.io -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null`)
 		if err != nil {
-			return 0, "", fmt.Errorf("listing Velero %s: %w", kind, err)
+			return 0, "", failedRead(fmt.Sprintf("listing Velero %s", kind), out, err)
 		}
 		for _, line := range nonEmptyLines(out) {
 			name, phase, _ := strings.Cut(line, "=")
@@ -341,7 +341,7 @@ func veleroWork(client CommandRunner) (backups int, running string, err error) {
 func veleroReplicas(client CommandRunner) (int, error) {
 	out, err := client.Run("kubectl -n velero get deploy velero -o jsonpath='{.spec.replicas}' 2>/dev/null")
 	if err != nil {
-		return 0, fmt.Errorf("reading the Velero Deployment: %w", err)
+		return 0, failedRead("reading the Velero Deployment", out, err)
 	}
 	replicas, err := strconv.Atoi(strings.TrimSpace(out))
 	if err != nil {
@@ -364,7 +364,7 @@ func mirrorsOf(client CommandRunner, bucket, endpoint string) ([]BackupMirror, e
 		`{.metadata.annotations.kipper\.run/mirror-target}|{.metadata.annotations.kipper\.run/mirror-retention-days}|` +
 		`{.metadata.annotations.kipper\.run/mirror-max-delete}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return nil, fmt.Errorf("listing backup mirrors: %w", err)
+		return nil, failedRead("listing backup mirrors", out, err)
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -573,7 +573,7 @@ func (r *RepositoryKeyReset) busyVolumeWork() (string, error) {
 	for _, kind := range volumeWorkKinds {
 		out, err := r.client.Run("kubectl -n velero get " + kind + `.velero.io -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null`)
 		if err != nil {
-			return "", fmt.Errorf("listing Velero %s: %w", kind, err)
+			return "", failedRead(fmt.Sprintf("listing Velero %s", kind), out, err)
 		}
 		for _, line := range nonEmptyLines(out) {
 			name, phase, _ := strings.Cut(line, "=")
@@ -592,7 +592,7 @@ func (r *RepositoryKeyReset) busyVolumeWork() (string, error) {
 func (r *RepositoryKeyReset) veleroPods() (int, error) {
 	out, err := r.client.Run("kubectl -n velero get pods -l name=velero -o name 2>/dev/null")
 	if err != nil {
-		return 0, fmt.Errorf("listing Velero's pods: %w", err)
+		return 0, failedRead("listing Velero's pods", out, err)
 	}
 	return len(nonEmptyLines(out)), nil
 }
@@ -628,7 +628,7 @@ func scriptOutput(logs string) string {
 func (r *RepositoryKeyReset) cleanupPods() (int, error) {
 	out, err := r.client.Run("kubectl -n velero get pods -l " + bucketCleanupLabel + " -o name 2>/dev/null")
 	if err != nil {
-		return 0, fmt.Errorf("listing the bucket cleanup pods: %w", err)
+		return 0, failedRead("listing the bucket cleanup pods", out, err)
 	}
 	return len(nonEmptyLines(out)), nil
 }
@@ -838,7 +838,7 @@ func (r *RepositoryKeyReset) startVelero(replicas int) error {
 	var cmds []string
 	out, err := r.client.Run("kubectl -n velero get ds node-agent --ignore-not-found -o name 2>/dev/null")
 	if err != nil {
-		return fmt.Errorf("checking for Velero's node agents: %w", err)
+		return failedRead("checking for Velero's node agents", out, err)
 	}
 	if strings.TrimSpace(out) != "" {
 		// Node agents cache the old repositories and their key.
@@ -885,13 +885,13 @@ func (r *RepositoryKeyReset) startVelero(replicas int) error {
 func (r *RepositoryKeyReset) backUpNow() ([]ResetBackup, error) {
 	out, err := r.client.Run(`kubectl -n velero get schedules.velero.io -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return nil, fmt.Errorf("listing backup schedules: %w", err)
+		return nil, failedRead("listing backup schedules", out, err)
 	}
 	// The Deployment's selector also matches the node agents, so exec through
 	// deploy/velero can land in one of them. The server pod has its own label.
 	running, err := r.client.Run("kubectl -n velero get pods -l name=velero --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}' 2>/dev/null")
 	if err != nil {
-		return nil, fmt.Errorf("finding the Velero pod: %w", err)
+		return nil, failedRead("finding the Velero pod", running, err)
 	}
 	pods := strings.Fields(running)
 	if len(pods) == 0 || !kubernetesNamePattern.MatchString(pods[0]) {
@@ -959,7 +959,7 @@ func (e *unfinishedResetError) Error() string {
 func veleroStoppedByAReset(client CommandRunner) (bool, error) {
 	out, err := client.Run(`kubectl -n velero get deploy velero --ignore-not-found -o jsonpath='{.metadata.annotations.kipper\.run/stopped-by}|{.spec.replicas}' 2>/dev/null`)
 	if err != nil {
-		return false, fmt.Errorf("reading the Velero Deployment: %w", err)
+		return false, failedRead("reading the Velero Deployment", out, err)
 	}
 	return strings.TrimSpace(out) == veleroStoppedByReset+"|0", nil
 }
@@ -1000,7 +1000,7 @@ const veleroChartCheck = `spec=$(kubectl -n kube-system get helmchart velero -o 
 func veleroChartApplied(client CommandRunner) (bool, error) {
 	out, err := client.Run(veleroChartCheck)
 	if err != nil {
-		return false, fmt.Errorf("checking whether the Velero chart is applied: %w", err)
+		return false, failedRead("checking whether the Velero chart is applied", out, err)
 	}
 	f := strings.Fields(out)
 	return len(f) == 6 && f[0] == f[1] && f[2] == f[3] && !strings.Contains(f[4], "--set") &&
@@ -1032,7 +1032,7 @@ var veleroChartFixedInputs = map[string]string{
 func checkVeleroChartInputs(client CommandRunner) error {
 	out, err := client.Run(veleroChartInputsCheck)
 	if err != nil {
-		return fmt.Errorf("reading the Velero HelmChart: %w", err)
+		return failedRead("reading the Velero HelmChart", out, err)
 	}
 	spec, config, _ := strings.Cut(out, "\n")
 	var fields map[string]json.RawMessage

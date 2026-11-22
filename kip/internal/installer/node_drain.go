@@ -41,7 +41,7 @@ func (v NodeVolume) Label() string {
 func RequireEvictionDrainPolicy(master CommandRunner) error {
 	out, err := master.Run(`kubectl -n longhorn-system get settings.longhorn.io node-drain-policy -o jsonpath='{.value}'`)
 	if err != nil {
-		return fmt.Errorf("reading Longhorn's node drain policy: %w", err)
+		return failedRead("reading Longhorn's node drain policy", out, err)
 	}
 	if policy := strings.TrimSpace(out); policy != LonghornEvictionDrainPolicy {
 		return fmt.Errorf("the Longhorn node drain policy is %q. Draining a worker requires %s to copy last healthy replicas to other nodes. Run 'kip upgrade'", policy, LonghornEvictionDrainPolicy)
@@ -65,7 +65,7 @@ func VolumesOnNode(master CommandRunner, node string) ([]NodeVolume, error) {
 	}
 	volumes, err := master.Run(`kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.kubernetesStatus.namespace}{"\t"}{.status.kubernetesStatus.pvcName}{"\n"}{end}'`)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn volumes: %w", err)
+		return nil, failedRead("listing Longhorn volumes", volumes, err)
 	}
 	return volumesOnNode(replicas, available, volumes, node), nil
 }
@@ -126,7 +126,7 @@ type longhornReplica struct {
 func readReplicas(master CommandRunner) ([]longhornReplica, error) {
 	out, err := master.Run(replicaQuery)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn replicas: %w", err)
+		return nil, failedRead("listing Longhorn replicas", out, err)
 	}
 	var replicas []longhornReplica
 	for _, line := range strings.Split(out, "\n") {
@@ -146,7 +146,7 @@ const nodeAvailabilityQuery = `kubectl get nodes --request-timeout=30s -o jsonpa
 func availableNodes(master CommandRunner) (map[string]bool, error) {
 	out, err := master.Run(nodeAvailabilityQuery)
 	if err != nil {
-		return nil, fmt.Errorf("listing nodes: %w", err)
+		return nil, failedRead("listing nodes", out, err)
 	}
 	available := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
@@ -227,7 +227,7 @@ func (v VolumeHealth) Unhealthy() bool { return v.State == "attached" && v.Robus
 func LonghornVolumes(master CommandRunner) ([]VolumeHealth, error) {
 	out, err := master.Run(`kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.kubernetesStatus.namespace}{"\t"}{.status.kubernetesStatus.pvcName}{"\t"}{.status.state}{"\t"}{.status.robustness}{"\t"}{.spec.numberOfReplicas}{"\n"}{end}'`)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn volumes: %w", err)
+		return nil, failedRead("listing Longhorn volumes", out, err)
 	}
 	var volumes []VolumeHealth
 	for _, line := range strings.Split(out, "\n") {
@@ -255,7 +255,7 @@ func LonghornVolumes(master CommandRunner) ([]VolumeHealth, error) {
 func NodeNames(master CommandRunner) ([]string, error) {
 	out, err := master.Run("kubectl get nodes --request-timeout=30s -o name")
 	if err != nil {
-		return nil, fmt.Errorf("listing nodes: %w", err)
+		return nil, failedRead("listing nodes", out, err)
 	}
 	// The SSH runner merges stderr, so only node lines count.
 	var names []string
@@ -280,7 +280,7 @@ func NodeCount(master CommandRunner) (int, error) {
 func NodeCordoned(master CommandRunner, node string) (bool, error) {
 	out, err := master.Run(fmt.Sprintf("kubectl get node %s --request-timeout=30s -o jsonpath='{.spec.unschedulable}'", node))
 	if err != nil {
-		return false, fmt.Errorf("reading node %s: %w", node, err)
+		return false, failedRead(fmt.Sprintf("reading node %s", node), out, err)
 	}
 	return strings.TrimSpace(out) == "true", nil
 }

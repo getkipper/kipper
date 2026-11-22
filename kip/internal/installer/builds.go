@@ -175,7 +175,7 @@ func sealBuildEgress(client CommandRunner) string {
 	out, err := client.Run("kubectl get namespace " + buildNamespace + " --ignore-not-found -o name")
 	switch {
 	case err != nil:
-		return fmt.Sprintf(": and whether build egress in %s is still open could not be determined (%v); check it by hand", buildNamespace, err)
+		return fmt.Sprintf(". Whether build egress in %s is still open could not be determined (%v). Check it manually", buildNamespace, failedRead("reading the namespace", out, err))
 	case strings.TrimSpace(out) == "":
 		// No build namespace, so there is no policy to close and nothing can run.
 		return ""
@@ -267,7 +267,7 @@ func reportsARoutableAddress(out string) bool {
 func buildEgressExcepts(client CommandRunner) ([]string, error) {
 	out, err := client.Run("kubectl get nodes -o json")
 	if err != nil {
-		return nil, fmt.Errorf("reading nodes: %w", err)
+		return nil, failedRead("reading nodes", out, err)
 	}
 	return egressExcepts(out)
 }

@@ -126,7 +126,7 @@ func PlanNetworkChange(client CommandRunner) (NetworkChange, error) {
 func runningFlannelBackend(client CommandRunner) (string, error) {
 	out, err := client.Run(fmt.Sprintf(`kubectl --request-timeout=20s get nodes -l %s=true -o jsonpath='{range .items[*]}{.metadata.annotations.flannel\.alpha\.coreos\.com/backend-type}{"\n"}{end}'`, ServerNodeLabel))
 	if err != nil {
-		return "", fmt.Errorf("reading the server's pod network backend: %w", err)
+		return "", failedRead("reading the server's pod network backend", out, err)
 	}
 	backends := strings.Fields(out)
 	if len(backends) != 1 {
@@ -350,6 +350,10 @@ func waitForServerNodeIP(client CommandRunner, nodeIP string, t networkChangeTim
 			return nil
 		}
 		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("the server node did not report %s as its address within %s: %w", nodeIP, t.start,
+					failedRead("reading the server node's address", out, err))
+			}
 			return fmt.Errorf("the server node did not report %s as its address within %s (it reports %q)", nodeIP, t.start, strings.TrimSpace(out))
 		}
 		time.Sleep(t.interval)
@@ -415,7 +419,7 @@ const noSnapshotMarker = "KIPPER_NO_WORKLOAD_SNAPSHOT"
 func checkNetworkChangeEligible(client CommandRunner) error {
 	out, err := client.Run("kubectl get nodes -o name")
 	if err != nil {
-		return fmt.Errorf("listing nodes: %w", err)
+		return failedRead("listing nodes", out, err)
 	}
 	if nodes := strings.Fields(out); len(nodes) != 1 {
 		return fmt.Errorf("the cluster has %d nodes; changing the pod network requires the server to be the only node. For each worker, run 'k3s-agent-uninstall.sh' on the worker and 'kubectl delete node <name>' on the server. Retry this command, then rejoin each worker with 'kip node add <host>'", len(nodes))
@@ -614,7 +618,7 @@ func waitForWorkloads(client CommandRunner, ready []string, t networkChangeTimeo
 func readyWorkloads(client CommandRunner) ([]string, error) {
 	out, err := client.Run(boundedCommand(`kubectl --request-timeout=20s get deployments,statefulsets,daemonsets -A -o jsonpath='{range .items[*]}{.kind}/{.metadata.namespace}/{.metadata.name} {.spec.replicas}{.status.desiredNumberScheduled} {.status.readyReplicas}{.status.numberReady}{"\n"}{end}'`))
 	if err != nil {
-		return nil, fmt.Errorf("listing workloads: %w", err)
+		return nil, failedRead("listing workloads", out, err)
 	}
 	var ready []string
 	for _, line := range strings.Split(out, "\n") {

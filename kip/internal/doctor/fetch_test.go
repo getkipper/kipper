@@ -135,3 +135,23 @@ func TestFetchOverSSH_IgnoresKubectlWarnings(t *testing.T) {
 	assert.Len(t, snap.Nodes, 1)
 	assert.Equal(t, "small", snap.Profile)
 }
+
+// TestFetchOverSSH_KeepsAFailedReadsOutputOutOfTheReport covers the SSH runner,
+// whose error repeats the command's output, such as a workload's environment.
+func TestFetchOverSSH_KeepsAFailedReadsOutputOutOfTheReport(t *testing.T) {
+	const partial = `{"items":[{"spec":{"template":{"spec":{"containers":[{"env":[{"name":"TOKEN","value":"marker-61c4"}]}]}}}}`
+	for part, route := range map[Part]string{
+		PartNodes:     "get nodes",
+		PartWorkloads: "get deployments",
+		PartHeartbeat: "logs deploy/console-api",
+		PartStorage:   "jsonpath='{.spec.storage}'",
+	} {
+		runner := healthyRunner()
+		runner.routes = append([][3]any{{route, partial, errors.New("running kubectl: exit status 1: " + partial)}}, runner.routes...)
+
+		snap := FetchOverSSH(runner)
+
+		require.Contains(t, snap.Missing, part)
+		assert.NotContains(t, snap.Missing[part].Error(), "marker-61c4", route)
+	}
+}

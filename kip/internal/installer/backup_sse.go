@@ -328,7 +328,7 @@ func sseWarning(format string, args ...any) string {
 func sseKeyExists(client CommandRunner) (bool, error) {
 	out, err := client.Run("kubectl -n velero get secret " + sseKeySecret + " --ignore-not-found -o name 2>/dev/null")
 	if err != nil {
-		return false, fmt.Errorf("checking for the backup SSE-C key: %w", err)
+		return false, failedRead("checking for the backup SSE-C key", out, err)
 	}
 	return strings.TrimSpace(out) == "secret/"+sseKeySecret, nil
 }

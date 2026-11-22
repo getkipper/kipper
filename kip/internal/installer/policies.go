@@ -123,7 +123,7 @@ func recordedCopiesOffer(client CommandRunner) (int32, error) {
 		if strings.Contains(out, "doesn't have a resource type") {
 			return 1, nil
 		}
-		return 0, fmt.Errorf("reading the recorded copies offer: %w: %s", err, strings.TrimSpace(out))
+		return 0, failedRead("reading the recorded copies offer", out, err)
 	}
 	value := ""
 	for _, line := range strings.Split(out, "\n") {
@@ -146,7 +146,7 @@ func recordedCopiesOffer(client CommandRunner) (int32, error) {
 func ServerNodeNames(client CommandRunner) ([]string, error) {
 	out, err := client.Run("kubectl get nodes -l " + ServerNodeLabel + " --request-timeout=30s -o name")
 	if err != nil {
-		return nil, fmt.Errorf("listing the server nodes: %w: %s", err, strings.TrimSpace(out))
+		return nil, failedRead("listing the server nodes", out, err)
 	}
 	var names []string
 	for _, line := range strings.Split(out, "\n") {

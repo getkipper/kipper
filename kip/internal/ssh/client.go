@@ -298,8 +298,22 @@ func controlSocket(cfg Config) string {
 	return path
 }
 
-// Run executes a command on the remote host and returns its combined
-// stdout+stderr output.
+// commandTimedOut reports a command that CommandTimeout stopped. It matches both
+// the process's exit error and context.DeadlineExceeded.
+type commandTimedOut struct {
+	limit time.Duration
+	err   error
+}
+
+func (e commandTimedOut) Error() string {
+	return fmt.Sprintf("ssh command did not finish within %s: %v", e.limit, e.err)
+}
+
+func (e commandTimedOut) Unwrap() []error { return []error{e.err, context.DeadlineExceeded} }
+
+// Run executes a command once on the remote host and returns its combined
+// stdout and stderr. On failure, the error includes the output and wraps the
+// process error. A CommandTimeout expiration also matches context.DeadlineExceeded.
 func (c *Client) Run(command string) (string, error) {
 	out, err := c.attempt(command, nil, nil)
 	if err != nil {
@@ -360,7 +374,7 @@ func (c *Client) attemptRaw(command string, stdin []byte, stream io.Writer) (str
 		out, err = cmd.CombinedOutput()
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		return string(out), fmt.Errorf("ssh command did not finish within %s: %w", c.cfg.CommandTimeout, err)
+		return string(out), commandTimedOut{limit: c.cfg.CommandTimeout, err: err}
 	}
 	return string(out), err
 }
@@ -459,6 +473,8 @@ func (c *Client) RunStream(command string, stdout io.Writer) error {
 
 // RunStreamTo separates remote stdout from stderr and SSH diagnostics so callers
 // can track log offsets. It leaves retries to the caller to avoid duplicate output.
+// Errors wrap the process error. A CommandTimeout expiration also matches
+// context.DeadlineExceeded.
 func (c *Client) RunStreamTo(command string, stdout, stderr io.Writer) error {
 	remote, stdin := stage(c.remoteStreamCommand(command), nil)
 	cmd, ctx, cancel := c.command(append(c.sshArgs(), remote)...)
@@ -470,7 +486,7 @@ func (c *Client) RunStreamTo(command string, stdout, stderr io.Writer) error {
 	cmd.Stderr = stderr
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("ssh command did not finish within %s: %w", c.cfg.CommandTimeout, err)
+		return commandTimedOut{limit: c.cfg.CommandTimeout, err: err}
 	}
 	if err != nil {
 		return fmt.Errorf("running %q on %s: %w", command, c.cfg.Host, err)

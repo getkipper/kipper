@@ -12,14 +12,14 @@ import (
 func longhornNodeExists(master CommandRunner, node string) (bool, error) {
 	crd, err := master.Run("kubectl get crd nodes.longhorn.io --ignore-not-found -o name")
 	if err != nil {
-		return false, fmt.Errorf("checking for Longhorn: %w", err)
+		return false, failedRead("checking for Longhorn", crd, err)
 	}
 	if !listsObject(crd, "customresourcedefinition.apiextensions.k8s.io/nodes.longhorn.io") {
 		return false, nil
 	}
 	out, err := master.Run(fmt.Sprintf("kubectl -n longhorn-system get nodes.longhorn.io %s --ignore-not-found -o name", shellQuote(node)))
 	if err != nil {
-		return false, fmt.Errorf("reading Longhorn's node %s: %w", node, err)
+		return false, failedRead("reading Longhorn's node "+node, out, err)
 	}
 	return listsObject(out, "node.longhorn.io/"+node), nil
 }
@@ -73,7 +73,7 @@ func DeleteNodeObjects(master CommandRunner, node string) error {
 func NodeRegistered(master CommandRunner, node string) (bool, error) {
 	out, err := master.Run(fmt.Sprintf("kubectl get node %s --ignore-not-found -o name", shellQuote(node)))
 	if err != nil {
-		return false, fmt.Errorf("looking up node %s: %w", node, err)
+		return false, failedRead("looking up node "+node, out, err)
 	}
 	return listsObject(out, "node/"+node), nil
 }

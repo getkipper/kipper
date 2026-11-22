@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -429,6 +430,7 @@ func TestRun_StopsACommandThatOverrunsItsTimeout(t *testing.T) {
 	_, runErr := c.Run("cat /proc/sys/kernel/random/boot_id")
 	require.Error(t, runErr)
 	assert.Contains(t, runErr.Error(), "did not finish within 2s")
+	assert.ErrorIs(t, runErr, context.DeadlineExceeded, "callers can tell a timeout from a failed command")
 	assert.Less(t, time.Since(started), 10*time.Second, "the timeout, not the stalled command, ended the call")
 
 	raw, err := os.ReadFile(pidFile)

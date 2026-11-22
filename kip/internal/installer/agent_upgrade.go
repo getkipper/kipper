@@ -32,7 +32,7 @@ type nodeVersion struct {
 func readNodeVersions(client CommandRunner) (map[string]nodeVersion, error) {
 	out, err := client.Run(nodeVersionsQuery)
 	if err != nil {
-		return nil, fmt.Errorf("reading the nodes' k3s versions: %w", err)
+		return nil, failedRead("reading the nodes' k3s versions", out, err)
 	}
 	return parseNodeVersions(out)
 }

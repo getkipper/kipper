@@ -16,6 +16,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/stranded"
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/readfailure"
 )
 
 // FenceStopAnnotation marks a StatefulSet the fence stopped. Its value is a
@@ -49,7 +50,7 @@ type FenceNode struct {
 func ReadFenceNode(master CommandRunner, node string) (FenceNode, error) {
 	out, err := master.Run(fmt.Sprintf("kubectl get node %s --ignore-not-found -o json && echo kip-server-now=$(date -u +%%s)", shellQuote(node)))
 	if err != nil {
-		return FenceNode{}, fmt.Errorf("reading node %s: %w", node, err)
+		return FenceNode{}, failedRead(fmt.Sprintf("reading node %s", node), out, err)
 	}
 	body, nowLine, ok := strings.Cut(out, "kip-server-now=")
 	if !ok {
@@ -153,7 +154,7 @@ func kubeletProbe(addr netip.Addr) string {
 func NodeExternalIP(master CommandRunner, node string) (string, error) {
 	out, err := master.Run(fmt.Sprintf(`kubectl get node %s --ignore-not-found -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}'`, shellQuote(node)))
 	if err != nil {
-		return "", fmt.Errorf("reading the external address of node %s: %w", node, err)
+		return "", failedRead(fmt.Sprintf("reading the external address of node %s", node), out, err)
 	}
 	return kubectlValue(out), nil
 }
@@ -162,7 +163,7 @@ func NodeExternalIP(master CommandRunner, node string) (string, error) {
 func NodeDownPolicy(master CommandRunner) (string, error) {
 	out, err := master.Run(`kubectl -n longhorn-system get settings.longhorn.io node-down-pod-deletion-policy -o jsonpath='{.value}'`)
 	if err != nil {
-		return "", fmt.Errorf("reading Longhorn's node-down pod deletion policy: %w", err)
+		return "", failedRead("reading Longhorn's node-down pod deletion policy", out, err)
 	}
 	return kubectlValue(out), nil
 }
@@ -269,15 +270,22 @@ func kubectlValue(out string) string {
 	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
+// kubectlJSON runs cmd and decodes its JSON payload into the destination.
+// Command failures use failedRead to protect potentially sensitive output.
 func kubectlJSON(master CommandRunner, what, cmd string, into any) error {
 	out, err := master.Run(cmd)
 	if err != nil {
-		return fmt.Errorf("listing %s: %w", what, err)
+		return failedRead("listing "+what, out, err)
 	}
 	if err := json.Unmarshal([]byte(kubectlPayload(out)), into); err != nil {
 		return fmt.Errorf("reading %s: %w", what, err)
 	}
 	return nil
+}
+
+// failedRead uses readfailure.Error to keep sensitive cluster output out of errors.
+func failedRead(what, out string, err error) error {
+	return readfailure.Error(what, out, err)
 }
 
 // ReadFenceView lists stranded services and StatefulSets stopped by an earlier
@@ -395,7 +403,7 @@ func ClaimOwner(sets []appsv1.StatefulSet, ns, claim string) (string, bool) {
 func ReadReplicas(master CommandRunner) ([]stranded.Replica, error) {
 	out, err := master.Run("kubectl -n longhorn-system get replicas.longhorn.io --request-timeout=30s -o json")
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn replicas: %w", err)
+		return nil, failedRead("listing Longhorn replicas", out, err)
 	}
 	return stranded.ReplicasFromJSON([]byte(kubectlPayload(out)))
 }
@@ -812,7 +820,7 @@ func ReadLonghornVolumes(master CommandRunner) ([]string, error) {
 func FailDataTransfer(master CommandRunner, ns, name, reason string) error {
 	out, err := master.Run(fmt.Sprintf("kubectl -n %s get datatransfers.kipper.run %s --ignore-not-found -o json", shellQuote(ns), shellQuote(name)))
 	if err != nil {
-		return fmt.Errorf("reading data transfer %s/%s: %w", ns, name, err)
+		return failedRead(fmt.Sprintf("reading data transfer %s/%s", ns, name), out, err)
 	}
 	out = kubectlPayload(out)
 	if strings.TrimSpace(out) == "" {
@@ -864,7 +872,7 @@ func OwnerExists(master CommandRunner, ns, apiVersion, kind, name string) (bool,
 	}
 	out, err := master.Run(fmt.Sprintf("kubectl -n %s get %s %s --ignore-not-found -o name", shellQuote(ns), shellQuote(resource), shellQuote(name)))
 	if err != nil {
-		return false, fmt.Errorf("looking for %s %s/%s: %w", kind, ns, name, err)
+		return false, failedRead(fmt.Sprintf("looking for %s %s/%s", kind, ns, name), out, err)
 	}
 	return kubectlValue(out) != "", nil
 }
@@ -981,7 +989,7 @@ func ForceDeletePod(master CommandRunner, ns, name, uid string) error {
 func PodPlacement(master CommandRunner, ns, name string) (string, bool, error) {
 	out, err := master.Run(fmt.Sprintf("kubectl -n %s get pod %s --ignore-not-found -o json", shellQuote(ns), shellQuote(name)))
 	if err != nil {
-		return "", false, fmt.Errorf("reading pod %s/%s: %w", ns, name, err)
+		return "", false, failedRead(fmt.Sprintf("reading pod %s/%s", ns, name), out, err)
 	}
 	out = kubectlPayload(out)
 	if strings.TrimSpace(out) == "" {

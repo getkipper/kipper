@@ -104,7 +104,7 @@ func liveClaimClass(client CommandRunner, namespace, claim, fallback string) (st
 	out, err := client.Run(fmt.Sprintf(`kubectl -n %s get pvc %s --ignore-not-found -o jsonpath='{"claim-class["}{.spec.storageClassName}{"]"}'`,
 		namespace, claim))
 	if err != nil {
-		return "", fmt.Errorf("reading the storage class of %s/%s: %w", namespace, claim, err)
+		return "", failedRead(fmt.Sprintf("reading the storage class of %s/%s", namespace, claim), out, err)
 	}
 	matches := claimClassPayload.FindAllStringSubmatch(out, -1)
 	if len(matches) == 0 || matches[len(matches)-1][1] == "" {

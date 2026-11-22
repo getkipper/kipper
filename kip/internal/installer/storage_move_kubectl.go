@@ -156,7 +156,7 @@ func (k KubectlMoveCluster) getJSON(what, cmd string, into any) (bool, error) {
 		if notFound(out, err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("reading %s: %w", what, err)
+		return false, failedRead("reading "+what, out, err)
 	}
 	payload := kubectlPayload(out)
 	if payload == "" {
@@ -293,7 +293,7 @@ func (k KubectlMoveCluster) list(what, cmd string) (moveList, error) {
 		if identityAbsentFromKubectl(out) {
 			return l, nil
 		}
-		return l, fmt.Errorf("listing %s: %w", what, err)
+		return l, failedRead("listing "+what, out, err)
 	}
 	if err := json.Unmarshal([]byte(kubectlPayload(out)), &l); err != nil {
 		return l, fmt.Errorf("reading %s: %w", what, err)
@@ -305,7 +305,7 @@ func (k KubectlMoveCluster) BackupState(namespace string) (MoveBackupState, erro
 	var state MoveBackupState
 	out, err := k.Server.Run("kubectl get platformconfig platform --ignore-not-found -o jsonpath='{\"backup[\"}{.spec.backup}{\"]\"}'")
 	if err != nil {
-		return state, fmt.Errorf("reading the backup setting: %w", err)
+		return state, failedRead("reading the backup setting", out, err)
 	}
 	backup := ""
 	if m := regexp.MustCompile(`backup\[([^\]]*)\]`).FindStringSubmatch(out); m != nil {
@@ -1141,7 +1141,7 @@ func (k KubectlMoveCluster) helperResult(what, namespace, name, marker string) (
 	}
 	log, err := k.Server.Run(fmt.Sprintf("kubectl -n %s logs %s --tail=40 2>&1", shellQuote(namespace), shellQuote(name)))
 	if err != nil {
-		log = fmt.Sprintf("(the %s log could not be read: %v)", what, err)
+		log = fmt.Sprintf("(%v)", failedRead("reading the "+what+" log", log, err))
 	}
 	succeeded := pod.Status.Phase == corev1.PodSucceeded && strings.Contains(log, marker)
 	return CopyResult{Finished: true, Succeeded: succeeded, UID: uid, Log: log, Reason: copyPodEnding(&pod)}, nil
