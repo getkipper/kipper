@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +18,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	gossh "golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installjob"
@@ -382,21 +387,203 @@ func TestFollowJobSaysWhenTheStreamEndsWithoutItsEndLine(t *testing.T) {
 	assert.NotContains(t, err.Error(), "<nil>")
 }
 
+// knownHostsFile returns the path to a known_hosts file with a fresh key per
+// nonempty pattern. Patterns are written verbatim, allowing markers such as
+// "@cert-authority *". Empty patterns produce blank lines.
+func knownHostsFile(t *testing.T, dir string, patterns ...string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, p := range patterns {
+		if p == "" {
+			b.WriteString("\n")
+			continue
+		}
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		key, err := gossh.NewPublicKey(pub)
+		require.NoError(t, err)
+		b.WriteString(p + " " + string(gossh.MarshalAuthorizedKey(key)))
+	}
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	path := filepath.Join(dir, "known_hosts")
+	require.NoError(t, os.WriteFile(path, []byte(b.String()), 0o600))
+	return path
+}
+
 func TestProbeFailure(t *testing.T) {
-	home := withFakeHome(t)
-	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
+	file := knownHostsFile(t, filepath.Join(t.TempDir(), "kip review", ".ssh"), "192.0.2.1", "", "203.0.113.10")
+	changed := "@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n" +
+		"Add correct host key in " + file + " to get rid of this message.\n" +
+		"Offending ECDSA key in " + file + ":3\n" +
+		"Host key verification failed.\n"
 
-	offer, err := probeFailure("root", "203.0.113.10", "@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.\n")
+	offer, err := probeFailure("root", "203.0.113.10", changed, []string{file})
 	assert.False(t, offer)
-	assert.ErrorContains(t, err, knownHosts, "a changed host key names the file to fix")
+	assert.ErrorContains(t, err, "delete line 3 of "+file+", then run this again", "a changed host key names the line OpenSSH read")
+	assert.ErrorContains(t, err, "If the server was reinstalled")
 
-	offer, err = probeFailure("root", "203.0.113.10", "root@203.0.113.10: Permission denied (publickey,password).\n")
+	offer, err = probeFailure("root", "203.0.113.10", "root@203.0.113.10: Permission denied (publickey,password).\n", nil)
 	assert.True(t, offer, "only a refused key is worth offering to add")
 	assert.NoError(t, err)
 
-	offer, err = probeFailure("root", "203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection timed out\n")
+	offer, err = probeFailure("root", "203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection timed out\n", nil)
 	assert.False(t, offer)
 	assert.ErrorContains(t, err, "Connection timed out")
+}
+
+func TestProbeFailureNamesEveryConflictingKnownHostsLine(t *testing.T) {
+	file := knownHostsFile(t, t.TempDir(), "203.0.113.10", "203.0.113.10", "192.0.2.1")
+	stderr := "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\r\n" +
+		"Offending key for IP in " + file + ":2\r\n" +
+		"Offending ED25519 key in " + file + ":1\r\n" +
+		"Offending ED25519 key in " + file + ":1\r\n" +
+		"Host key verification failed.\r\n"
+	_, err := probeFailure("root", "203.0.113.10", stderr, []string{file})
+	assert.ErrorContains(t, err, "delete line 2 of "+file+" and line 1 of "+file+", then run")
+	assert.NotContains(t, err.Error(), "\r")
+}
+
+func TestProbeFailureKeepsAFileNameThatContainsIn(t *testing.T) {
+	file := knownHostsFile(t, filepath.Join(t.TempDir(), "log in archive", ".ssh"), "", "", "203.0.113.10")
+	_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\nOffending ECDSA-SK key in "+file+":3\n", []string{file})
+	assert.ErrorContains(t, err, "delete line 3 of "+file+", then run")
+}
+
+func TestProbeFailureListsThreeConflictingLines(t *testing.T) {
+	file := knownHostsFile(t, t.TempDir(), "203.0.113.10", "[203.0.113.10]:22", knownhosts.HashHostname("203.0.113.10"))
+	stderr := "Offending key for IP in " + file + ":1\nOffending RSA key in " + file + ":2\nOffending ED25519 key in " + file + ":3\n"
+	_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\n"+stderr, []string{file})
+	assert.ErrorContains(t, err, "delete line 1 of "+file+", line 2 of "+file+" and line 3 of "+file+", then run this again")
+}
+
+func TestProbeFailureNamesAHashedEntry(t *testing.T) {
+	file := knownHostsFile(t, t.TempDir(), knownhosts.HashHostname("203.0.113.10"))
+	_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\nOffending ED25519 key in "+file+":1\n", []string{file})
+	assert.ErrorContains(t, err, "delete line 1 of "+file+", then run")
+}
+
+func TestProbeFailureWithoutAnOffendingLineDescribesTheFix(t *testing.T) {
+	_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\n", nil)
+	assert.ErrorContains(t, err, "remove its old key from the known_hosts file ssh uses")
+}
+
+// TestProbeFailureNamesOnlyLinesThatRecordTheHost checks deletion advice against
+// local entries because server text and OpenSSH diagnostics share a buffer
+// before authentication.
+func TestProbeFailureNamesOnlyLinesThatRecordTheHost(t *testing.T) {
+	dir := t.TempDir()
+	file := knownHostsFile(t, dir, "192.0.2.1", "203.0.113.10")
+	for name, offending := range map[string]string{
+		"another host's line":     file + ":1",
+		"a line past the end":     file + ":9",
+		"a file that is missing":  filepath.Join(dir, "absent") + ":1",
+		"a file that is not keys": dir + ":1",
+		"a device":                os.DevNull + ":1",
+		"a file too large to read": func() string {
+			valid, err := os.ReadFile(knownHostsFile(t, filepath.Join(dir, "big"), "203.0.113.10"))
+			require.NoError(t, err)
+			big := filepath.Join(dir, "big", "known_hosts")
+			padding := strings.Repeat("#\n", maxKnownHostsSize/2)
+			//nolint:gosec // G703: big is a fixed path inside the test's temp directory
+			require.NoError(t, os.WriteFile(big, append(valid, padding...), 0o600))
+			return big + ":1"
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\nOffending ED25519 key in "+offending+"\n", []string{offending[:strings.LastIndex(offending, ":")]})
+			assert.ErrorContains(t, err, "remove its old key from the known_hosts file ssh uses")
+			assert.NotContains(t, err.Error(), dir)
+		})
+	}
+
+	_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\nOffending ED25519 key in "+file+":1\nOffending ED25519 key in "+file+":2\n", []string{file})
+	assert.ErrorContains(t, err, "remove its old key from the known_hosts file ssh uses", "one unconfirmed line is enough to name none")
+	assert.NotContains(t, err.Error(), "line 2 of")
+}
+
+// TestProbeFailureNamesNoLineThatIsNotAKey checks that matching the host field
+// alone is insufficient, as in /etc/hosts entries or lines with invalid keys.
+func TestProbeFailureNamesNoLineThatIsNotAKey(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "hosts")
+	require.NoError(t, os.WriteFile(file, []byte("203.0.113.10 production.example production\n203.0.113.10 ssh-ed25519 bm90LWEta2V5\n"), 0o600))
+	for _, line := range []string{"1", "2"} {
+		_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\nOffending ED25519 key in "+file+":"+line+"\n", []string{file})
+		assert.ErrorContains(t, err, "remove its old key from the known_hosts file ssh uses")
+		assert.NotContains(t, err.Error(), file)
+	}
+}
+
+// TestProbeFailureNamesOnlyAListedFile checks the ambiguity between a host named
+// "restrict" and the restrict option in an authorized_keys entry.
+func TestProbeFailureNamesOnlyAListedFile(t *testing.T) {
+	dir := t.TempDir()
+	authorized := knownHostsFile(t, filepath.Join(dir, "authorized"), "restrict")
+	used := knownHostsFile(t, filepath.Join(dir, "used"), "restrict")
+	stderr := "Host key verification failed.\nOffending ED25519 key in " + authorized + ":1\n"
+	for name, known := range map[string][]string{
+		"another file is listed": {used},
+		"no file is listed":      nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := probeFailure("root", "restrict", stderr, known)
+			assert.ErrorContains(t, err, "remove its old key from the known_hosts file ssh uses")
+			assert.NotContains(t, err.Error(), dir)
+		})
+	}
+	_, err := probeFailure("root", "restrict", stderr, []string{used, authorized})
+	assert.ErrorContains(t, err, "delete line 1 of "+authorized, "a listed file is named")
+}
+
+// TestProbeFailureReadsTheListedFileItself covers a reported path that cleans
+// to a listed file but, through a symlink followed by "..", reaches another.
+func TestProbeFailureReadsTheListedFileItself(t *testing.T) {
+	base := t.TempDir()
+	listed := knownHostsFile(t, filepath.Join(base, ".ssh"), "192.0.2.1")
+	knownHostsFile(t, filepath.Join(base, "elsewhere", ".ssh"), "203.0.113.10")
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "elsewhere", "sub"), 0o700))
+	if err := os.Symlink(filepath.Join(base, "elsewhere", "sub"), filepath.Join(base, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	reported := base + "/link/../.ssh/known_hosts"
+
+	_, err := probeFailure("root", "203.0.113.10", "Host key verification failed.\nOffending ED25519 key in "+reported+":1\n", []string{listed})
+
+	assert.ErrorContains(t, err, "remove its old key from the known_hosts file ssh uses")
+	assert.NotContains(t, err.Error(), base)
+}
+
+func TestStandardKnownHostsFiles(t *testing.T) {
+	u, err := user.Current()
+	require.NoError(t, err)
+	files := standardKnownHostsFiles()
+	assert.Contains(t, files, filepath.Join(u.HomeDir, ".ssh", "known_hosts"))
+	assert.Contains(t, files, filepath.Clean("/etc/ssh/ssh_known_hosts"))
+	assert.NotContains(t, files, filepath.Join(u.HomeDir, ".ssh", "authorized_keys"))
+}
+
+// TestProbeFailureNamesNoEntryThatAlsoCoversOtherHosts checks that deletion
+// advice excludes markers, patterns that affect other hosts, and DNS aliases.
+func TestProbeFailureNamesNoEntryThatAlsoCoversOtherHosts(t *testing.T) {
+	for name, field := range map[string]string{
+		"a certificate authority":         "@cert-authority *",
+		"a revoked key":                   "@revoked 203.0.113.10",
+		"a wildcard":                      "203.0.113.*",
+		"a shared host list":              "203.0.113.10,192.0.2.1",
+		"a hashed entry and another host": knownhosts.HashHostname("203.0.113.10") + ",192.0.2.1",
+		"a negated pattern":               "203.0.113.10,!192.0.2.1",
+		"an address the name resolves to": "127.0.0.1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := knownHostsFile(t, t.TempDir(), field)
+			host := "203.0.113.10"
+			if field == "127.0.0.1" {
+				host = "localhost"
+			}
+			_, err := probeFailure("root", host, "Host key verification failed.\nOffending ED25519 key in "+file+":1\n", []string{file})
+			assert.ErrorContains(t, err, "remove its old key from the known_hosts file ssh uses")
+			assert.NotContains(t, err.Error(), file)
+		})
+	}
 }
 
 func writeChunks(w io.Writer, chunks ...string) {
@@ -525,7 +712,7 @@ func TestPlacementErrorNamesTheLoginUser(t *testing.T) {
 	err = placementError("ubuntu", "203.0.113.10", "Permission denied, please try again.\n", errors.New("exit status 255"))
 	assert.ErrorContains(t, err, "refused the password of ubuntu")
 
-	_, err = probeFailure("ubuntu", "203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection timed out\n")
+	_, err = probeFailure("ubuntu", "203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection timed out\n", nil)
 	assert.ErrorContains(t, err, "cannot reach ubuntu@203.0.113.10")
 }
 

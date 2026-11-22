@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha1" //nolint:gosec // G505: OpenSSH's hashed known_hosts format uses HMAC-SHA1.
 	"crypto/sha256"
 	"debug/elf"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +15,16 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 
 	"github.com/getkipper/kipper/kip/internal/config"
@@ -450,7 +457,7 @@ func ensureKeyAccess(user, host, keyPath string, isTTY bool) error {
 	if cloudUser, named := ssh.CloudImageUser(stderr); named && user == "root" {
 		return ssh.RootRefused(cloudUser)
 	}
-	if offer, err := probeFailure(user, host, stderr); !offer {
+	if offer, err := probeFailure(user, host, stderr, standardKnownHostsFiles()); !offer {
 		return err
 	}
 	if !isTTY || !confirm(fmt.Sprintf("Add the key %s to %s? SSH may prompt for %s.", keyPath, login, passwordOf(user))) {
@@ -550,19 +557,137 @@ func agentHolds(keyFingerprint, agentList string) bool {
 }
 
 // probeFailure offers key placement for permission failures and reports host-key
-// or connection failures directly.
-func probeFailure(user, host, stderr string) (offerPlacement bool, err error) {
+// or connection failures directly. knownHosts lists the cleaned file paths
+// eligible for line deletion advice.
+func probeFailure(user, host, stderr string, knownHosts []string) (offerPlacement bool, err error) {
 	switch {
 	case strings.Contains(stderr, "REMOTE HOST IDENTIFICATION HAS CHANGED"), strings.Contains(stderr, "Host key verification failed"):
-		knownHosts := "~/.ssh/known_hosts"
-		if home, err := os.UserHomeDir(); err == nil {
-			knownHosts = filepath.Join(home, ".ssh", "known_hosts")
+		if entries := offendingEntries(stderr, host, knownHosts); len(entries) > 0 {
+			list := entries[len(entries)-1]
+			if len(entries) > 1 {
+				list = strings.Join(entries[:len(entries)-1], ", ") + " and " + list
+			}
+			return false, fmt.Errorf("%s presents a different host key from the one recorded for it. If the server was reinstalled, delete %s, then run this again", host, list)
 		}
-		return false, fmt.Errorf("%s presents a different host key from the one recorded for it. If the server was reinstalled, remove its line from %s and run this again", host, knownHosts)
+		return false, fmt.Errorf("%s presents a different host key from the one recorded for it. If the server was reinstalled, remove its old key from the known_hosts file ssh uses and run this again", host)
 	case strings.Contains(stderr, "Permission denied"):
 		return true, nil
 	}
 	return false, fmt.Errorf("cannot reach %s@%s: %s", user, host, lastLine(stderr))
+}
+
+// offendingKey matches OpenSSH diagnostics for conflicting recorded keys, such as
+// "Offending ECDSA key in /home/user/.ssh/known_hosts:3".
+var offendingKey = regexp.MustCompile(`(?m)^Offending (?:key for IP|[A-Z0-9-]+ key) in (.+):(\d+)\r?$`)
+
+// offendingEntries returns unique conflicting known_hosts entries as "line N of FILE"
+// in report order, or nil if none are reported. Server text can reach stderr
+// before authentication, so it also returns nil if any reported path, once
+// cleaned, is outside knownHosts or any reported line fails recordsHost.
+func offendingEntries(stderr, host string, knownHosts []string) []string {
+	var entries []string
+	for _, m := range offendingKey.FindAllStringSubmatch(stderr, -1) {
+		// Use the cleaned path for both reading and advice because a symlink
+		// followed by ".." can make the original path reach a different file.
+		file := filepath.Clean(m[1])
+		line, err := strconv.Atoi(m[2])
+		if err != nil || !slices.Contains(knownHosts, file) || !recordsHost(file, line, host) {
+			return nil
+		}
+		entry := fmt.Sprintf("line %d of %s", line, file)
+		if !slices.Contains(entries, entry) {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// standardKnownHostsFiles returns cleaned paths for the user's .ssh/known_hosts
+// and .ssh/known_hosts2 files and the global files under /etc/ssh. User paths
+// are omitted if the home directory is unavailable. Deletion advice is limited
+// to these conventional host-key files, regardless of SSH configuration.
+func standardKnownHostsFiles() []string {
+	files := []string{"/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		files = append(files, filepath.Join(u.HomeDir, ".ssh", "known_hosts"), filepath.Join(u.HomeDir, ".ssh", "known_hosts2"))
+	}
+	for i, f := range files {
+		files[i] = filepath.Clean(f)
+	}
+	return files
+}
+
+// maxKnownHostsSize is the file size limit in bytes checked before reading.
+const maxKnownHostsSize = 4 << 20
+
+// recordsHost reports whether the given one-based line contains a parseable,
+// unmarked key entry whose patterns all name host on port 22, literally or
+// hashed. This limits deletion advice to entries for that host alone.
+// DNS-resolved addresses are excluded because DNS cannot establish that an
+// address belongs to the responding server. It returns false for unreadable
+// files or invalid lines. Before reading, it checks that the file is regular
+// and at most maxKnownHostsSize bytes to limit parsing size and avoid opening
+// FIFOs or devices that could block. The path comes from server-controlled text.
+func recordsHost(file string, line int, host string) bool {
+	info, err := os.Stat(file)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxKnownHostsSize {
+		return false
+	}
+	data, err := os.ReadFile(file) //nolint:gosec // G304: The file passed the regular-file check and is read to validate deletion advice.
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	if line < 1 || line > len(lines) {
+		return false
+	}
+	fields := strings.Fields(lines[line-1])
+	if len(fields) < 3 || strings.HasPrefix(fields[0], "@") || !isPublicKey(fields[1], fields[2]) {
+		return false
+	}
+	name := strings.ToLower(host)
+	for _, pattern := range strings.Split(fields[0], ",") {
+		if !patternNames(pattern, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// isPublicKey reports whether blob is a base64 SSH public key of type keyType.
+func isPublicKey(keyType, blob string) bool {
+	raw, err := base64.StdEncoding.DecodeString(blob)
+	if err != nil {
+		return false
+	}
+	key, err := gossh.ParsePublicKey(raw)
+	return err == nil && key.Type() == keyType
+}
+
+// patternNames reports whether a known_hosts pattern matches name on port 22.
+// It accepts case-insensitive literals, including [name]:22, or an HMAC-SHA1
+// hash of name exactly as supplied. Wildcards and negations are not expanded
+// because they can affect other hosts.
+func patternNames(pattern, name string) bool {
+	if strings.EqualFold(pattern, name) || strings.EqualFold(pattern, "["+name+"]:22") {
+		return true
+	}
+	parts := strings.Split(pattern, "|")
+	if len(parts) != 4 || parts[0] != "" || parts[1] != "1" {
+		return false
+	}
+	salt, err := base64.StdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	want, err := base64.StdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return false
+	}
+	// OpenSSH's hashed host format is HMAC-SHA1, keyed by the salt.
+	mac := hmac.New(sha1.New, salt)
+	mac.Write([]byte(name))
+	return hmac.Equal(mac.Sum(nil), want)
 }
 
 // passwordOf names the password SSH asks for when it logs in as user.
