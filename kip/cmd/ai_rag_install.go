@@ -46,6 +46,7 @@ func init() {
 	aiRagInstallCmd.Flags().String("embedding-model", "", "Ollama embedding model tag (defaults to nomic-embed-text:latest)")
 	aiRagInstallCmd.Flags().String("qdrant-pvc-size", "", "Qdrant data volume size (defaults to 10Gi)")
 	aiRagInstallCmd.Flags().String("anythingllm-pvc-size", "", "AnythingLLM storage volume size (defaults to 10Gi)")
+	aiRagInstallCmd.Flags().Bool("reinstall-failed", false, "apply charts even when a Helm release is not deployed. This can trigger a reinstall and delete the chart's volumes. Back up with 'kip ai backup --wait' first")
 	aiRagCmd.AddCommand(aiRagInstallCmd)
 }
 
@@ -65,21 +66,22 @@ func runAIRagInstall(cmd *cobra.Command, _ []string) error {
 	embeddingModel, _ := cmd.Flags().GetString("embedding-model")
 	qdrantPVC, _ := cmd.Flags().GetString("qdrant-pvc-size")
 	anyllmPVC, _ := cmd.Flags().GetString("anythingllm-pvc-size")
+	reinstallFailed, _ := cmd.Flags().GetBool("reinstall-failed")
 
 	ctx := context.Background()
 
 	fmt.Printf("\n  Installing AI RAG bundle on %s\n\n", cluster.Name)
 
-	installer := &ai.Installer{
-		Clientset: client.Clientset(),
-		Dynamic:   client.Dynamic(),
-		Out:       os.Stdout,
+	installer, err := chartInstaller(client)
+	if err != nil {
+		return err
 	}
 	if err := installer.InstallRAG(ctx, ai.RAGOptions{
 		Host:               host,
 		EmbeddingModel:     embeddingModel,
 		QdrantPVCSize:      qdrantPVC,
 		AnythingLLMPVCSize: anyllmPVC,
+		ReinstallFailed:    reinstallFailed,
 	}); err != nil {
 		return err
 	}

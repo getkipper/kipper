@@ -704,6 +704,145 @@ func TestPlatformConfigReconciler_DeletesHelmChartWhenDisabled(t *testing.T) {
 		types.NamespacedName{Name: "kube-prometheus-stack", Namespace: helmChartNamespace}, check))
 }
 
+// Loki's StatefulSet retains its claim, and a disabled Loki no longer
+// enforces its retention period, so disabling Loki deletes the logs.
+func TestPlatformConfigReconciler_DeletesTheLogVolumeOnlyWhenLokiIsDisabled(t *testing.T) {
+	for name, enabled := range map[string]bool{"disabled": false, "enabled": true} {
+		t.Run(name, func(t *testing.T) {
+			scheme := testScheme()
+			no := false
+			pc := &kipperv1.PlatformConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+				Spec: kipperv1.PlatformConfigSpec{
+					Profile: platform.ProfileMedium,
+					Components: []kipperv1.ComponentOverride{
+						{Name: componentLoki, Enabled: &enabled},
+						{Name: componentPrometheus, Enabled: &no},
+					},
+				},
+			}
+			claim := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "storage-loki-0", Namespace: platform.MonitoringNamespace},
+			}
+			other := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "storage-other-0", Namespace: platform.MonitoringNamespace},
+			}
+			fakeClient := crfake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(pc, claim, other, newHelmChart("loki", "")).
+				WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+			r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+			require.NoError(t, err)
+
+			err = fakeClient.Get(context.Background(), client.ObjectKeyFromObject(claim), &corev1.PersistentVolumeClaim{})
+			if enabled {
+				require.NoError(t, err, "an enabled Loki keeps its logs")
+			} else {
+				assert.True(t, errors.IsNotFound(err), "a disabled Loki's logs are deleted, got %v", err)
+			}
+			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(other), &corev1.PersistentVolumeClaim{}))
+		})
+	}
+}
+
+func lokiDisabledConfig() *kipperv1.PlatformConfig {
+	no := false
+	return &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec: kipperv1.PlatformConfigSpec{
+			Profile: platform.ProfileMedium,
+			Components: []kipperv1.ComponentOverride{
+				{Name: componentLoki, Enabled: &no},
+				{Name: componentPrometheus, Enabled: &no},
+			},
+		},
+	}
+}
+
+func lokiClaim() *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "storage-loki-0", Namespace: platform.MonitoringNamespace},
+	}
+}
+
+func TestPlatformConfigReconciler_KeepsTheLogVolumeUntilLokiIsUninstalled(t *testing.T) {
+	// The Helm controller's finalizer keeps the HelmChart until the release is gone.
+	chart := newHelmChart("loki", "")
+	chart.SetFinalizers([]string{"wrangler.cattle.io/on-helm-chart-remove"})
+	scheme := testScheme()
+	fakeClient := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(lokiDisabledConfig(), lokiClaim(), chart).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+
+	require.NoError(t, err)
+	assert.Equal(t, helmChartDeletePoll, result.RequeueAfter, "the claim is deleted on a later pass")
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(lokiClaim()), &corev1.PersistentVolumeClaim{}))
+}
+
+func TestPlatformConfigReconciler_KeepsTheLogVolumeWhenTheChartDeleteFails(t *testing.T) {
+	scheme := testScheme()
+	fakeClient := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(lokiDisabledConfig(), lokiClaim(), newHelmChart("loki", "")).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == "loki" {
+					return stderrors.New("delete refused for the test")
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+
+	require.Error(t, err)
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(lokiClaim()), &corev1.PersistentVolumeClaim{}))
+}
+
+// A Loki chart installed before the claim was retained gets the policy on
+// the next reconcile, so a Helm reinstall keeps its logs.
+func TestPlatformConfigReconciler_RetainsTheLogVolumeOfAnExistingChart(t *testing.T) {
+	yes, no := true, false
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec: kipperv1.PlatformConfigSpec{
+			Profile: platform.ProfileMedium,
+			Components: []kipperv1.ComponentOverride{
+				{Name: componentLoki, Enabled: &yes},
+				{Name: componentPrometheus, Enabled: &no},
+			},
+		},
+	}
+	old := newHelmChart("loki", `singleBinary:
+  persistence:
+    enabled: true
+    size: 5Gi
+`)
+	scheme := testScheme()
+	fakeClient := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(pc, old).WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+	require.NoError(t, err)
+
+	loki := &unstructured.Unstructured{}
+	loki.SetGroupVersionKind(helmChartGVK)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "loki", Namespace: helmChartNamespace}, loki))
+	raw, _, _ := unstructured.NestedString(loki.Object, "spec", "valuesContent")
+	var values map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(raw), &values))
+	persistence := values["singleBinary"].(map[string]any)["persistence"].(map[string]any)
+	assert.Equal(t, "Retain", persistence["whenDeleted"])
+	assert.Equal(t, "Retain", persistence["whenScaled"])
+	assert.Equal(t, "5Gi", persistence["size"], "other values stay")
+}
+
 func TestPlatformConfigReconciler_RecreatesHelmChartWhenRe_enabled(t *testing.T) {
 	scheme := testScheme()
 	yes := true

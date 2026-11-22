@@ -133,6 +133,9 @@ spec:
     persistentVolume:
       enabled: true
       size: %[7]s
+      # Keeps the model cache when the Helm controller reinstalls a failed release.
+      annotations:
+        helm.sh/resource-policy: keep
     service:
       type: ClusterIP
       port: 11434
@@ -182,6 +185,11 @@ const LibreChatDeploymentName = "librechat-librechat"
 // which double-encodes a YAML string as a literal block scalar; our
 // own ConfigMap bypasses that bug.
 const LibreChatConfigMapName = "librechat-config"
+
+// LibreChatImagesClaimName is the claim holding images uploaded to LibreChat.
+// kip creates it with the name the chart used, so a bundle installed by an
+// earlier kip keeps its uploads.
+const LibreChatImagesClaimName = "librechat-librechat-images"
 
 // BundleStateConfigMapName is the name of the ConfigMap that records the
 // installed model and chat host. `kip ai status` reads from this rather
@@ -289,6 +297,16 @@ spec:
         ALLOW_SOCIAL_LOGIN: "false"
         ALLOW_SOCIAL_REGISTRATION: "false"
       existingConfigYaml: %[14]s
+      # kip owns the images claim, so a reinstall of the release leaves it in place.
+      imageVolume:
+        enabled: false
+    volumes:
+      - name: image-volume
+        persistentVolumeClaim:
+          claimName: %[16]s
+    volumeMounts:
+      - name: image-volume
+        mountPath: /app/client/public/images
     ingress:
       enabled: false
     librechat-rag-api:
@@ -297,6 +315,9 @@ spec:
       image:
         registry: docker.io
         repository: bitnamilegacy/mongodb
+      # Keeps the database when the Helm controller reinstalls a failed release.
+      persistence:
+        resourcePolicy: keep
       # Apply the global mongosh settings to the MongoDB container.
       extraVolumes:
         - name: mongosh-config
@@ -312,6 +333,9 @@ spec:
     meilisearch:
       auth:
         existingMasterKeySecret: %[2]s
+      persistence:
+        annotations:
+          helm.sh/resource-policy: keep
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -356,6 +380,7 @@ spec:
 		cfg.Credentials.MeiliMasterKey,   // 13
 		LibreChatConfigMapName,           // 14
 		libreChatConfigHash(cfg),         // 15
+		LibreChatImagesClaimName,         // 16
 	)
 }
 

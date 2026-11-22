@@ -204,7 +204,7 @@ kip platform disable prometheus
 kip platform disable loki
 ```
 
-The platform reconciler in console-api picks the change up and deletes the underlying HelmCharts; helm-controller then uninstalls the releases.
+The platform reconciler in console-api picks up the change and deletes the underlying HelmCharts. The helm-controller then uninstalls the releases. Once Loki is uninstalled, the reconciler also deletes its log volume and stored logs. Re-enabling Loki starts it with an empty history.
 
 ### Re-enable
 

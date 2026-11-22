@@ -353,9 +353,10 @@ func TestBundleAlreadyInstalledFalseWhenNamespaceNotKipperOwned(t *testing.T) {
 }
 
 func TestAIInstallCmdHasExpectedFlags(t *testing.T) {
-	for _, name := range []string{"host", "model", "pvc-size", "yes", "skip-storage-check"} {
+	for _, name := range []string{"host", "model", "pvc-size", "yes", "skip-storage-check", "reinstall-failed"} {
 		assert.NotNil(t, aiInstallCmd.Flags().Lookup(name), "expected --%s flag", name)
 	}
+	assert.NotNil(t, aiRagInstallCmd.Flags().Lookup("reinstall-failed"), "expected kip ai rag install --reinstall-failed")
 }
 
 func TestAIBackupRepairCmdHasYesFlag(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -262,11 +263,11 @@ func nodeWithFreeRAM(name, allocatable string) (*corev1.Node, *corev1.Pod) {
 		}
 }
 
-// ragInstallerWithReadyPhase1 returns a clientset/dynamic pair and an
-// Installer wired with reactors so InstallRAG's preflight, helm-install
-// Jobs, embedding-pull Job, and the two ready-resource gates all
-// auto-succeed. Tests then layer their own state on top.
-func ragInstallerWithReadyPhase1(t *testing.T, opts ...func(*fake.Clientset)) (*Installer, *bytes.Buffer) {
+// ragInstallerWithReadyPhase1 returns an Installer and its output buffer.
+// Fixtures and reactors satisfy InstallRAG's preflight, Helm Job and release
+// checks, embedding pull, and both workload readiness checks. Tests can
+// layer their own state on these defaults.
+func ragInstallerWithReadyPhase1(t *testing.T) (*Installer, *bytes.Buffer) {
 	t.Helper()
 	node, ollamaPod := nodeWithFreeRAM("test-node", "16Gi")
 	clientset := fake.NewSimpleClientset( //nolint:staticcheck
@@ -279,13 +280,11 @@ func ragInstallerWithReadyPhase1(t *testing.T, opts ...func(*fake.Clientset)) (*
 	)
 	autoSucceedHelmInstallJob(clientset)
 	autoSucceedEmbeddingPullJob(clientset)
-	for _, o := range opts {
-		o(clientset)
-	}
 	out := &bytes.Buffer{}
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      newDynamicFake(t),
+		Metadata:     deployedReleases(t),
 		Out:          out,
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
@@ -418,6 +417,88 @@ func TestUninstallRAGTolerantOfMissingResources(t *testing.T) {
 		PollTimeout:  100 * time.Millisecond,
 	}
 	require.NoError(t, inst.UninstallRAG(context.Background(), RAGOptions{}))
+}
+
+// ragClaim carries the labels a RAG claim has on a cluster: the release's
+// instance label (Helm's on AnythingLLM's claim, the StatefulSet selector's on
+// Qdrant's) and the bundle labels kip sets through the chart values.
+func ragClaim(name, instance string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      name,
+		Namespace: Namespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/instance":   instance,
+			"app.kubernetes.io/managed-by": "Helm",
+			"app.kubernetes.io/part-of":    "kipper-ai",
+			"app.kubernetes.io/component":  "rag",
+		},
+	}}
+}
+
+func claimNames(t *testing.T, clientset *fake.Clientset) []string { //nolint:staticcheck
+	t.Helper()
+	list, err := clientset.CoreV1().PersistentVolumeClaims(Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	var names []string
+	for _, c := range list.Items {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+func TestUninstallRAGDeletesOnlyTheBundleVolumes(t *testing.T) {
+	// A Helm uninstall leaves Qdrant's StatefulSet claim and AnythingLLM's
+	// kept claim behind. RAG uninstall promises to delete their data.
+	foreign := ragClaim("qdrant-storage-other-0", "qdrant")
+	delete(foreign.Labels, "app.kubernetes.io/part-of")
+	delete(foreign.Labels, "app.kubernetes.io/component")
+	clientset := fake.NewSimpleClientset( //nolint:staticcheck
+		ragClaim("qdrant-storage-qdrant-0", "qdrant"),
+		ragClaim("anythingllm-storage-claim", "anythingllm"),
+		foreign,
+		ragClaim("librechat-mongodb", "librechat"),
+	)
+	inst := &Installer{
+		Clientset:    clientset,
+		Dynamic:      newDynamicFake(t),
+		PollInterval: time.Millisecond,
+		PollTimeout:  100 * time.Millisecond,
+	}
+
+	require.NoError(t, inst.UninstallRAG(context.Background(), RAGOptions{}))
+
+	assert.ElementsMatch(t, []string{"qdrant-storage-other-0", "librechat-mongodb"}, claimNames(t, clientset))
+}
+
+func TestUninstallRAGKeepsTheVolumesWhileAChartIsStillUninstalling(t *testing.T) {
+	for _, stuck := range []string{"anythingllm", "qdrant"} {
+		t.Run(stuck, func(t *testing.T) {
+			dyn := newDynamicFake(t)
+			for _, name := range []string{"anythingllm", "qdrant"} {
+				_, err := dyn.Resource(helmChartGVR).Namespace("kube-system").Create(
+					context.Background(), ragHelmChartUnstructured(name), metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+			// The Helm controller's finalizer keeps the HelmChart until the release is gone.
+			dyn.PrependReactor("delete", "helmcharts", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				return action.(k8stesting.DeleteAction).GetName() == stuck, nil, nil
+			})
+			clientset := fake.NewSimpleClientset( //nolint:staticcheck
+				ragClaim("qdrant-storage-qdrant-0", "qdrant"),
+				ragClaim("anythingllm-storage-claim", "anythingllm"),
+			)
+			inst := &Installer{
+				Clientset:    clientset,
+				Dynamic:      dyn,
+				PollInterval: time.Millisecond,
+				PollTimeout:  20 * time.Millisecond,
+			}
+
+			require.Error(t, inst.UninstallRAG(context.Background(), RAGOptions{}))
+
+			assert.ElementsMatch(t, []string{"qdrant-storage-qdrant-0", "anythingllm-storage-claim"}, claimNames(t, clientset))
+		})
+	}
 }
 
 func TestUninstallRAGRefusesForeignSecret(t *testing.T) {
@@ -869,9 +950,27 @@ func TestInstallRAGSkipsHeadroomOnReinstall(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
 	}
 	require.NoError(t, inst.InstallRAG(context.Background(), RAGOptions{Host: "ask.example.com"}),
 		"re-install on a tight node must skip the headroom check; the bundle's own pods otherwise block every kip ai rag install after the first")
+}
+
+func TestInstallRAGAppliesNoChartOverAFailedRelease(t *testing.T) {
+	inst, _ := ragInstallerWithReadyPhase1(t)
+	inst.Metadata = releaseMetadata(t, helmRelease("anythingllm", Namespace, 4, "failed"))
+	clientset := inst.Clientset.(*fake.Clientset) //nolint:staticcheck
+	dyn := inst.Dynamic.(*dynamicfake.FakeDynamicClient)
+	clientset.ClearActions()
+	dyn.ClearActions()
+
+	err := inst.InstallRAG(context.Background(), RAGOptions{Host: "ask.example.com"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"anythingllm"`)
+	assert.Contains(t, err.Error(), "--reinstall-failed")
+	assert.Empty(t, writeActions(clientset.Actions()), "nothing is changed before the refusal")
+	assert.Empty(t, writeActions(dyn.Actions()), "no chart is applied")
 }

@@ -357,3 +357,14 @@ func TestLokiHelmChart_RendersTheGivenClass(t *testing.T) {
 	empty := ""
 	assert.Equal(t, "-", persistence(&empty)["storageClass"], "the chart renders \"-\" as an empty storageClassName")
 }
+
+// The Helm controller reinstalls a failed release by uninstalling it first,
+// which deletes the StatefulSet. A retained claim keeps the logs through that.
+func TestLokiHelmChart_RetainsTheLogVolume(t *testing.T) {
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage, nil))
+
+	assert.Equal(t, true, valueAt(t, values, "singleBinary", "persistence", "enableStatefulSetAutoDeletePVC"),
+		"the chart renders the retention policy only while this is on")
+	assert.Equal(t, "Retain", valueAt(t, values, "singleBinary", "persistence", "whenDeleted"))
+	assert.Equal(t, "Retain", valueAt(t, values, "singleBinary", "persistence", "whenScaled"))
+}

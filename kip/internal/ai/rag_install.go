@@ -19,8 +19,8 @@ import (
 // read and uninstalled independently.
 const RAGBundleStateConfigMapName = "kipper-rag-bundle-state"
 
-// Default sizes for the RAG bundle. Keep them modest at v1; the CLI in
-// Step 5 will expose flags so users with bigger corpora can override.
+// Default sizes for the RAG bundle are modest. CLI flags let users with
+// larger corpora override the volume sizes.
 //
 //   - Qdrant PVC: 10 GiB. At 768-dim vectors and Qdrant's mmap mode,
 //     this comfortably holds well over a million chunks.
@@ -40,19 +40,13 @@ const (
 	defaultRAGAnythingLLMMemoryLimit = "3Gi"
 )
 
-// RAGOptions controls an InstallRAG or UninstallRAG run.
+// RAGOptions controls InstallRAG. UninstallRAG ignores these options.
 type RAGOptions struct {
-	// Host is the external hostname for the AnythingLLM Ask UI, e.g.
-	// "ask.example.com". Required for InstallRAG. Ignored by
-	// UninstallRAG.
-	Host string
-	// EmbeddingModel overrides DefaultEmbeddingModel. Optional.
-	EmbeddingModel string
-	// QdrantPVCSize overrides defaultRAGQdrantPVCSize. Optional.
-	QdrantPVCSize string
-	// AnythingLLMPVCSize overrides defaultRAGAnythingLLMPVCSize.
-	// Optional.
+	Host               string
+	EmbeddingModel     string
+	QdrantPVCSize      string
 	AnythingLLMPVCSize string
+	ReinstallFailed    bool
 }
 
 // embeddingPullJobNamePrefix is the GenerateName prefix used for the
@@ -194,7 +188,14 @@ exit 1
 // InstallRAG adds Qdrant and AnythingLLM to an existing Ollama/LibreChat bundle.
 // It checks prerequisites, reuses credentials, applies both charts before waiting,
 // loads the embedding model, and records bundle state. New installs require
-// additional node headroom; reinstalls preserve existing credentials.
+// additional node headroom. Reinstalls preserve existing credentials.
+// opts.Host is required and names the external Ask UI, such as "ask.example.com".
+// An empty EmbeddingModel uses DefaultEmbeddingModel. Empty QdrantPVCSize and
+// AnythingLLMPVCSize values use 10Gi each.
+//
+// Existing releases must be deployed unless opts.ReinstallFailed is true.
+// That option allows Helm to uninstall and reinstall a release, which can
+// delete chart-owned volumes. Back up the data before enabling it.
 func (i *Installer) InstallRAG(ctx context.Context, opts RAGOptions) error {
 	if opts.Host == "" {
 		return fmt.Errorf("host is required: pass --host ask.<your-domain>")
@@ -239,6 +240,10 @@ func (i *Installer) InstallRAG(ctx context.Context, opts RAGOptions) error {
 		return fmt.Errorf(
 			"phase 1 bundle state has no chat model recorded; re-run 'kip ai install' to refresh it before installing the RAG bundle",
 		)
+	}
+
+	if err := i.refuseUndeployedReleases(ctx, opts.ReinstallFailed, "qdrant", "anythingllm"); err != nil {
+		return err
 	}
 
 	creds, err := i.loadOrGenerateAnythingLLMCredentials(ctx)
@@ -322,12 +327,11 @@ func (i *Installer) useRecreateStrategy(ctx context.Context, name string) error 
 	return nil
 }
 
-// UninstallRAG removes only Phase 2 resources, leaving Phase 1 (Ollama
-// + LibreChat) running. Order matters: HelmChart CRs first so
-// helm-controller stops reconciling and tears down chart-rendered
-// resources, then the Kipper-applied Ingress and Secret. The
-// embedding model in Ollama's PVC is intentionally left in place; a
-// re-install reuses it without re-downloading.
+// UninstallRAG removes Qdrant, AnythingLLM, and their data while leaving Ollama
+// and LibreChat running. It deletes the HelmChart CRs first and waits for
+// helm-controller to remove them before deleting the volume claims, Ingress,
+// credentials Secret, and bundle state. The embedding model stays in Ollama's
+// PVC so a reinstall can reuse it without downloading it again.
 func (i *Installer) UninstallRAG(ctx context.Context, _ RAGOptions) error {
 	steps := []struct {
 		name string
@@ -335,6 +339,7 @@ func (i *Installer) UninstallRAG(ctx context.Context, _ RAGOptions) error {
 	}{
 		{"Removing AnythingLLM", func() error { return i.deleteHelmChart(ctx, "anythingllm") }},
 		{"Removing Qdrant", func() error { return i.deleteHelmChart(ctx, "qdrant") }},
+		{"Removing Qdrant and AnythingLLM volumes", func() error { return i.deleteRAGClaims(ctx) }},
 		{"Removing AnythingLLM Ingress", func() error { return i.deleteOwnedIngress(ctx, Namespace, "anythingllm") }},
 		{"Removing AnythingLLM credentials", func() error {
 			return i.deleteOwnedSecret(ctx, AnythingLLMCredentialsSecretName)
@@ -350,6 +355,30 @@ func (i *Installer) UninstallRAG(ctx context.Context, _ RAGOptions) error {
 			return fmt.Errorf("%s: %w", s.name, err)
 		}
 		_, _ = fmt.Fprintf(i.out(), "  ✔   %s\n", s.name)
+	}
+	return nil
+}
+
+// ragClaimSelector matches the claims of the qdrant and anythingllm releases
+// that carry the RAG bundle labels kip sets through the chart values. It
+// includes the claim Qdrant's StatefulSet creates, which a Helm uninstall
+// leaves in place. Helm replaces the managed-by label, so it is not used.
+const ragClaimSelector = "app.kubernetes.io/instance in (qdrant,anythingllm)," +
+	"app.kubernetes.io/part-of=kipper-ai,app.kubernetes.io/component=rag"
+
+// deleteRAGClaims requests deletion of the labeled Qdrant and AnythingLLM
+// volume claims without waiting for removal. Kubernetes keeps claims mounted
+// by terminating pods until those pods are gone.
+func (i *Installer) deleteRAGClaims(ctx context.Context) error {
+	claims := i.Clientset.CoreV1().PersistentVolumeClaims(Namespace)
+	list, err := claims.List(ctx, metav1.ListOptions{LabelSelector: ragClaimSelector})
+	if err != nil {
+		return fmt.Errorf("listing the RAG volume claims: %w", err)
+	}
+	for _, claim := range list.Items {
+		if err := claims.Delete(ctx, claim.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting volume claim %s: %w", claim.Name, err)
+		}
 	}
 	return nil
 }

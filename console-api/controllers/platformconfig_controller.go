@@ -111,6 +111,11 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Grafana's CPU request follows the profile too; the loop above covers memory.
 	pathsByChart["kube-prometheus-stack"] = append(pathsByChart["kube-prometheus-stack"],
 		memoryPath{path: []string{"grafana", "resources", "requests", "cpu"}, value: res.GrafanaCPURequest})
+	// Loki charts installed before the claim was retained get the policy too.
+	for _, field := range []string{"whenDeleted", "whenScaled"} {
+		pathsByChart["loki"] = append(pathsByChart["loki"],
+			memoryPath{path: []string{"singleBinary", "persistence", field}, value: "Retain"})
+	}
 
 	applied := map[string]string{}
 	var patchErrs []error
@@ -165,6 +170,11 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		platform.LokiHelmChart(res, lokiStorage, lokiClass),
 		pathsByChart["loki"]); err != nil {
 		patchErrs = append(patchErrs, fmt.Errorf("loki enable/disable: %w", err))
+	}
+	if !lokiEnabled {
+		if err := r.deleteLokiClaim(ctx); err != nil {
+			patchErrs = append(patchErrs, err)
+		}
 	}
 	// Promtail follows Loki: shipping logs to a non-existent gateway is
 	// worse than not shipping at all. Same enabled state, no separate
@@ -325,6 +335,30 @@ func (r *PlatformConfigReconciler) lokiStorage(ctx context.Context, storageMode 
 	}
 	return platform.LokiStorageSize(templateSize, claimSize),
 		platform.LokiStorageClass(templateFound, templateClass, claimClass, storageMode), nil
+}
+
+// deleteLokiClaim requests deletion of disabled Loki's retained log claim after
+// its HelmChart is gone. The Helm controller's finalizer keeps the chart until
+// uninstall finishes. Disabling Loki stops log retention, so the claim needs
+// explicit cleanup. While the chart remains, the error wraps errHelmChartDeleting
+// to keep reconciliation polling.
+func (r *PlatformConfigReconciler) deleteLokiClaim(ctx context.Context) error {
+	chart := &unstructured.Unstructured{}
+	chart.SetGroupVersionKind(helmChartGVK)
+	err := r.Get(ctx, types.NamespacedName{Name: "loki", Namespace: helmChartNamespace}, chart)
+	if err == nil {
+		return fmt.Errorf("loki claim: %w", errHelmChartDeleting)
+	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("reading the loki HelmChart: %w", err)
+	}
+	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "storage-loki-0", Namespace: platform.MonitoringNamespace,
+	}}
+	if err := r.Delete(ctx, claim); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("deleting the loki claim: %w", err)
+	}
+	return nil
 }
 
 // storageRequest returns the storage request, or "" when it is absent or zero.

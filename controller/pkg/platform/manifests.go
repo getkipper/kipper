@@ -144,6 +144,11 @@ spec:
       persistence:
         enabled: true
         size: %s%s
+        # Retaining the claim keeps the logs when the Helm controller
+        # reinstalls a failed release. Disabling Loki deletes the claim.
+        enableStatefulSetAutoDeletePVC: true
+        whenDeleted: Retain
+        whenScaled: Retain
     minio:
       enabled: false
     gateway:

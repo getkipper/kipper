@@ -95,7 +95,7 @@ kip platform disable prometheus
 kip platform disable loki
 ```
 
-The console's Platform page has the same toggle. The HelmCharts are deleted; helm-controller uninstalls the releases; the next `kip upgrade` won't try to reinstall them as long as the override is in place.
+The console's Platform page has the same toggle. The HelmCharts are deleted, and helm-controller uninstalls the releases. The next `kip upgrade` leaves them uninstalled as long as the override is in place. Disabling Loki also deletes its log volume and the logs stored on it.
 
 Forwarding metrics and logs from this cluster to your central stack (Prometheus remote-write, Loki client) is a separate feature on the roadmap. For now the supported pattern is "scrape from outside, run thin here."
 
