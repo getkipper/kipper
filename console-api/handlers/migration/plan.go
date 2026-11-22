@@ -23,6 +23,7 @@ import (
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/capacity"
 	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
 // The plan screen is the mandatory report every migration starts from: what
@@ -42,10 +43,11 @@ type planItem struct {
 	Detail    string `json:"detail,omitempty"`
 	Binding   string `json:"binding,omitempty"`
 
-	Host        string `json:"host,omitempty"`
-	DomainClass string `json:"domain_class,omitempty"`
-	Disposition string `json:"disposition,omitempty"`
-	TargetURL   string `json:"target_url,omitempty"`
+	Host         string   `json:"host,omitempty"`
+	RedirectFrom []string `json:"redirect_from,omitempty"`
+	DomainClass  string   `json:"domain_class,omitempty"`
+	Disposition  string   `json:"disposition,omitempty"`
+	TargetURL    string   `json:"target_url,omitempty"`
 }
 
 // planCapacity carries the numbers behind the capacity verdict. Operators
@@ -78,8 +80,12 @@ type planResponse struct {
 	TargetBaseDomain string        `json:"target_base_domain,omitempty"`
 	MoveBaseDomain   bool          `json:"move_base_domain,omitempty"`
 
-	arriveStopped []string
-	twoCopies     []string
+	arriveStopped        []string
+	twoCopies            []string
+	sharedGitCredentials []gitCredentialUse
+	sourceCredentials    []sharedcred.Entry
+	cloneChecks          []*kipperv1.App
+	unboundWarnings      map[string]bool
 }
 
 // notMigratedList is the static "what does NOT move" block, mirrored from
@@ -88,7 +94,7 @@ type planResponse struct {
 var notMigratedList = []string{
 	"System components (Traefik, cert-manager, Longhorn, Dex): they already exist on the target",
 	"User accounts (Dex): the target starts with only its bootstrap admin; import them with kip user import",
-	"TLS certificates: cert-manager issues new ones on the target once DNS lands",
+	"TLS certificates Kipper issued for routes: the target issues new ones once DNS lands. Uploaded certificates travel with the other secrets",
 	"Postgres globals: extra roles, role passwords, and ALTER DATABASE settings stay behind",
 	"Service share links: grants and signing key stay on the source; mint fresh links after cutover",
 	"Build history: git apps are rebuilt fresh on the target",
@@ -138,9 +144,10 @@ func receiptUser(claims *middleware.Claims) string {
 }
 
 // planDigest binds a receipt to target identity, migration items, demand,
-// warnings, conflicts, and notification/domain choices. Numeric runs in item
-// details are normalized. Blockers and available capacity are checked afresh
-// at start rather than included in the digest.
+// warnings, conflicts, and notification and domain choices. It excludes
+// timing-dependent warnings marked in resp.unboundWarnings and normalizes numeric
+// runs in item details. Blockers and available capacity are checked again at
+// start rather than included in the digest.
 func planDigest(resp *planResponse) string {
 	// Ignore numeric drift in display details, such as estimated database size,
 	// while binding the receipt to statuses, migration choices, and exact IDs.
@@ -155,7 +162,12 @@ func planDigest(resp *planResponse) string {
 		sort.Strings(out)
 		return out
 	}
-	warnings := append([]string(nil), resp.Warnings...)
+	warnings := make([]string, 0, len(resp.Warnings))
+	for _, w := range resp.Warnings {
+		if !resp.unboundWarnings[w] {
+			warnings = append(warnings, w)
+		}
+	}
 	sort.Strings(warnings)
 	conflicts := append([]string(nil), resp.Conflicts...)
 	sort.Strings(conflicts)
@@ -392,6 +404,12 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		}
 	}
 
+	shared, err := sharedcred.Load(ctx, h.Client)
+	if err != nil {
+		resp.Blockers = append(resp.Blockers, fmt.Sprintf("Could not read this cluster's shared git credentials: %v", err))
+	}
+	resp.sourceCredentials = shared
+
 	// Inventory. Failing to enumerate a project is a blocker: a partial
 	// report must never read as the whole picture.
 	for _, project := range projects {
@@ -400,6 +418,15 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		}
 	}
 
+	if warning := h.writeFreezeWarning(ctx, projects, 0); warning != nil {
+		resp.Warnings = append(resp.Warnings, warning.Detail)
+	}
+	// Run clone checks last among operations using ctx because slow git hosts
+	// can exhaust its deadline and change later results included in the digest.
+	h.checkClones(ctx, resp)
+	if targetAnswered {
+		h.checkTargetGitCredentials(token, resp)
+	}
 	if msg := copiesShortfall(resp.twoCopies, target); targetAnswered && msg != "" {
 		resp.Blockers = append(resp.Blockers, msg)
 	}
@@ -407,10 +434,6 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		resp.Blockers = append(resp.Blockers, fmt.Sprintf(
 			"%s would arrive stopped, but the target's Kipper cannot keep a stop and would start them. Upgrade the target cluster first.",
 			strings.Join(resp.arriveStopped, ", ")))
-	}
-
-	if warning := h.writeFreezeWarning(ctx, projects, 0); warning != nil {
-		resp.Warnings = append(resp.Warnings, warning.Detail)
 	}
 
 	return resp
@@ -527,6 +550,15 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 			if app.Spec.Git != nil {
 				item.Detail = "rebuilt from the branch head on the target"
 				gitApps = append(gitApps, ns+"/"+app.Name)
+				use, ok, err := sharedGitCredentialUse(app, project, resp.sourceCredentials)
+				switch {
+				case err != nil:
+					resp.Blockers = append(resp.Blockers, err.Error())
+				case ok:
+					resp.sharedGitCredentials = append(resp.sharedGitCredentials, use)
+				default:
+					resp.cloneChecks = append(resp.cloneChecks, app.DeepCopy())
+				}
 			}
 			h.planAppDomain(app, ns, env, token, keep, resp.MoveBaseDomain, &item)
 			resp.WillMigrate = append(resp.WillMigrate, item)
@@ -593,9 +625,13 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 		if err != nil {
 			return err
 		}
+		routeCerts, err := h.routeCertificates(ctx, ns)
+		if err != nil {
+			return err
+		}
 		count := 0
 		for i := range secrets.Items {
-			if transferableSecret(&secrets.Items[i], riding) {
+			if transferableSecret(&secrets.Items[i], riding, routeCerts) {
 				count++
 			}
 		}
@@ -700,10 +736,12 @@ func (h *Handler) planAppDomain(app *kipperv1.App, ns, env string, token *Token,
 	item.Disposition = string(disp)
 	switch {
 	case disp == dispositionMove:
-		// The custom domain follows the app to the new cluster.
+		// The custom domain follows the app to the new cluster, and so do its
+		// redirect hosts. Any other route keeps them on the source.
+		item.RedirectFrom = app.Spec.Route.RedirectFrom
 		item.TargetURL = "https://" + effective
 	case moveBaseDomain && class == domain.DomainClassPlatform:
-		// Mode B adopts the base domain on the target, so the app keeps its host.
+		// Moving the base domain to the target preserves the app's hostname.
 		item.TargetURL = "https://" + effective
 	default:
 		if tgt := domain.TargetEquivalent(prefix, token.BaseDomain); tgt != "" {
@@ -711,9 +749,9 @@ func (h *Handler) planAppDomain(app *kipperv1.App, ns, env string, token *Token,
 		}
 	}
 
-	// Bind host + disposition into the digest verbatim, so a tampered keep/move
-	// choice changes the digest and fails consent.
-	item.Binding = fmt.Sprintf("route=%s;disp=%s", effective, disp)
+	// Bind the hostname, all source redirect hosts, and disposition into the
+	// digest so changes to the route or keep/move choice invalidate consent.
+	item.Binding = fmt.Sprintf("route=%s;redirect=%s;disp=%s", effective, strings.Join(app.Spec.Route.RedirectFrom, ","), disp)
 }
 
 // planService classifies one service for the report, sizing its database

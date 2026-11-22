@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 func TestBackupUsesOnlyTheScopedFiltersVeleroAllowsTogether(t *testing.T) {
@@ -66,8 +68,14 @@ func TestExcludedNamespacesKeepVeleroOut(t *testing.T) {
 	// that stores their own output, which can leave them stuck in progress.
 	assert.Equal(t, []string{
 		"kube-system", "kube-public", "kube-node-lease",
-		"monitoring", "keda", "longhorn-system", "traefik", "velero", DrillNamespace,
+		"monitoring", "keda", "longhorn-system", "traefik", "velero", DrillNamespace, labels.BuildsNamespace,
 	}, ExcludedNamespaces())
+}
+
+func TestExcludedNamespacesLeaveBuildsOut(t *testing.T) {
+	// A build pod's scratch volumes are gone by the time Velero reads them, and the
+	// installer recreates everything else the namespace holds.
+	assert.Contains(t, ExcludedNamespaces(), labels.BuildsNamespace)
 }
 
 func TestTransientResourcesKeepCertificatesAndTheirSecrets(t *testing.T) {

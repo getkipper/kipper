@@ -126,7 +126,7 @@ func buildManualImageCopySteps(namespace string, apps []string) []string {
 			"",
 			fmt.Sprintf("# Copy %s (requires skopeo):", app),
 			fmt.Sprintf("skopeo copy --src-authfile auth.json --src-cert-dir certs docker://localhost:5000/%s/%s:latest docker://<reachable-registry>/%s/%s:latest", namespace, app, namespace, app),
-			fmt.Sprintf("kip app update %s --project %s --image <reachable-registry>/%s/%s:latest", app, namespace, namespace, app),
+			fmt.Sprintf("kip app update %s --namespace %s --image <reachable-registry>/%s/%s:latest", app, namespace, namespace, app),
 		)
 	}
 	steps = append(steps,

@@ -64,11 +64,18 @@ type Handler struct {
 	// authorize a migration, and whether it already is.
 	StepUpStatus func(ctx context.Context, claims *middleware.Claims) (state string, eligibleAt time.Time, eligible bool, err error)
 
+	// execStream replaces the Kubernetes exec stream in tests.
+	execStream func(ctx context.Context, namespace, pod, container string, cmd []string, stdin io.Reader, stdout io.Writer) error
+
 	// receipts holds the issued plan receipts. In-memory is enough: a
 	// console-api restart invalidates them, and reviewing a fresh plan after
 	// a restart is the safe direction.
 	receiptsMu sync.Mutex
 	receipts   map[string]planReceipt
+
+	// startMu keeps the active-session check and session creation atomic.
+	// StartHandler uses TryLock to reject concurrent starts immediately.
+	startMu sync.Mutex
 }
 
 // emitSecurityEvent forwards to the notifier when one is wired.
@@ -83,6 +90,39 @@ func (h *Handler) emitSecurityEvent(ctx context.Context, e security.Event) {
 // accepts a Succeeded build status carrying this commit — any other success
 // belongs to an earlier attempt's build.
 const migrationBuildAnnotation = "kipper.run/migration-build"
+
+// migrationBuildPrefix starts every commit tag migrationBuildID makes.
+const migrationBuildPrefix = "migrate-"
+
+// answersMigrationBuild accepts the expected migration build or a later build
+// started outside migration, such as a manual rebuild. Later builds must have
+// a Job creation time after the expected tag's timestamp, which has second
+// precision. Builds tagged by another migration attempt are always excluded.
+func answersMigrationBuild(build *kipperv1.AppBuildStatus, expect string) bool {
+	if build.Commit == expect {
+		return true
+	}
+	if strings.HasPrefix(build.Commit, migrationBuildPrefix) {
+		return false
+	}
+	triggered, ok := migrationBuildTime(expect)
+	return ok && build.JobCreatedAt != nil && build.JobCreatedAt.After(triggered)
+}
+
+// migrationBuildTime reads the time a migration build tag from
+// migrationBuildID was made, to the second.
+func migrationBuildTime(tag string) (time.Time, bool) {
+	rest, ok := strings.CutPrefix(tag, migrationBuildPrefix)
+	if !ok {
+		return time.Time{}, false
+	}
+	seconds, _, _ := strings.Cut(rest, "-")
+	unix, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(unix, 0), true
+}
 
 // BuildVersion is the console-api build version, set from main at startup.
 // The accept handshake refuses migrations between different major versions,
@@ -607,6 +647,22 @@ func (h *Handler) applyTransferredSecret(ctx context.Context, sessionID string, 
 	return nil, fmt.Errorf("creating secret: %w", err)
 }
 
+// claimTargetEnd claims the session for a commit or abort with final status end.
+// It returns false and responds with HTTP 409 if the claim fails. After a
+// successful claim, the caller must call EndEnding.
+func claimTargetEnd(w http.ResponseWriter, session *Session, end SessionStatus) bool {
+	if session.BeginEnding(end) {
+		return true
+	}
+	status := session.CurrentStatus()
+	if status == SessionRunning || status == end {
+		respondError(w, http.StatusConflict, "A commit or abort for this migration is already running on this cluster.")
+	} else {
+		respondError(w, http.StatusConflict, fmt.Sprintf("This migration has already ended on this cluster with status %s.", status))
+	}
+	return false
+}
+
 // AbortHandler removes the Secrets this session created here that no
 // controller has adopted. The source calls it when a run fails or is
 // canceled, so an abandoned migration does not strand plaintext credentials
@@ -621,6 +677,10 @@ func (h *Handler) AbortHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if !claimTargetEnd(w, session, SessionCancelled) {
+		return
+	}
+	defer session.EndEnding()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -647,9 +707,9 @@ func (h *Handler) AbortHandler(w http.ResponseWriter, r *http.Request) {
 	// running on the source's credentials after a migration that never landed.
 	restored, restoreFailures := h.restoreJournaledSecrets(ctx, sessionID)
 
-	// Reap any transfer receivers this session stood up, restarting the
-	// services they paused. Without this an abort would leave a target
-	// database/object store stopped until its 24h lease expires.
+	// Reap any transfer receivers this session stood up, so they do not wait
+	// for their 24h lease. A service a receiver paused may hold a partial
+	// copy, so it stays stopped with a note saying why.
 	h.reapSessionTransfers(ctx, sessionID)
 
 	session.Finish(SessionCancelled, "")
@@ -716,10 +776,7 @@ func (h *Handler) TargetAppsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				if app.Status.Build != nil {
 					state.BuildPhase = app.Status.Build.Phase
-					// A status written by a different build than the one this
-					// migration triggered (an earlier attempt's Job reporting
-					// late) must not read as this rebuild's outcome.
-					if expect := app.Annotations[migrationBuildAnnotation]; expect != "" && app.Status.Build.Commit != expect {
+					if expect := app.Annotations[migrationBuildAnnotation]; expect != "" && !answersMigrationBuild(app.Status.Build, expect) {
 						state.BuildPhase = "Pending"
 					}
 				}
@@ -850,11 +907,12 @@ func (h *Handler) workloadsWithNothingRunning(ctx context.Context, namespace str
 
 // StartHandler initiates a migration from this cluster to a target.
 //
-// The checks run cheapest-and-least-destructive first: kill switch, request
-// shape, token decode, plan receipt, capacity — none of which consume
-// anything the operator cannot retry — and the TOTP claim goes last,
-// immediately before the accept call that spends the target's single-use
-// token. A precheck failure must never burn a code.
+// Returns 409 while another outgoing migration is starting, running, or awaiting verification.
+// After decoding the request, checks run from cheapest to most expensive: kill
+// switch, required fields, active migration, token, plan receipt, and live plan
+// including capacity. These checks preserve the receipt, TOTP code, and target
+// token for retries. The receipt is consumed next, followed by the TOTP claim
+// immediately before the accept call that spends the target's single-use token.
 // POST /api/v1/migration/start
 func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -880,6 +938,22 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Token == "" || len(req.Projects) == 0 {
 		respondError(w, http.StatusBadRequest, "token and projects are required")
+		return
+	}
+
+	// Hold the lock through session creation so only one start proceeds.
+	// Reject concurrent starts immediately because the live plan check alone
+	// can take a minute, followed by target acceptance.
+	if !h.startMu.TryLock() {
+		respondError(w, http.StatusConflict,
+			"another migration is starting on this cluster. Wait for it to start or fail, then check the Migration page")
+		return
+	}
+	defer h.startMu.Unlock()
+	if active := h.Sessions.LatestOutgoing(); active != nil {
+		respondError(w, http.StatusConflict, fmt.Sprintf(
+			"a migration to %s is already in progress on this cluster. Finish or cancel it on the Migration page before starting another migration",
+			active.TargetCluster))
 		return
 	}
 
@@ -916,9 +990,9 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusPreconditionFailed, strings.Join(current.Blockers, "; "))
 		return
 	}
-	// The recomputed digest binds the per-app dispositions and the Mode B flag,
-	// so a start request that tampers with keep/move choices no longer matches
-	// the reviewed plan and is refused here.
+	// The digest binds each app's domain choices and the option to adopt the
+	// source cluster's base domain, so altered keep/move choices invalidate
+	// the reviewed plan and cause the start request to be refused.
 	if planDigest(current) != h.receiptDigest(req.PlanReceipt) {
 		respondError(w, http.StatusConflict, "the migration plan changed since you reviewed it. Review the plan again")
 		return
@@ -1124,7 +1198,11 @@ func (h *Handler) ProgressHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// CancelHandler cancels a running migration.
+// CancelHandler cancels a running or verifying migration and stops any attached
+// transfer. It returns HTTP 404 for an unknown session or HTTP 409 if the session
+// has already ended or a cutover is running. The latter response includes
+// cutover_running so callers can keep tracking the active migration. Canceling
+// during verification also requests target cleanup asynchronously.
 // POST /api/v1/migration/{session}/cancel
 func (h *Handler) CancelHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session")
@@ -1134,11 +1212,30 @@ func (h *Handler) CancelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session.Finish(SessionCancelled, "")
+	from, cancelled := session.MarkCancelled()
+	if !cancelled {
+		if from == SessionRunning || from == SessionVerifying {
+			respondJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":           "A cutover is moving the custom domains. Wait for it to finish, then check the Migration page.",
+				"cutover_running": true,
+			})
+			return
+		}
+		respondError(w, http.StatusConflict, fmt.Sprintf("The migration has already ended with status %s.", from))
+		return
+	}
 	h.Sessions.Save(session)
-	// Aborts the in-flight dump or upload immediately; the transfer loop
-	// otherwise only notices at the next project boundary.
+	// Cancel the in-flight dump or upload so cancellation takes effect
+	// before the next project boundary.
 	session.Cancel()
+	// After entering verification, the run loop exits without checking for
+	// cancellation again, so this handler requests cleanup of unadopted Secrets,
+	// restoration of overwritten Secrets, and removal of transfer receivers.
+	if from == SessionVerifying {
+		go h.abortTarget(session, func(msg string, args ...interface{}) {
+			fmt.Printf("[migration %s] %s\n", shortID(session.ID), fmt.Sprintf(msg, args...))
+		})
+	}
 
 	// Cancel stays instantly available as a safety valve, so the loud,
 	// attributed record here is what makes misuse visible after the fact.
@@ -1179,6 +1276,19 @@ func (h *Handler) NotificationStatusHandler(w http.ResponseWriter, r *http.Reque
 		"out_of_band": outOfBand,
 		"env_pinned":  envPinned,
 	})
+}
+
+// ActiveSessionHandler returns the outgoing migration still in progress, so a
+// reloaded migration page can follow it again. The session is null when none
+// is running or awaiting verification.
+// GET /api/v1/migration/active
+func (h *Handler) ActiveSessionHandler(w http.ResponseWriter, _ *http.Request) {
+	session := h.Sessions.LatestOutgoing()
+	if session == nil {
+		respondJSON(w, http.StatusOK, map[string]interface{}{"session": nil})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{"session": session.View()})
 }
 
 // SessionHandler returns the current state of a migration session.

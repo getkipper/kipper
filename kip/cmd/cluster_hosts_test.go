@@ -137,3 +137,20 @@ func TestClusterHostsAcceptsAnOrdinaryHostname(t *testing.T) {
 
 	assert.Equal(t, "login.corp.example.com", hostsOf(t).DexHost())
 }
+
+// TestClusterHostsAsksForAClusterWhenNoneIsCurrent covers the empty selection
+// left by removing the current cluster. The error must explain how to select
+// another cluster instead of displaying an empty name.
+func TestClusterHostsAsksForAClusterWhenNoneIsCurrent(t *testing.T) {
+	stageClusterForHosts(t, "console.example.com")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	cfg.CurrentCluster = ""
+	require.NoError(t, config.Save(cfg))
+
+	err = hostsCommand(t, "--dex", "dex.example.com")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip cluster use <name>")
+	assert.NotContains(t, err.Error(), `""`)
+}

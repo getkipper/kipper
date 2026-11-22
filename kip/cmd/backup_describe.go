@@ -3,7 +3,9 @@ package cmd
 import (
 	"compress/gzip"
 	"context"
+	"crypto/md5" //nolint:gosec // S3 checks an SSE-C key against its MD5
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,8 +17,10 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -24,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
@@ -59,13 +64,13 @@ func runBackupDescribe(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n  %s\n\n", platform.BackupsNotConfigured)
 		return nil
 	}
-	return describeBackup(ctx, k8sClient.Dynamic(), args[0], os.Stdout, &http.Client{Timeout: time.Minute})
+	return describeBackup(ctx, k8sClient.Dynamic(), k8sClient.Clientset(), args[0], os.Stdout, &http.Client{Timeout: time.Minute})
 }
 
 // describeBackup prints the named backup. It downloads the error and warning
 // messages only when Velero counted some. Failures to read volume backups or
 // messages are printed in place of those details.
-func describeBackup(ctx context.Context, dyn dynamic.Interface, name string, out io.Writer, httpClient *http.Client) error {
+func describeBackup(ctx context.Context, dyn dynamic.Interface, cs kubernetes.Interface, name string, out io.Writer, httpClient *http.Client) error {
 	backup, err := dyn.Resource(backupGVR).Namespace("velero").Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return fmt.Errorf("there is no backup named %q. Run kip backup list to see available backups", name)
@@ -86,8 +91,11 @@ func describeBackup(ctx context.Context, dyn dynamic.Interface, name string, out
 	var resultsErr error
 	if backupCount(*backup, "errors")+backupCount(*backup, "warnings") > 0 {
 		var r backupResults
-		if r, resultsErr = fetchBackupResults(ctx, dyn, name, httpClient); resultsErr == nil {
-			results = &r
+		var sseKey *locationSSEKey
+		if sseKey, resultsErr = backupSSEKey(ctx, dyn, cs, *backup); resultsErr == nil {
+			if r, resultsErr = fetchBackupResults(ctx, dyn, name, sseKey, httpClient); resultsErr == nil {
+				results = &r
+			}
 		}
 	}
 	writeBackupDescription(out, *backup, pvbs, pvbErr, results, resultsErr)
@@ -125,8 +133,10 @@ const downloadCleanupWait = 10 * time.Second
 // fetchBackupResults asks Velero for a link to the backup's error and warning
 // messages and downloads them. It attempts to delete its DownloadRequest when
 // done, allowing up to downloadCleanupWait even if ctx has ended. Cleanup errors
-// are ignored. The HTTP client controls the download timeout.
-func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup string, httpClient *http.Client) (backupResults, error) {
+// are ignored. The HTTP client controls the download timeout. A non-nil sseKey
+// supplies the decryption key and allowed hosts, requires HTTPS, and disables
+// redirects. Downloads exceeding maxBackupResultsSize after decompression fail.
+func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup string, sseKey *locationSSEKey, httpClient *http.Client) (backupResults, error) {
 	suffix := make([]byte, 4)
 	if _, err := rand.Read(suffix); err != nil {
 		return backupResults{}, err
@@ -154,7 +164,25 @@ func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup strin
 	if err != nil {
 		return backupResults{}, err
 	}
-	resp, err := httpClient.Get(link) //nolint:gosec // the URL is Velero's presigned link to the backup storage
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return backupResults{}, downloadError(err)
+	}
+	if sseKey != nil {
+		if err := sseKey.checkDestination(req.URL); err != nil {
+			return backupResults{}, err
+		}
+		sum := md5.Sum(sseKey.key) //nolint:gosec // S3 checks an SSE-C key against its MD5
+		req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Algorithm", "AES256")
+		req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Key", base64.StdEncoding.EncodeToString(sseKey.key))
+		req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Key-Md5", base64.StdEncoding.EncodeToString(sum[:]))
+		keyed := *httpClient
+		keyed.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return errors.New("the backup storage redirected the download, and kip does not follow a redirect with the SSE-C key")
+		}
+		httpClient = &keyed
+	}
+	resp, err := httpClient.Do(req) //nolint:gosec // the URL is Velero's presigned link to the backup storage
 	if err != nil {
 		return backupResults{}, downloadError(err)
 	}
@@ -176,6 +204,108 @@ func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup strin
 		return backupResults{}, fmt.Errorf("reading the messages: %w", err)
 	}
 	return results, nil
+}
+
+// locationSSEKey is a backup location's SSE-C key and the hosts that may
+// receive it.
+type locationSSEKey struct {
+	key   []byte
+	hosts []string
+}
+
+// checkDestination returns an error unless u is an HTTPS link to one of the
+// location's hosts. The key decrypts every backup, so it goes only over TLS and
+// only to the storage the location names.
+func (k *locationSSEKey) checkDestination(u *url.URL) error {
+	if u.Scheme != "https" {
+		return errors.New("the backup storage's download link is not HTTPS, so kip does not send it the SSE-C key")
+	}
+	if _, ok := keyHost(k.hosts[0]); !ok {
+		return fmt.Errorf("the backup location's endpoint %s is not a plain ASCII host name, so kip does not send it the SSE-C key. Set the endpoint to its ASCII (punycode) spelling", k.hosts[0])
+	}
+	dest, ok := keyHost(u.Host)
+	if !ok || !slices.ContainsFunc(k.hosts, func(h string) bool { allowed, ok := keyHost(h); return ok && allowed == dest }) {
+		return fmt.Errorf("the backup storage's download link names %s, which is not the backup location's endpoint %s, so kip does not send it the SSE-C key", u.Host, k.hosts[0])
+	}
+	return nil
+}
+
+// keyHost returns host in the form the key check compares: lower case, without
+// an empty port. Only ASCII hosts without an IPv6 zone qualify, because Unicode
+// case folding and the IDNA mapping the HTTP client applies can disagree about
+// which name is meant, and zone names are case-sensitive.
+func keyHost(host string) (string, bool) {
+	for i := 0; i < len(host); i++ {
+		if host[i] >= utf8.RuneSelf || host[i] == '%' {
+			return "", false
+		}
+	}
+	return strings.ToLower(strings.TrimSuffix(host, ":")), true
+}
+
+// sseKeyHosts returns the allowed download hosts, starting with the s3Url host
+// or the region's AWS S3 host when s3Url is unset. A configured bucket adds its
+// subdomain unless s3ForcePathStyle is true. An invalid endpoint or missing
+// endpoint and region returns an error.
+func sseKeyHosts(bsl unstructured.Unstructured) ([]string, error) {
+	config, _, _ := unstructured.NestedStringMap(bsl.Object, "spec", "config")
+	var host string
+	switch {
+	case config["s3Url"] != "":
+		u, err := url.Parse(config["s3Url"])
+		if err != nil || u.Host == "" {
+			return nil, fmt.Errorf("backup location %s has the endpoint %q, which kip cannot read, so it does not send the SSE-C key", bsl.GetName(), config["s3Url"])
+		}
+		host = u.Host
+	case config["region"] != "":
+		host = "s3." + config["region"] + ".amazonaws.com"
+	default:
+		return nil, fmt.Errorf("backup location %s sets neither s3Url nor region, so kip cannot tell which host may receive the SSE-C key", bsl.GetName())
+	}
+	hosts := []string{host}
+	bucket, _, _ := unstructured.NestedString(bsl.Object, "spec", "objectStorage", "bucket")
+	if pathStyle, _ := strconv.ParseBool(config["s3ForcePathStyle"]); !pathStyle && bucket != "" {
+		hosts = append(hosts, bucket+"."+host)
+	}
+	return hosts, nil
+}
+
+// backupSSEKey returns the SSE-C key of the storage location a backup was
+// written to, or nil when no key is configured. A missing location also returns
+// nil, leaving the download to report any storage access problem.
+func backupSSEKey(ctx context.Context, dyn dynamic.Interface, cs kubernetes.Interface, backup unstructured.Unstructured) (*locationSSEKey, error) {
+	location, _, _ := unstructured.NestedString(backup.Object, "spec", "storageLocation")
+	if location == "" {
+		location = "default"
+	}
+	bsl, err := dyn.Resource(backupStorageLocationGVR).Namespace("velero").Get(ctx, location, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading backup location %s: %w", location, err)
+	}
+	ref, _, _ := unstructured.NestedString(bsl.Object, "spec", "config", "customerKeyEncryptionSecret")
+	if ref == "" {
+		return nil, nil
+	}
+	secretName, field, ok := strings.Cut(ref, "/")
+	if !ok {
+		return nil, fmt.Errorf("backup location %s names its SSE-C key as %q, which is not <secret>/<key>", location, ref)
+	}
+	hosts, err := sseKeyHosts(*bsl)
+	if err != nil {
+		return nil, err
+	}
+	secret, err := cs.CoreV1().Secrets("velero").Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("reading the SSE-C key in Secret velero/%s: %w", secretName, err)
+	}
+	key := secret.Data[field]
+	if len(key) != 32 {
+		return nil, fmt.Errorf("the SSE-C key in Secret velero/%s is not 32 bytes long", secretName)
+	}
+	return &locationSSEKey{key: key, hosts: hosts}, nil
 }
 
 // downloadError describes a failed download without the presigned link, whose

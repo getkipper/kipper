@@ -393,6 +393,40 @@ func TestCreateService_RefusesToPublishOverARunningService(t *testing.T) {
 	mustSucceed(t, h.createService(ctx, "sess-running", "db", "shop-prod", map[string]interface{}{"type": "postgres"}, same))
 }
 
+// Credentials must retain the username and password initialized in the engine.
+func TestCreateService_RefusesToRenameARunningServicesUser(t *testing.T) {
+	ctx := context.Background()
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "shop-prod"},
+		Data:       map[string][]byte{"PASSWORD": []byte("same"), "USERNAME": []byte("app")},
+	}
+	running := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop-prod"}}
+	h := &Handler{
+		Client:   fake.NewSimpleClientset(existing, running),
+		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).Build(),
+		Sessions: NewSessionStore(),
+	}
+	h.Sessions.Put(&Session{ID: "sess-running", Projects: []string{"shop"}, Status: SessionRunning,
+		Secret: "s", ExpiresAt: time.Now().Add(time.Hour)})
+	credentials := func(data map[string]string) *transferredCredentials {
+		out := &transferredCredentials{Data: map[string]string{}}
+		for k, v := range data {
+			out.Data[k] = base64.StdEncoding.EncodeToString([]byte(v))
+		}
+		return out
+	}
+	postgres := map[string]interface{}{"type": "postgres"}
+
+	err := h.createService(ctx, "sess-running", "db", "shop-prod", postgres, credentials(map[string]string{"PASSWORD": "same", "USERNAME": "other"}))
+	if err == nil {
+		t.Fatal("a running service's user must not be renamed under it")
+	}
+	if h.createService(ctx, "sess-running", "db", "shop-prod", postgres, credentials(map[string]string{"PASSWORD": "same"})) == nil {
+		t.Fatal("credentials naming no user mean the default one, which differs too")
+	}
+	mustSucceed(t, h.createService(ctx, "sess-running", "db", "shop-prod", postgres, credentials(map[string]string{"PASSWORD": "same", "USERNAME": "app"})))
+}
+
 func mustSucceed(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

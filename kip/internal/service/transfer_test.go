@@ -1,7 +1,11 @@
 package service
 
 import (
+	"bytes"
+	"compress/gzip"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -79,7 +83,9 @@ func TestBuildImportCommand(t *testing.T) {
 			name:    "postgres custom format with drop",
 			svcType: "postgres",
 			opts:    ImportOptions{Database: "app", Drop: true, Format: DumpPGCustom},
-			want:    []string{"pg_restore", `-d "app"`, "--no-owner", "--clean --if-exists"},
+			// The source's roles do not exist on the target, so the archive's
+			// grants to them are left out.
+			want: []string{"pg_restore", `-d "app"`, "--no-owner", "--no-privileges", "--clean --if-exists"},
 		},
 		{
 			name:    "postgres plain sql",
@@ -117,7 +123,7 @@ func TestBuildImportCommand(t *testing.T) {
 			name:    "mysql gzipped with drop",
 			svcType: "mysql",
 			opts:    ImportOptions{Database: "app", Drop: true, Format: DumpGzip},
-			want:    []string{"DROP DATABASE IF EXISTS `app`", "CREATE DATABASE `app`", "gunzip -c", "MYSQL_PWD=", `echo $? >"$s"`},
+			want:    []string{"DROP DATABASE IF EXISTS \\`app\\`", "CREATE DATABASE \\`app\\`", "gunzip -c", "MYSQL_PWD=", `echo $? >"$s"`},
 			wantNot: []string{`-p"$MYSQL_ROOT_PASSWORD"`},
 		},
 		{
@@ -282,5 +288,176 @@ func TestPipelineStatusPropagation(t *testing.T) {
 	// producer's failure.
 	if err := run("false | cat >/dev/null"); err != nil {
 		t.Error("expected plain sh to mask the producer failure (control)")
+	}
+}
+
+// recordingTool logs arguments to $LOG and reads stdin unless given a statement
+// to run. It exits with status 3 when its arguments contain a nonempty $FAIL_ON.
+// A database existence query returns $EXISTS.
+const recordingTool = `#!/bin/sh
+echo "$(basename "$0") $*" >> "$LOG"
+case " $* " in *" -c "*|*" -e "*) ;; *) cat >/dev/null ;; esac
+case "$*" in *"SELECT 1"*) printf '%s' "$EXISTS" ;; esac
+if [ -n "$FAIL_ON" ]; then case "$*" in *"$FAIL_ON"*) exit 3 ;; esac; fi
+exit 0
+`
+
+// runImport runs an import script against stand-ins for the engine tools and
+// returns their invocations, one per line, and whether the script succeeded.
+func runImport(t *testing.T, svcType string, opts ImportOptions, input []byte, env ...string) (string, bool) {
+	t.Helper()
+	cmd, err := BuildImportCommand(svcType, opts)
+	if err != nil {
+		t.Fatalf("BuildImportCommand: %v", err)
+	}
+	bin := t.TempDir()
+	log := filepath.Join(bin, "calls")
+	for _, tool := range []string{"mysql", "psql", "pg_restore"} {
+		if err := os.WriteFile(filepath.Join(bin, tool), []byte(recordingTool), 0o755); err != nil { //nolint:gosec // test-local executable
+			t.Fatal(err)
+		}
+	}
+	run := exec.Command("sh", "-c", cmd[2]) //nolint:gosec // the script under test
+	run.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "LOG=" + log, "MYSQL_ROOT_PASSWORD=x", "POSTGRES_USER=legacy"}, env...)
+	run.Stdin = bytes.NewReader(input)
+	runErr := run.Run()
+	calls, _ := os.ReadFile(log)
+	return string(calls), runErr == nil
+}
+
+func runMySQLImport(t *testing.T, opts ImportOptions, env ...string) string {
+	t.Helper()
+	calls, ok := runImport(t, "mysql", opts, []byte("CREATE TABLE t (id int);\n"), env...)
+	if !ok {
+		t.Fatalf("import script failed:\n%s", calls)
+	}
+	return calls
+}
+
+func gzipped(t *testing.T, text string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(text)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// A refused CREATE or GRANT must stop the import before anything is loaded.
+func TestMySQLImportStopsWhenThePreparationFails(t *testing.T) {
+	calls, ok := runImport(t, "mysql", ImportOptions{Database: "shop_data", Format: DumpGzip},
+		gzipped(t, "CREATE TABLE t (id int);\n"), "MYSQL_USER=legacy", "FAIL_ON=GRANT")
+
+	if ok {
+		t.Error("the import reported success after its preparation failed")
+	}
+	if strings.Contains(calls, "-u root shop_data") {
+		t.Errorf("the dump was loaded after the preparation failed:\n%s", calls)
+	}
+}
+
+// A fresh service may lack the requested database, and both pg_restore and
+// psql require it to exist before loading data.
+func TestPostgresImportCreatesAMissingDatabase(t *testing.T) {
+	for _, format := range []DumpFormat{DumpPGCustom, DumpPlain} {
+		calls, ok := runImport(t, "postgres", ImportOptions{Database: "orders", Format: format}, []byte("x"))
+		if !ok {
+			t.Fatalf("import failed:\n%s", calls)
+		}
+		if !strings.Contains(calls, `CREATE DATABASE "orders"`) {
+			t.Errorf("format %d: the missing database is not created:\n%s", format, calls)
+		}
+	}
+
+	calls, _ := runImport(t, "postgres", ImportOptions{Database: "orders", Format: DumpPGCustom}, []byte("x"), "EXISTS=1")
+	if strings.Contains(calls, "CREATE DATABASE") {
+		t.Errorf("an existing database is created again:\n%s", calls)
+	}
+}
+
+func TestPostgresImportStopsWhenTheDatabaseCannotBeCreated(t *testing.T) {
+	calls, ok := runImport(t, "postgres", ImportOptions{Database: "orders", Format: DumpPGCustom}, []byte("x"), "FAIL_ON=CREATE DATABASE")
+
+	if ok || strings.Contains(calls, "pg_restore") {
+		t.Errorf("the dump was restored after the database could not be created:\n%s", calls)
+	}
+}
+
+// A migration's manual steps import each database into a target service that
+// has never seen it. mysql refuses a dump into a database that does not exist,
+// and a database root created leaves the service user without access to it.
+func TestMySQLImportCreatesTheDatabaseAndGrantsTheServiceUser(t *testing.T) {
+	calls := runMySQLImport(t, ImportOptions{Database: "shop_data"}, "MYSQL_USER=legacy")
+
+	if !strings.Contains(calls, "CREATE DATABASE IF NOT EXISTS `shop_data`") {
+		t.Errorf("the database is not created first:\n%s", calls)
+	}
+	if !strings.Contains(calls, "GRANT ALL PRIVILEGES ON `shop_data`.* TO 'legacy'@'%'") {
+		t.Errorf("the service user is not granted the database:\n%s", calls)
+	}
+	if !strings.Contains(calls, "-u root shop_data") {
+		t.Errorf("the dump is not loaded into the database:\n%s", calls)
+	}
+}
+
+func TestMySQLImportGrantsNobodyForARootService(t *testing.T) {
+	calls := runMySQLImport(t, ImportOptions{Database: "shop_data"})
+
+	if strings.Contains(calls, "GRANT") {
+		t.Errorf("a service that authenticates as root has no user to grant:\n%s", calls)
+	}
+	if !strings.Contains(calls, "CREATE DATABASE IF NOT EXISTS `shop_data`") {
+		t.Errorf("the database is not created first:\n%s", calls)
+	}
+}
+
+func TestMySQLImportWithDropGrantsTheServiceUser(t *testing.T) {
+	calls := runMySQLImport(t, ImportOptions{Database: "shop_data", Drop: true}, "MYSQL_USER=legacy")
+
+	if !strings.Contains(calls, "DROP DATABASE IF EXISTS `shop_data`; CREATE DATABASE `shop_data`") {
+		t.Errorf("the database is not replaced:\n%s", calls)
+	}
+	if !strings.Contains(calls, "GRANT ALL PRIVILEGES ON `shop_data`.* TO 'legacy'@'%'") {
+		t.Errorf("the service user is not granted the new database:\n%s", calls)
+	}
+	// mysql -e stops at the first failing statement, so a grant that fails
+	// leaves the existing database in place.
+	if strings.Index(calls, "GRANT") > strings.Index(calls, "DROP DATABASE") {
+		t.Errorf("the grant runs after the database is dropped:\n%s", calls)
+	}
+}
+
+// The service user's name goes into a SQL string, so a name with a quote or a
+// backslash is refused before anything is dropped or loaded.
+func TestMySQLImportRefusesAUserNameItCannotQuote(t *testing.T) {
+	for _, user := range []string{"o'reilly", `back\slash`, "semi;colon"} {
+		calls, ok := runImport(t, "mysql", ImportOptions{Database: "shop_data", Drop: true},
+			[]byte("CREATE TABLE t (id int);\n"), "MYSQL_USER="+user)
+
+		if ok {
+			t.Errorf("%s: the import reported success", user)
+		}
+		if calls != "" {
+			t.Errorf("%s: mysql ran anyway:\n%s", user, calls)
+		}
+	}
+}
+
+// Include scheduled events, as automatic migration does, to preserve the
+// app's periodic jobs in the export.
+func TestMySQLExportKeepsEventsRoutinesAndTriggers(t *testing.T) {
+	cmd, err := BuildExportCommand("mysql", "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := strings.Join(cmd, " ")
+	for _, flag := range []string{"--events", "--routines", "--triggers"} {
+		if !strings.Contains(script, flag) {
+			t.Errorf("the export leaves out %s: %s", flag, script)
+		}
 	}
 }

@@ -23,12 +23,12 @@ import (
 const defaultPort = "22"
 
 const (
-	// dialAttempts is how many times a command whose connection never
-	// reached the remote side is tried. Enough to ride out a MaxStartups
-	// drop, few enough that a genuinely unreachable host fails promptly.
+	// dialAttempts is how many times a probe that timed out or could not
+	// resolve the host is tried, few enough that a genuinely unreachable host
+	// fails promptly.
 	dialAttempts = 3
-	// dialBackoff is the wait before the second attempt; the third waits
-	// twice as long. A MaxStartups drop clears in well under this.
+	// dialBackoff is the wait before the second of those attempts. The third
+	// waits twice as long.
 	dialBackoff = time.Second
 	// sshTransportExit is the status ssh returns when it fails on its own
 	// rather than relaying a remote command's. A remote command can also
@@ -78,7 +78,9 @@ type Client struct {
 
 // Dial verifies SSH access and, for non-root users, passwordless sudo access
 // to a root Bash shell. An empty User defaults to root. Connection probes retry
-// transient transport failures. Authentication and sudo failures return an error.
+// transient transport failures and print one notice to stderr when retrying
+// refused or dropped connections. Exhausted retries, authentication failures,
+// and sudo failures return an error.
 func Dial(cfg Config) (*Client, error) {
 	c := &Client{cfg: cfg, controlPath: controlSocket(cfg)}
 
@@ -90,12 +92,21 @@ func Dial(cfg Config) (*Client, error) {
 	}
 	var err error
 	var out string
+	noticed := false
 	for attempt := 1; ; attempt++ {
 		out, err = c.attemptRaw(probe, nil, nil)
-		if err == nil || attempt == dialAttempts || !neverReachedHost(err, out) {
+		if err == nil || !neverReachedHost(err, out) {
 			break
 		}
-		time.Sleep(time.Duration(attempt) * dialBackoff)
+		wait, again := probeRetryWait(attempt, out)
+		if !again {
+			break
+		}
+		if !noticed && !unreachable(out) {
+			noticed = true
+			_, _ = fmt.Fprintf(retryNotice, "  !  %s is refusing SSH connections, perhaps because of its SSH rate limit. kip keeps trying for about 30 seconds.\n", cfg.Host)
+		}
+		sleep(wait)
 	}
 	if err != nil {
 		if c.viaSudo() && strings.Contains(out, "sudo") {
@@ -111,6 +122,45 @@ func Dial(cfg Config) (*Client, error) {
 	}
 
 	return c, nil
+}
+
+// refusedWaits spaces the probe's retries after a refused or dropped connection
+// over more than 30 seconds. That is the window of the UFW LIMIT rule kip puts
+// on port 22, which refuses a seventh new connection from one address and
+// counts each refused one as well. A MaxStartups drop clears well inside it.
+var refusedWaits = []time.Duration{3 * time.Second, 8 * time.Second, 12 * time.Second, 12 * time.Second}
+
+// sleep is time.Sleep, replaced in tests.
+var sleep = time.Sleep
+
+// retryNotice receives the one line Dial prints when it starts waiting out
+// refused connections.
+var retryNotice io.Writer = os.Stderr
+
+// probeRetryWait returns how long to wait before another attempt of a probe
+// that never reached the host, or false when it has been tried enough.
+func probeRetryWait(attempt int, output string) (time.Duration, bool) {
+	if unreachable(output) {
+		if attempt >= dialAttempts {
+			return 0, false
+		}
+		return time.Duration(attempt) * dialBackoff, true
+	}
+	if attempt > len(refusedWaits) {
+		return 0, false
+	}
+	return refusedWaits[attempt-1], true
+}
+
+// unreachable identifies timeout, DNS and routing errors for the shorter
+// retry schedule. Refused connections use the longer rate-limit retry window.
+func unreachable(output string) bool {
+	for _, reason := range []string{"timed out", "Could not resolve hostname", "No route to host", "Network is unreachable"} {
+		if strings.Contains(output, reason) {
+			return true
+		}
+	}
+	return false
 }
 
 // sudoPath includes /usr/local/bin so sudo commands can find k3s and kubectl

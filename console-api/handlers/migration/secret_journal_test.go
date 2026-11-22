@@ -103,6 +103,27 @@ func TestAbortRestoresOverwrittenSecret(t *testing.T) {
 	}
 }
 
+// Retrying an abort should process only unfinished restores. Backups removed
+// after a successful restore must not be reported as missing.
+func TestRetriedRestoreSkipsWhatTheFirstFinished(t *testing.T) {
+	ctx := context.Background()
+	original := existingSecret("api-secrets",
+		map[string][]byte{"DATABASE_URL": []byte("postgres://target-own")}, corev1.SecretTypeOpaque)
+	h := journalHandler(t, original)
+	if err := h.journalExistingSecret(ctx, "sess-1", original); err != nil {
+		t.Fatalf("journaling: %v", err)
+	}
+	if restored, failures := h.restoreJournaledSecrets(ctx, "sess-1"); restored != 1 || len(failures) > 0 {
+		t.Fatalf("first restore: restored=%d failures=%v", restored, failures)
+	}
+
+	restored, failures := h.restoreJournaledSecrets(ctx, "sess-1")
+
+	if restored != 0 || len(failures) > 0 {
+		t.Fatalf("retried restore: restored=%d failures=%v, want nothing left to do", restored, failures)
+	}
+}
+
 // A controller-owned Secret must come back owned, or aborting would silently
 // detach it from its controller.
 func TestRestorePreservesOwnerReferences(t *testing.T) {

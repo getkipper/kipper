@@ -364,3 +364,9 @@ management.server.port=8081
 The same shape works elsewhere. A Go service can register `net/http/pprof` on its own `http.ServeMux` and serve that on a second listener rather than leaving it on `DefaultServeMux`; a Node app can mount its admin router on a separate `app.listen`. Kipper special-cases none of them.
 
 Use ingress path rules for any remaining endpoints that share the public port.
+
+## Request header names {#request-header-names}
+
+The ingress drops any request header whose name contains a character other than a letter, a digit, or a dash, such as `api_key` or `X.Trace.Id`. Many app runtimes, including PHP and Python's WSGI, treat `X_Kipper_Key_Name` and `X-Kipper-Key-Name` as the same header. An underscore variant could therefore bypass ingress rules that strip or set dashed headers. nginx ignores such headers by default for the same reason.
+
+Clients sending header names with underscores or dots must use dashes instead, for example `api-key` in place of `api_key`. This also applies to gRPC metadata keys, so use `tenant-id` in place of `tenant_id`.

@@ -130,7 +130,7 @@ func (h *Handler) migrateApps(ctx context.Context, session *Session, token *Toke
 	})
 
 	if len(arrivesStopped) > 0 {
-		session.AddStep(arrivesStoppedStep(namespace, h.appScope(ctx, namespace), arrivesStopped))
+		session.AddStep(arrivesStoppedStep(namespace, arrivesStopped))
 	}
 	return nil
 }

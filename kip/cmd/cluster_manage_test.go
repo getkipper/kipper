@@ -1372,3 +1372,57 @@ func TestClusterRenameDoesNotClobberAStagingFile(t *testing.T) {
 	require.NoError(t, readErr, "the file already at the predictable staging name survives")
 	assert.Equal(t, "someone else's file\n", string(content))
 }
+
+func TestClusterRemoveLeavesNoClusterCurrentWhenItRemovesTheCurrentOne(t *testing.T) {
+	withFakeHome(t)
+	require.NoError(t, config.Save(&config.Config{
+		CurrentCluster: "staging",
+		Clusters: []config.Cluster{
+			{Name: "production", Host: "203.0.113.1", Kubeconfig: scratchKubeconfig(t)},
+			{Name: "staging", Host: "203.0.113.2", Kubeconfig: scratchKubeconfig(t)},
+		},
+	}))
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runClusterRemove(clusterRemoveCmd, []string{"staging"}))
+	})
+
+	saved, err := config.Load()
+	require.NoError(t, err)
+	assert.Empty(t, saved.CurrentCluster, "the next command must not reach a cluster nobody chose")
+	assert.NotNil(t, saved.GetCluster("production"))
+	assert.Contains(t, out, "kip cluster use", "the output must say how to pick the next cluster")
+}
+
+func TestClusterRemoveKeepsTheCurrentClusterWhenItRemovesAnother(t *testing.T) {
+	withFakeHome(t)
+	require.NoError(t, config.Save(&config.Config{
+		CurrentCluster: "production",
+		Clusters: []config.Cluster{
+			{Name: "production", Host: "203.0.113.1", Kubeconfig: scratchKubeconfig(t)},
+			{Name: "staging", Host: "203.0.113.2", Kubeconfig: scratchKubeconfig(t)},
+		},
+	}))
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runClusterRemove(clusterRemoveCmd, []string{"staging"}))
+	})
+
+	saved, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "production", saved.CurrentCluster)
+	assert.NotContains(t, out, "kip cluster use")
+}
+
+func TestCommandsAskForAClusterWhenNoneIsCurrent(t *testing.T) {
+	withFakeHome(t)
+	t.Setenv("KIP_CLUSTER", "")
+	require.NoError(t, config.Save(&config.Config{
+		Clusters: []config.Cluster{{Name: "production", Host: "203.0.113.1"}},
+	}))
+
+	_, err := loadCurrentClusterConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip cluster use")
+	assert.NotContains(t, err.Error(), "kip install")
+}

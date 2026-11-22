@@ -1,105 +1,119 @@
 package migration
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
+	"encoding/hex"
 	"strings"
 	"testing"
 
-	"sigs.k8s.io/yaml"
+	"github.com/stretchr/testify/assert"
 )
 
-// fakeTool records its arguments and how it received the password. It stands
-// in for kip, which runs everything after "--" with the pod's environment, and
-// for each engine tool the guide calls.
-const fakeTool = `#!/bin/sh
-name="$(basename "$0")"
-if [ "$name" = kip ]; then
-	while [ "$1" != "--" ]; do shift; done
-	shift
-	exec "$@"
-fi
-printf '%s\n' "$*" >>"$LOG/args"
-for a in "$@"; do
-	case "$a" in --config=*) cat "${a#--config=}" >"$LOG/$name.config" ;; esac
-done
-[ -n "$MYSQL_PWD" ] && printf '%s' "$MYSQL_PWD" >"$LOG/$name.mysqlpwd"
-cat >/dev/null
-exit 0
-`
+// Each import replaces data from a failed attempt so the operator can retry.
+// Migration preserves namespace names, so an exact namespace avoids adding
+// the operator's organization prefix through --project.
+//
+// A database too large for the automatic transfer is moved with kip's own
+// export and import, one database at a time, from a machine that reaches both
+// clusters. kip handles the engine credentials, so no step names one.
+func TestManualSteps_MoveEachDatabaseWithKip(t *testing.T) {
+	steps := strings.Join(buildManualMigrationSteps("mysql", "db", "shop-prod", []string{"orders", "stock"}), "\n")
 
-// runManualSteps runs each kip command of a guide through sh with fakes for
-// kip and the engine tools, and returns the directory holding their records.
-func runManualSteps(t *testing.T, svcType, password string) string {
-	t.Helper()
-	bin, log, work := t.TempDir(), t.TempDir(), t.TempDir()
-	for _, name := range []string{"kip", "mongodump", "mongorestore", "mysqldump", "mysql"} {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte(fakeTool), 0o755); err != nil { //nolint:gosec // test-local executable
-			t.Fatal(err)
-		}
+	for _, db := range []string{"orders", "stock"} {
+		assert.Contains(t, steps, "kip service export db --namespace shop-prod --database "+db+" --file shop-prod.db."+db+".sql.gz --cluster <source-cluster> && "+
+			"kip service import db --namespace shop-prod --database "+db+" --drop --file shop-prod.db."+db+".sql.gz --cluster <target-cluster>")
 	}
-	for _, step := range buildManualMigrationSteps(svcType, "orders", "shop") {
-		if !strings.HasPrefix(step, "kip ") {
-			continue
-		}
-		// Reuse the exported file in the work directory to simulate the copy step.
-		cmd := exec.Command("sh", "-c", strings.ReplaceAll(step, "/tmp/", "")) //nolint:gosec // test-local commands from the guide
-		cmd.Dir = work
-		cmd.Env = append(os.Environ(),
-			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-			"LOG="+log,
-			"MONGO_INITDB_ROOT_USERNAME=root",
-			"MONGO_INITDB_ROOT_PASSWORD="+password,
-			"MYSQL_ROOT_PASSWORD="+password,
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", step, err, out)
-		}
-	}
-	return log
+	assert.NotContains(t, steps, "scp", "kip reaches both clusters itself")
+	assert.NotContains(t, steps, "PASSWORD")
 }
 
-func TestManualMongoStepsKeepThePasswordOutOfTheArguments(t *testing.T) {
-	password := "guide-sentinel 'q' #x: y"
-	log := runManualSteps(t, "mongodb", password)
+func TestManualSteps_NameEachEnginesDumpFormat(t *testing.T) {
+	postgres := strings.Join(buildManualMigrationSteps("postgres", "db", "shop", []string{"app"}), "\n")
+	assert.Contains(t, postgres, "kip service export db --namespace shop --database app --file shop.db.app.dump --cluster <source-cluster>",
+		"the default environment needs no flag")
 
-	args, err := os.ReadFile(filepath.Join(log, "args"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(args), "guide-sentinel") {
-		t.Errorf("the password reached a tool's arguments:\n%s", args)
-	}
-	for _, tool := range []string{"mongodump", "mongorestore"} {
-		raw, err := os.ReadFile(filepath.Join(log, tool+".config"))
-		if err != nil {
-			t.Fatalf("%s got no config file: %v", tool, err)
+	mongo := strings.Join(buildManualMigrationSteps("mongodb", "docs", "shop-prod", nil), "\n")
+	assert.Contains(t, mongo, "kip service export docs --namespace shop-prod --file shop-prod.docs.archive.gz --cluster <source-cluster> && "+
+		"kip service import docs --namespace shop-prod --drop --file shop-prod.docs.archive.gz --cluster <target-cluster>",
+		"a mongodb archive carries every database")
+}
+
+func TestManualSteps_SayToRepeatWhenTheDatabasesAreUnknown(t *testing.T) {
+	steps := buildManualMigrationSteps("mysql", "db", "shop-prod", nil)
+	joined := strings.Join(steps, "\n")
+
+	// Omitting --database starts with the database named in the service's credentials.
+	assert.Contains(t, joined, "kip service export db --namespace shop-prod --file shop-prod.db.sql.gz --cluster <source-cluster> && "+
+		"kip service import db --namespace shop-prod --drop --file shop-prod.db.sql.gz --cluster <target-cluster>")
+	for _, step := range steps {
+		if strings.HasPrefix(step, "kip ") {
+			assert.NotContains(t, step, "--database")
 		}
-		var config struct {
-			Password string `json:"password"`
-		}
-		if err := yaml.UnmarshalStrict(raw, &config); err != nil || config.Password != password {
-			t.Errorf("%s read password %q (%v), want %q", tool, config.Password, err, password)
+	}
+	// Export never overwrites a file, so the next database needs its own.
+	assert.Contains(t, joined, "Repeat this line for each additional database in the service. Add --database <name> to both commands and use the same --file path in both, with a different path for each database.")
+}
+
+// Steps from several namespaces can run in one directory. Export rejects an
+// existing dump file, so requiring a successful export prevents importing data
+// from another namespace or an earlier attempt.
+func TestManualSteps_KeepEachNamespacesDumpApart(t *testing.T) {
+	prod := strings.Join(buildManualMigrationSteps("mysql", "db", "shop-prod", []string{"app"}), "\n")
+	staging := strings.Join(buildManualMigrationSteps("mysql", "db", "shop-staging", []string{"app"}), "\n")
+
+	assert.Contains(t, prod, "--file shop-prod.db.app.sql.gz")
+	assert.Contains(t, staging, "--file shop-staging.db.app.sql.gz")
+	for _, step := range strings.Split(prod, "\n") {
+		if strings.Contains(step, "kip service import") {
+			assert.True(t, strings.HasPrefix(step, "kip service export "), "an import runs only after its own export: %s", step)
+			assert.Contains(t, step, " && kip service import ")
 		}
 	}
 }
 
-func TestManualMySQLStepsAuthenticateWithoutArguments(t *testing.T) {
-	password := "guide-sentinel 'q' #x: y"
-	log := runManualSteps(t, "mysql", password)
+func TestManualSteps_NeverPasteADatabaseNameIntoACommand(t *testing.T) {
+	steps := buildManualMigrationSteps("mysql", "db", "shop-prod", []string{"orders", "x; rm -rf ~"})
 
-	args, err := os.ReadFile(filepath.Join(log, "args"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(args), "guide-sentinel") {
-		t.Errorf("the password reached a tool's arguments:\n%s", args)
-	}
-	for _, tool := range []string{"mysqldump", "mysql"} {
-		got, err := os.ReadFile(filepath.Join(log, tool+".mysqlpwd"))
-		if err != nil || string(got) != password {
-			t.Errorf("%s must receive the root password through MYSQL_PWD, got %q (%v)", tool, got, err)
+	for _, step := range steps {
+		if strings.HasPrefix(step, "kip ") {
+			assert.NotContains(t, step, "rm -rf", "a database name reached a command the operator pastes")
 		}
+	}
+	assert.Contains(t, strings.Join(steps, "\n"), "by hand")
+}
+
+func TestManualSteps_ForAnEngineKipCannotExport(t *testing.T) {
+	steps := buildManualMigrationSteps("redis", "cache", "shop-prod", nil)
+
+	assert.Len(t, steps, 1)
+	assert.Contains(t, steps[0], "redis")
+}
+
+// A database name is an identifier, so spaces and line breaks in it are part
+// of the name. Discovery has to hand the exact name on, or the steps would
+// move a different database, or none, without the warning an unsafe name gets.
+func TestListDatabases_KeepsEachNameExactly(t *testing.T) {
+	names := []string{" orders ", "line\nbreak", "stock"}
+	for svcType, encoder := range map[string]string{"postgres": "encode(", "mysql": "HEX("} {
+		engine := func(cmd []string) (string, error) {
+			script := strings.Join(cmd, " ")
+			if !strings.Contains(script, encoder) {
+				// An engine asked for plain names prints them one per line.
+				return strings.Join(names, "\n") + "\n", nil
+			}
+			var lines []string
+			for _, n := range names {
+				lines = append(lines, hex.EncodeToString([]byte(n)))
+			}
+			return strings.Join(lines, "\n") + "\n", nil
+		}
+
+		got, err := listDatabases(svcType, engine)
+
+		assert.NoError(t, err)
+		assert.Equal(t, names, got, svcType)
+		steps := strings.Join(buildManualMigrationSteps(svcType, "db", "shop", got), "\n")
+		assert.Contains(t, steps, `Move the database " orders " by hand`, svcType)
+		assert.Contains(t, steps, "--database stock", svcType)
+		assert.NotContains(t, steps, "--database orders", svcType)
 	}
 }

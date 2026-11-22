@@ -355,6 +355,7 @@ func finishUninstall(
 		return fmt.Errorf("removing local config entry: %w", err)
 	}
 	say(out, "  ✔  Local config entry for %s removed\n\n", cluster.Name)
+	sayHowToPickACluster(out)
 	return nil
 }
 
@@ -441,11 +442,7 @@ func removeLocalClusterEntry(name, ownedToken string) error {
 
 		cfg.Clusters = remaining
 		if cfg.CurrentCluster == name {
-			if len(cfg.Clusters) > 0 {
-				cfg.CurrentCluster = cfg.Clusters[0].Name
-			} else {
-				cfg.CurrentCluster = ""
-			}
+			cfg.CurrentCluster = ""
 		}
 		return nil
 	})

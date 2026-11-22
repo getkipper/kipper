@@ -32,6 +32,7 @@ export interface AppVerification {
 
 export interface DomainStatus {
   domain: string
+  redirect_to?: string
   app: string
   namespace: string
   resolved: boolean
@@ -47,6 +48,7 @@ export interface PlanItem {
   detail?: string
   // Domain disposition for an app with a public route.
   host?: string
+  redirect_from?: string[]
   domain_class?: 'custom' | 'platform' | 'gateway'
   disposition?: 'move' | 'coexist' | 'gateway'
   target_url?: string
@@ -129,6 +131,12 @@ export async function startMigration(
 export async function getSession(sessionId: string): Promise<MigrationSession> {
   const { data } = await client.get<MigrationSession>(`/migration/${sessionId}`)
   return data
+}
+
+/** Returns the latest outgoing migration running or awaiting verification, or null if none exists. */
+export async function getActiveMigration(): Promise<MigrationSession | null> {
+  const { data } = await client.get<{ session: MigrationSession | null }>('/migration/active')
+  return data.session ?? null
 }
 
 export async function getVerification(sessionId: string): Promise<{ apps: AppVerification[]; status: string }> {

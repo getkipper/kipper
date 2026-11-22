@@ -156,9 +156,9 @@ func main() {
 			handlers.RetireConnectorSecrets(ctx, clientset, 10*time.Minute, time.Now)
 		})
 
-	// Backstop cleanup of build Jobs and their ephemeral credential secrets in
-	// kipper-builds: sweeps anything older than 3h, so a hung build or a secret
-	// orphaned by a console-api restart never outlives its build.
+	// Supplement Job TTL cleanup in kipper-builds with a sweep every 30 minutes
+	// for builds started over 3 hours ago and old, unused credential secrets,
+	// including credentials orphaned by a console-api restart.
 	go builder.RunBuildJanitor(context.Background(), clientset, 30*time.Minute, 3*time.Hour)
 
 	// Keep the cluster's kipper.run subdomain alive on the gateway.
@@ -514,6 +514,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Post("/accept", migrationHandler.AcceptHandler)
 		r.Get("/projects", migrationHandler.TargetProjectsHandler)
 		r.Get("/capacity", migrationHandler.TargetCapacityHandler)
+		r.Post("/git-credentials", migrationHandler.TargetGitCredentialsHandler)
 		// Per-session receive endpoints perform cluster writes, so each must
 		// prove it holds the accepted session's migration secret.
 		r.Group(func(r chi.Router) {
@@ -916,6 +917,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Get("/migration/notification-status", admin(migrationHandler.NotificationStatusHandler))
 		r.Post("/migration/plan", admin(migrationHandler.PlanHandler))
 		r.Post("/migration/start", admin(migrationHandler.StartHandler))
+		r.Get("/migration/active", admin(migrationHandler.ActiveSessionHandler))
 		r.Get("/migration/{session}", admin(migrationHandler.SessionHandler))
 		r.Get("/migration/{session}/progress", admin(migrationHandler.ProgressHandler))
 		r.Get("/migration/{session}/verify", admin(migrationHandler.VerificationHandler))

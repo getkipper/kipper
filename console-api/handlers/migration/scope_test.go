@@ -289,7 +289,7 @@ func TestAbortHandler_RemovesOnlyUnadoptedCreatedSecrets(t *testing.T) {
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-test", "shop"), preexisting),
 		CRClient: migrationOwners(t),
 	}
-	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
+	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret", Status: SessionRunning})
 
 	router := chi.NewRouter()
 	router.Post("/{session}/secret", h.ReceiveSecretHandler)

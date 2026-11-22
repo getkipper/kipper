@@ -318,7 +318,7 @@ Before Velero starts, kip checks the key against one existing backup's metadata 
 
 To detect SSE-C backups, kip lists the bucket before Velero starts on a new cluster. A recovery install therefore needs storage credentials kip can use for listing, an endpoint without a path, and access and secret keys without `:` or `@`.
 
-Velero's presigned downloads, such as `velero backup logs` and `velero backup describe --details`, omit the key and fail on an SSE-C bucket. `kip backup describe` fetches a backup's error and warning messages the same way, so on an SSE-C bucket it shows everything except those messages.
+Velero's presigned downloads, such as `velero backup logs` and `velero backup describe --details`, omit the key and fail on an SSE-C bucket. `kip backup describe` fetches a backup's error and warning messages through the same kind of link, and sends the cluster's SSE-C key with the download, so it shows those messages on an SSE-C bucket too. `kip` sends the key only over HTTPS to the backup location's endpoint or its permitted bucket subdomain. Downloads that use the key stop at redirects.
 
 #### One-shot decision
 

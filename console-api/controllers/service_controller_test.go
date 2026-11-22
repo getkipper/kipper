@@ -127,7 +127,7 @@ func TestReconcileStatefulSet_ProbesReadinessOfDatabases(t *testing.T) {
 		return corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)}}
 	}
 	cases := map[string]corev1.ProbeHandler{
-		"postgres": exec("pg_isready", "-U", "kipper", "-h", "127.0.0.1", "-p", "5432"),
+		"postgres": exec("pg_isready", "-U", "kipper", "-d", "postgres", "-h", "127.0.0.1", "-p", "5432"),
 		"mysql":    exec("mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp"),
 		"redis":    exec("sh", "-c", "redis-cli ping | grep -q PONG"),
 		"mongodb":  tcp(27017),
@@ -148,6 +148,26 @@ func TestReconcileStatefulSet_ProbesReadinessOfDatabases(t *testing.T) {
 			assert.Equal(t, int32(5), probe.TimeoutSeconds, "a busy database must not flap on the one-second default")
 		})
 	}
+}
+
+// The probe uses the engine's configured role and the postgres database created
+// by initdb to avoid logging failed connections for a missing role or database.
+func TestReconcileStatefulSet_ProbesPostgresAsTheSecretsUsername(t *testing.T) {
+	svc := bareService("postgres")
+	creds := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data:       map[string][]byte{"USERNAME": []byte("legacy"), "PASSWORD": []byte("secret")},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, creds).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	probe := statefulSetContainer(t, r).ReadinessProbe
+	require.NotNil(t, probe)
+	require.NotNil(t, probe.Exec)
+	assert.Equal(t, []string{"pg_isready", "-U", "legacy", "-d", "postgres", "-h", "127.0.0.1", "-p", "5432"}, probe.Exec.Command)
 }
 
 func TestReconcileStatefulSet_LeavesOtherServicesUnprobed(t *testing.T) {
@@ -375,7 +395,7 @@ func TestReconcileCredentialsSecret_MinioS3Shape(t *testing.T) {
 	// The MinIO server must take its root password from SECRET_KEY, not
 	// the generic PASSWORD key that no longer exists on the secret.
 	var rootPass *corev1.EnvVar
-	env := serviceCatalog("minio").envVars("storage")
+	env := serviceCatalog("minio").envVars("storage", "kipper")
 	for i := range env {
 		if env[i].Name == "MINIO_ROOT_PASSWORD" {
 			rootPass = &env[i]
@@ -388,7 +408,7 @@ func TestReconcileCredentialsSecret_MinioS3Shape(t *testing.T) {
 }
 
 func TestServiceCatalog_MinioDoesNotCheckForUpdates(t *testing.T) {
-	env := serviceCatalog("minio").envVars("storage")
+	env := serviceCatalog("minio").envVars("storage", "kipper")
 
 	var update *corev1.EnvVar
 	for i := range env {
@@ -1918,16 +1938,17 @@ func TestRepairCredentials_NamesTheKeyThatIsMissing(t *testing.T) {
 	assert.NotContains(t, err.Error(), "no password", "the password is right there in the Secret")
 }
 
-// With no volume there is no history to preserve. The engine has not started, so
-// it will come up as whatever the StatefulSet passes it, and a Secret naming
-// somebody else would hand every bound workload an account that does not exist.
-func TestRepairCredentials_ConvergesAUsernameWithNoDataBehindIt(t *testing.T) {
+// A username the Secret already names is kept, volume or not. A migrated
+// service arrives with the source's username and no data yet, and its restored
+// databases and every bound workload expect that account. The StatefulSet starts
+// the engine under the same name.
+func TestRepairCredentials_KeepsAUsernameWithNoDataBehindIt(t *testing.T) {
 	existing := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
 		Data: map[string][]byte{
 			"HOST":     []byte("db.ns.svc.cluster.local"),
 			"PORT":     []byte("5432"),
-			"USERNAME": []byte("postgres"),
+			"USERNAME": []byte("legacy"),
 			"PASSWORD": []byte("secret"),
 		},
 	}
@@ -1936,9 +1957,62 @@ func TestRepairCredentials_ConvergesAUsernameWithNoDataBehindIt(t *testing.T) {
 	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("db", "postgres")))
 
 	got := secretFromCluster(t, r, "db-credentials")
-	assert.Equal(t, "kipper", got["USERNAME"],
-		"the statefulset will initialise this database as kipper, whatever the Secret says")
+	assert.Equal(t, "legacy", got["USERNAME"], "the username the Secret names is the one the engine is started with")
 	assert.Equal(t, "secret", got["PASSWORD"], "a password that was never missing must not be replaced")
+}
+
+func TestReconcileStatefulSet_StartsTheEngineAsTheSecretsUsername(t *testing.T) {
+	userEnv := map[string]string{
+		"postgres": "POSTGRES_USER",
+		"mysql":    "MYSQL_USER",
+		"mongodb":  "MONGO_INITDB_ROOT_USERNAME",
+		"rabbitmq": "RABBITMQ_DEFAULT_USER",
+	}
+	for svcType, envName := range userEnv {
+		t.Run(svcType, func(t *testing.T) {
+			svc := bareService(svcType)
+			creds := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+				Data:       map[string][]byte{"USERNAME": []byte("legacy"), "PASSWORD": []byte("secret")},
+			}
+			r := &ServiceReconciler{
+				Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, creds).Build(),
+				Scheme: testScheme(),
+			}
+			require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+			assert.Equal(t, "legacy", envValue(statefulSetContainer(t, r).Env, envName))
+		})
+	}
+}
+
+func TestReconcileStatefulSet_StartsAMySQLRootServiceWithoutAnExtraUser(t *testing.T) {
+	svc := bareService("mysql")
+	creds := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data:       map[string][]byte{"USERNAME": []byte("root"), "PASSWORD": []byte("secret")},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, creds).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	env := statefulSetContainer(t, r).Env
+	assert.Equal(t, -1, envIndex(env, "MYSQL_USER"), "the image refuses root as its extra user and exits")
+	assert.Equal(t, -1, envIndex(env, "MYSQL_PASSWORD"))
+	assert.NotEqual(t, -1, envIndex(env, "MYSQL_ROOT_PASSWORD"), "root still gets the Secret's password")
+}
+
+func TestReconcileStatefulSet_StartsANewEngineAsKipper(t *testing.T) {
+	svc := bareService("mysql")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	assert.Equal(t, "kipper", envValue(statefulSetContainer(t, r).Env, "MYSQL_USER"))
 }
 
 func TestReconcileUIIngress_RefusesACollidingRouteName(t *testing.T) {
@@ -1968,4 +2042,14 @@ func TestServiceRouteNameRetry(t *testing.T) {
 	assert.Zero(t, serviceRouteNameRetry(svc))
 	svc.Status.Conditions = []metav1.Condition{{Type: kipperv1.ConditionRouteReady, Reason: reasonRouteNameTaken}}
 	assert.Equal(t, routeNameTakenRetry, serviceRouteNameRetry(svc), "a refused UI route looks again once the name may be free")
+}
+
+// Environment variable order affects the pod template. Preserve it when the
+// MySQL username is unchanged to avoid a restart caused solely by reordering.
+func TestMySQLEnvKeepsItsOrderForTheDefaultUser(t *testing.T) {
+	var names []string
+	for _, e := range serviceCatalog("mysql").envVars("db", "kipper") {
+		names = append(names, e.Name)
+	}
+	assert.Equal(t, []string{"MYSQL_USER", "MYSQL_DATABASE", "MYSQL_PASSWORD", "MYSQL_ROOT_PASSWORD"}, names)
 }

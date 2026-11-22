@@ -68,18 +68,33 @@ func init() {
 	serviceImportCmd.Flags().String("database", "", "target database (defaults to the service's own database for postgres/mysql)")
 	serviceImportCmd.Flags().String("source-database", "", "database name inside a mongodb archive, for renaming on restore")
 	serviceImportCmd.Flags().Bool("drop", false, "replace existing data instead of failing on it")
-	serviceImportCmd.Flags().String("project", "default", "project namespace")
-	serviceImportCmd.Flags().String("environment", "", "target environment")
+	addTransferScopeFlags(serviceImportCmd)
 	_ = serviceImportCmd.MarkFlagRequired("file")
 
 	serviceExportCmd.Flags().String("file", "", "output file (required)")
 	serviceExportCmd.Flags().String("database", "", "database to dump (defaults to the service's own database; mongodb dumps all databases when omitted)")
-	serviceExportCmd.Flags().String("project", "default", "project namespace")
-	serviceExportCmd.Flags().String("environment", "", "target environment")
+	addTransferScopeFlags(serviceExportCmd)
 	_ = serviceExportCmd.MarkFlagRequired("file")
 
 	serviceCmd.AddCommand(serviceImportCmd)
 	serviceCmd.AddCommand(serviceExportCmd)
+}
+
+func addTransferScopeFlags(cmd *cobra.Command) {
+	cmd.Flags().String("project", "default", "Select the project namespace.")
+	cmd.Flags().String("environment", "", "Select the target environment.")
+	cmd.Flags().String("namespace", "", "Use this exact service namespace instead of resolving --project and --environment.")
+}
+
+// transferNamespace uses --namespace verbatim or resolves --project and
+// --environment on the current cluster. An explicit namespace combined with
+// either scope flag returns an error.
+func transferNamespace(cmd *cobra.Command) (string, error) {
+	namespace, err := exactNamespace(cmd)
+	if err != nil || namespace != "" {
+		return namespace, err
+	}
+	return resolveServiceNamespace(cmd), nil
 }
 
 func runServiceImport(cmd *cobra.Command, args []string) error {
@@ -88,7 +103,10 @@ func runServiceImport(cmd *cobra.Command, args []string) error {
 	database, _ := cmd.Flags().GetString("database")
 	sourceDB, _ := cmd.Flags().GetString("source-database")
 	drop, _ := cmd.Flags().GetBool("drop")
-	namespace := resolveServiceNamespace(cmd)
+	namespace, err := transferNamespace(cmd)
+	if err != nil {
+		return err
+	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -221,7 +239,10 @@ func runServiceExport(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	filePath, _ := cmd.Flags().GetString("file")
 	database, _ := cmd.Flags().GetString("database")
-	namespace := resolveServiceNamespace(cmd)
+	namespace, err := transferNamespace(cmd)
+	if err != nil {
+		return err
+	}
 
 	target, err := resolveTransferTarget(cmd.Context(), name, namespace, &database)
 	if err != nil {

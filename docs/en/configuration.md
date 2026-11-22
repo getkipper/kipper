@@ -134,7 +134,7 @@ kip cluster add production.kip --set-current
 kip cluster remove dev
 ```
 
-This removes the cluster from your local config and deletes the stored kubeconfig. It does not affect the server.
+This removes the cluster from your local config and deletes the stored kubeconfig. The server remains unchanged. If you remove the current cluster, the current-cluster selection is cleared, so select another with `kip cluster use <name>`. Removing the local entry with `kip cluster uninstall` also clears the selection if that cluster was current.
 
 ### Telling the browser tabs apart
 

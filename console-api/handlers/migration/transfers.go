@@ -644,9 +644,10 @@ func (h *Handler) annotateHeldService(ctx context.Context, ns, name, transferID,
 	return err
 }
 
-// reapSessionTransfers tears down every import receiver a session created,
-// restarting the services they paused. Used when a migration is aborted on
-// the target so recovery does not wait for the per-receiver lease.
+// reapSessionTransfers tears down every import receiver a session created and
+// leaves the services they paused stopped, because those may hold a partial
+// copy. Used when a migration is aborted on the target so cleanup does not
+// wait for the per-receiver lease.
 func (h *Handler) reapSessionTransfers(ctx context.Context, sessionID string) {
 	svcs, err := h.Client.CoreV1().Services(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
 		LabelSelector: "kipper.run/migration-session=" + sessionID + "," + transferIDLabel,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ArrowRightLeft, Copy, Check, AlertTriangle, ExternalLink, Globe, RefreshCw, ShieldCheck, OctagonAlert } from 'lucide-vue-next'
 import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useProjectsStore } from '@/stores/projects'
@@ -114,6 +114,8 @@ const buildsPending = computed(() =>
   verificationApps.value.some(a => a.build_phase && a.build_phase !== 'Succeeded' && a.build_phase !== 'Failed'),
 )
 let verifyPollTimer: ReturnType<typeof setTimeout> | null = null
+// Set once the page closes, so an answer that arrives later starts nothing.
+let disposed = false
 
 // DNS
 const domains = ref<DomainStatus[]>([])
@@ -196,9 +198,9 @@ async function handleStartMigration() {
     phase.value = 'migrating'
     connectWebSocket()
   } catch (e: unknown) {
-    // A 409 means the target's state moved since the plan (e.g. a project
-    // appeared there); anything else surfaces the server's reason. Both
-    // paths go through a fresh plan — the old receipt is spent.
+    // Show the server's reason, such as a change on the target since planning
+    // or another migration in progress. Reload the plan after every failure
+    // because the previous receipt may have been consumed.
     const axiosErr = e as { response?: { status?: number; data?: { error?: string } } }
     toast.error(axiosErr.response?.data?.error || 'Failed to start migration')
     totpCode.value = ''
@@ -249,6 +251,7 @@ async function loadVerification() {
   } finally {
     loadingVerification.value = false
   }
+  if (disposed) return
   // A build is an automatic step the operator is waiting on, so keep it fresh
   // ourselves until every build resolves instead of leaving it stale.
   if (verifyPollTimer) {
@@ -307,13 +310,54 @@ async function checkDNS() {
 
 async function handleCancel() {
   if (sessionId.value) {
-    await migrationApi.cancelMigration(sessionId.value)
+    try {
+      await migrationApi.cancelMigration(sessionId.value)
+    } catch (e: unknown) {
+      // A 409 indicates an ended migration or an active cutover. A 404 means
+      // this cluster has no record of the migration. Returning to the start
+      // screen is safe for ended or unknown migrations. Keep tracking progress
+      // during cutover or when other errors leave the status uncertain.
+      const axiosErr = e as { response?: { status?: number; data?: { error?: string; cutover_running?: boolean } } }
+      const status = axiosErr.response?.status
+      if (status === 409 && axiosErr.response?.data?.cutover_running) {
+        toast.info(axiosErr.response.data.error || 'A cutover is moving the custom domains.')
+        return
+      }
+      if (status === 409 || status === 404) {
+        toast.info(axiosErr.response?.data?.error || 'The migration has already ended.')
+      } else {
+        toast.error(axiosErr.response?.data?.error || 'Failed to cancel the migration')
+        return
+      }
+    }
   }
   phase.value = 'idle'
   steps.value = []
 }
 
+/** Resumes progress and verification updates for an active migration after a page reload. */
+async function resumeActiveMigration() {
+  let session: Awaited<ReturnType<typeof migrationApi.getActiveMigration>>
+  try {
+    session = await migrationApi.getActiveMigration()
+  } catch {
+    return
+  }
+  if (disposed || !session || phase.value !== 'idle') return
+  sessionId.value = session.id
+  steps.value = session.steps ?? []
+  sessionStatus.value = session.status
+  phase.value = session.status === 'verifying' ? 'verifying' : 'migrating'
+  // Cutover reports its warnings as steps, so a verifying session needs the
+  // progress stream too.
+  connectWebSocket()
+  if (session.status === 'verifying') loadVerification()
+}
+
+onMounted(resumeActiveMigration)
+
 onUnmounted(() => {
+  disposed = true
   ws?.close()
   if (verifyPollTimer) clearTimeout(verifyPollTimer)
 })
@@ -587,6 +631,9 @@ onUnmounted(() => {
             <div class="min-w-0">
               <span class="text-sm font-medium text-slate-900 dark:text-slate-50">{{ item.name }}</span>
               <span class="ml-1.5 font-mono text-xs text-slate-500 dark:text-slate-400">{{ item.host }}</span>
+              <p v-if="item.redirect_from?.length" class="font-mono text-xs text-slate-500 dark:text-slate-400" data-testid="plan-redirect-hosts">
+                Redirects here: {{ item.redirect_from.join(', ') }}
+              </p>
               <p v-if="item.domain_class === 'platform'" class="text-xs text-slate-400">Stays on both. New cluster serves {{ item.target_url }}. The old URL keeps working until you decommission the old cluster.</p>
               <p v-else-if="item.domain_class === 'gateway'" class="text-xs text-slate-400">Free kipper.run subdomain. The new cluster gets its own; re-register separately if you need the old one.</p>
               <p v-else-if="keepDomains.has(domainKey(item))" class="text-xs text-slate-400">Kept on the old cluster. The new cluster serves {{ item.target_url }}.</p>
@@ -843,6 +890,7 @@ onUnmounted(() => {
             <div class="flex items-center gap-2">
               <Globe class="h-4 w-4 text-slate-400" :stroke-width="1.75" />
               <span class="text-sm font-medium text-slate-900 dark:text-slate-50">{{ d.domain }}</span>
+              <span v-if="d.redirect_to" class="text-xs text-slate-400">redirects to {{ d.redirect_to }}</span>
               <span v-if="!d.resolved && d.expected_ips && d.expected_ips.length > 0" class="font-mono text-xs text-slate-400">
                 A record: {{ d.expected_ips.join(', ') }}
               </span>

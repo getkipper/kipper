@@ -10,6 +10,7 @@ import (
 	goerrors "errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -74,7 +75,7 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 	defer func() {
 		if r := recover(); r != nil {
 			stopSaver()
-			session.Finish(SessionFailed, fmt.Sprintf("panic: %v", r))
+			session.Fail(fmt.Sprintf("panic: %v", r))
 			log("panic: %v", r)
 			h.Sessions.Save(session)
 		}
@@ -93,9 +94,14 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 	res, err := h.resolveDomains(ctx, session)
 	if err != nil {
 		stopSaver()
-		session.Finish(SessionFailed, fmt.Sprintf("classifying app domains: %v", err))
-		log("failed to classify app domains: %v", err)
+		if session.Fail(fmt.Sprintf("classifying app domains: %v", err)) {
+			log("failed to classify app domains: %v", err)
+			h.Sessions.Save(session)
+			return
+		}
+		log("canceled while classifying app domains: %v", err)
 		h.Sessions.Save(session)
+		h.abortTarget(session, log)
 		return
 	}
 
@@ -117,8 +123,11 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 				return
 			}
 			stopSaver()
-			session.Finish(SessionFailed, err.Error())
-			log("failed: %v", err)
+			if session.Fail(err.Error()) {
+				log("failed: %v", err)
+			} else {
+				log("canceled mid-transfer: %v", err)
+			}
 			h.Sessions.Save(session)
 			h.abortTarget(session, log)
 			return
@@ -126,8 +135,13 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 	}
 
 	stopSaver()
+	if !session.EnterVerification() {
+		log("canceled before verification")
+		h.Sessions.Save(session)
+		h.abortTarget(session, log)
+		return
+	}
 	log("all projects migrated, entering verification")
-	session.SetStatus(SessionVerifying)
 	session.AddStep(Step{
 		Name:   "Team accounts (Dex users)",
 		Phase:  "verification",
@@ -409,7 +423,10 @@ var errNoNamespaces = goerrors.New("this project holds no namespaces")
 // ridesWithService holds the shared credentials names for the Services that
 // exist in this namespace. A <name>-credentials Secret with no Service of that
 // name is nobody's shared credentials and still travels as an ordinary Secret.
-func transferableSecret(secret *corev1.Secret, ridesWithService map[string]bool) bool {
+// issuedForRoutes holds the certificate Secrets this namespace's Kipper routes
+// have cert-manager issue. Other TLS Secrets travel unless another exclusion
+// applies, such as the service TLS label.
+func transferableSecret(secret *corev1.Secret, ridesWithService, issuedForRoutes map[string]bool) bool {
 	if secret.Type == corev1.SecretTypeServiceAccountToken {
 		return false
 	}
@@ -423,6 +440,12 @@ func transferableSecret(secret *corev1.Secret, ridesWithService map[string]bool)
 	}
 	// The target issues its own service certificate and key.
 	if _, ok := secret.Labels[labels.TLSFor]; ok {
+		return false
+	}
+	// The target's cert-manager writes each route certificate under the name
+	// the route asks for, so a copy would be adopted as current while it names
+	// the source's hosts.
+	if issuedForRoutes[secret.Name] {
 		return false
 	}
 	if isPublishedEnvironment(secret) {
@@ -490,6 +513,29 @@ func (h *Handler) credentialsRidingWithServices(ctx context.Context, namespace s
 	return riding, nil
 }
 
+// routeCertificates names the Secrets that Kipper's own Ingresses in a
+// namespace have cert-manager issue certificates into.
+func (h *Handler) routeCertificates(ctx context.Context, namespace string) (map[string]bool, error) {
+	ingresses, err := h.Client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/managed-by=kipper",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing routes in %s: %w", namespace, err)
+	}
+	issued := map[string]bool{}
+	for _, ing := range ingresses.Items {
+		if ing.Annotations["cert-manager.io/cluster-issuer"] == "" {
+			continue
+		}
+		for _, tls := range ing.Spec.TLS {
+			if tls.SecretName != "" {
+				issued[tls.SecretName] = true
+			}
+		}
+	}
+	return issued, nil
+}
+
 func (h *Handler) transferSecrets(ctx context.Context, session *Session, token *Token, namespace string, res *domainResolution) error {
 	secrets, err := h.Client.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -500,10 +546,14 @@ func (h *Handler) transferSecrets(ctx context.Context, session *Session, token *
 	if err != nil {
 		return err
 	}
+	routeCerts, err := h.routeCertificates(ctx, namespace)
+	if err != nil {
+		return err
+	}
 
 	toTransfer := 0
 	for i := range secrets.Items {
-		if transferableSecret(&secrets.Items[i], riding) {
+		if transferableSecret(&secrets.Items[i], riding, routeCerts) {
 			toTransfer++
 		}
 	}
@@ -521,7 +571,7 @@ func (h *Handler) transferSecrets(ctx context.Context, session *Session, token *
 
 	sent := 0
 	for _, secret := range secrets.Items {
-		if !transferableSecret(&secret, riding) {
+		if !transferableSecret(&secret, riding, routeCerts) {
 			continue
 		}
 
@@ -698,7 +748,22 @@ func (h *Handler) refuseUnsafeCredentialHandover(ctx context.Context, name, name
 			return fmt.Errorf("service %s already uses different credentials. Remove the target service first, or migrate into a project without that service", name)
 		}
 	}
+	// Changing the username in the credentials would leave Kipper's tools
+	// using a different account from the one initialized in the engine.
+	if slices.Contains(kipperv1.CredentialKeys(serviceType), "USERNAME") &&
+		engineUsername(existing.Data) != engineUsername(incoming) {
+		return fmt.Errorf("service %s already runs as a different user. Remove the target service first, or migrate into a project without that service", name)
+	}
 	return nil
+}
+
+// engineUsername returns the credential username, defaulting to "kipper"
+// when it is empty or missing.
+func engineUsername(data map[string][]byte) string {
+	if username := string(data["USERNAME"]); username != "" {
+		return username
+	}
+	return "kipper"
 }
 
 // claimCredentials points the credentials Secret's controller reference at the
@@ -849,8 +914,28 @@ func (h *Handler) createApp(ctx context.Context, name, namespace string, spec ma
 		}); err != nil {
 			return fmt.Errorf("resetting build status for %s/%s: %w", namespace, name, err)
 		}
-		if _, err := builder.CreateBuildJob(ctx, h.Client, h.CRClient, app, commit); err != nil {
+		job, err := builder.CreateBuildJob(ctx, h.Client, h.CRClient, app, commit)
+		if err != nil {
 			return fmt.Errorf("triggering rebuild for %s/%s: %w", namespace, name, err)
+		}
+		// The queue can record a source-change discard when status names the
+		// Job or still has this commit's Pending build without a Job name.
+		// Preserve cleared status and status with a Job name or a different
+		// commit so discard results and other build controller updates survive.
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var fresh kipperv1.App
+			if err := h.CRClient.Get(ctx, crclient.ObjectKey{Namespace: namespace, Name: name}, &fresh); err != nil {
+				return err
+			}
+			if b := fresh.Status.Build; b == nil || b.Build != "" || b.Commit != commit {
+				return nil
+			}
+			created := job.CreationTimestamp
+			fresh.Status.Build.Build = job.Name
+			fresh.Status.Build.JobCreatedAt = &created
+			return h.CRClient.Status().Update(ctx, &fresh)
+		}); err != nil {
+			return fmt.Errorf("recording the build job in the status of app %s/%s: %w", namespace, name, err)
 		}
 	}
 
@@ -897,7 +982,7 @@ func migrationBuildID() (string, error) {
 	if _, err := rand.Read(suffix); err != nil {
 		return "", fmt.Errorf("generating build id: %w", err)
 	}
-	return fmt.Sprintf("migrate-%d-%s", time.Now().Unix(), hex.EncodeToString(suffix)), nil
+	return fmt.Sprintf("%s%d-%s", migrationBuildPrefix, time.Now().Unix(), hex.EncodeToString(suffix)), nil
 }
 
 func (h *Handler) updateAppRoute(ctx context.Context, name, namespace string, spec map[string]interface{}) error {
