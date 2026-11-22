@@ -129,7 +129,7 @@ func CopiesWithoutRebuildRoom(master CommandRunner, node string, volumes []NodeV
 func withoutRoom(master CommandRunner, node string, check []NodeVolume, holders map[string]map[string]bool) ([]string, error) {
 	out, err := master.Run(`kubectl -n longhorn-system get nodes.longhorn.io --request-timeout=30s -o json`)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn nodes: %w", err)
+		return nil, failedRead("listing Longhorn nodes", out, err)
 	}
 	var nodes struct {
 		Items []longhornNode `json:"items"`
@@ -139,7 +139,7 @@ func withoutRoom(master CommandRunner, node string, check []NodeVolume, holders 
 	}
 	out, err = master.Run(`kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o json`)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn volumes: %w", err)
+		return nil, failedRead("listing Longhorn volumes", out, err)
 	}
 	var volumes struct {
 		Items []longhornVolume `json:"items"`
@@ -198,7 +198,7 @@ func schedulingSettings(master CommandRunner) (scheduling, error) {
 	s := scheduling{minimalAvailable: defaultMinimalAvailablePercent, overProvisioning: defaultOverProvisioningPercent, emptyNodeSelector: true, emptyDiskSelector: true}
 	out, err := master.Run(`kubectl -n longhorn-system get settings.longhorn.io storage-minimal-available-percentage storage-over-provisioning-percentage allow-empty-node-selector-volume allow-empty-disk-selector-volume --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.value}{"\n"}{end}'`)
 	if err != nil {
-		return s, fmt.Errorf("reading Longhorn's storage settings: %w", err)
+		return s, failedRead("reading Longhorn's storage settings", out, err)
 	}
 	for _, line := range strings.Split(out, "\n") {
 		name, value, ok := strings.Cut(strings.TrimSpace(line), "\t")

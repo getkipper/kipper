@@ -265,7 +265,7 @@ func replicatedClassCurrent(params map[string]interface{}) bool {
 func ensureClass(client CommandRunner, name, manifest string, current func(map[string]interface{}) bool, wait joinTimeouts) error {
 	out, err := client.Run(fmt.Sprintf("kubectl get storageclass %s --ignore-not-found --request-timeout=30s -o json", name))
 	if err != nil {
-		return fmt.Errorf("reading the %s StorageClass: %w", name, err)
+		return failedRead(fmt.Sprintf("reading the %s StorageClass", name), out, err)
 	}
 	var previous string
 	if strings.TrimSpace(out) != "" {
@@ -348,7 +348,7 @@ func pinVolume(client CommandRunner, v singleCopyVolume) (bool, error) {
 		}
 		current, err := client.Run(fmt.Sprintf(`kubectl -n longhorn-system get volumes.longhorn.io %s --request-timeout=30s -o jsonpath='{.spec.nodeSelector}{"\t"}{.spec.numberOfReplicas}{"\t"}{.metadata.resourceVersion}'`, v.name))
 		if err != nil {
-			return false, fmt.Errorf("re-reading the volume after a conflict: %w", err)
+			return false, failedRead("re-reading the volume after a conflict", current, err)
 		}
 		f := strings.Split(strings.TrimRight(current, "\r\n"), "\t")
 		if len(f) != 3 || f[1] != "1" {
@@ -381,7 +381,7 @@ func (v singleCopyVolume) label() string {
 func singleCopyVolumes(client CommandRunner) ([]singleCopyVolume, error) {
 	pvs, err := client.Run(`kubectl get pv --request-timeout=30s -o jsonpath='{range .items[*]}{.spec.storageClassName}{"\t"}{.spec.csi.volumeHandle}{"\n"}{end}'`)
 	if err != nil {
-		return nil, fmt.Errorf("listing persistent volumes: %w", err)
+		return nil, failedRead("listing persistent volumes", pvs, err)
 	}
 	single := map[string]bool{}
 	for _, line := range strings.Split(pvs, "\n") {
@@ -391,7 +391,7 @@ func singleCopyVolumes(client CommandRunner) ([]singleCopyVolume, error) {
 	}
 	out, err := client.Run(`kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeSelector}{"\t"}{.status.kubernetesStatus.namespace}{"\t"}{.status.kubernetesStatus.pvcName}{"\t"}{.spec.numberOfReplicas}{"\t"}{.metadata.resourceVersion}{"\n"}{end}'`)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn volumes: %w", err)
+		return nil, failedRead("listing Longhorn volumes", out, err)
 	}
 	var volumes []singleCopyVolume
 	for _, line := range strings.Split(out, "\n") {

@@ -48,7 +48,7 @@ func waitForWorkerStorage(master CommandRunner, node string, t joinTimeouts) err
 	ready := func() (bool, error) {
 		out, err := master.Run(fmt.Sprintf(`kubectl get node %s -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null`, node))
 		if err != nil {
-			return false, fmt.Errorf("reading %s: %w", node, err)
+			return false, failedRead(fmt.Sprintf("reading %s", node), out, err)
 		}
 		if strings.TrimSpace(out) != "True" {
 			return false, fmt.Errorf("%s is not Ready", node)
@@ -68,7 +68,7 @@ func waitForWorkerStorage(master CommandRunner, node string, t joinTimeouts) err
 		running := func() (bool, error) {
 			out, err := master.Run(fmt.Sprintf(`kubectl -n longhorn-system get pods -l %s --field-selector spec.nodeName=%s -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.ready}{" "}{end}{end}' 2>/dev/null`, ds.selector, node))
 			if err != nil {
-				return false, fmt.Errorf("reading %s on %s: %w", app, node, err)
+				return false, failedRead(fmt.Sprintf("reading %s on %s", app, node), out, err)
 			}
 			states := strings.Fields(out)
 			if len(states) == 0 {
@@ -171,8 +171,11 @@ func validateWorker(master, worker CommandRunner, j WorkerJoin, node, serverNode
 		return err
 	}
 	dns, err := master.Run(fmt.Sprintf(`kubectl -n kube-system get pods -l k8s-app=kube-dns --field-selector spec.nodeName=%s,status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null`, serverNode))
-	if err != nil || strings.TrimSpace(dns) == "" {
-		return fmt.Errorf("finding CoreDNS on the server to check pod traffic from %s: %v", node, err)
+	if err != nil {
+		return failedRead("finding CoreDNS on the server to check pod traffic from "+node, dns, err)
+	}
+	if strings.TrimSpace(dns) == "" {
+		return fmt.Errorf("finding CoreDNS on the server to check pod traffic from %s: no CoreDNS pod runs there", node)
 	}
 	attempt, err := generateSecret(3)
 	if err != nil {
@@ -197,18 +200,27 @@ func validateWorker(master, worker CommandRunner, j WorkerJoin, node, serverNode
 	finished := func() (bool, error) {
 		out, err := master.Run(fmt.Sprintf("kubectl -n kube-system get pod %s -o jsonpath='{.status.phase}' 2>/dev/null", name))
 		if err != nil {
-			return false, fmt.Errorf("reading the validation pod: %w", err)
+			return false, failedRead("reading the validation pod", out, err)
 		}
 		phase = strings.TrimSpace(out)
 		return phase == "Succeeded" || phase == "Failed", nil
 	}
 	waitErr := pollUntil(t.validation, t.interval, finished)
-	logs, _ := master.Run(fmt.Sprintf("kubectl -n kube-system logs %s --tail=20 2>&1", name))
+	// Failed reads may return partial output containing validationOK. Reporting
+	// the failure through failedRead keeps that output out of the success check
+	// and the diagnostics.
+	logs, err := master.Run(fmt.Sprintf("kubectl -n kube-system logs %s --tail=20 2>&1", name))
+	if err != nil {
+		logs = failedRead("reading the validation pod's output", logs, err).Error()
+	}
 	if waitErr == nil && phase == "Succeeded" && strings.Contains(logs, validationOK) {
 		return checkKubelet(master, node, nodeAddress)
 	}
-	events, _ := master.Run(fmt.Sprintf("kubectl -n kube-system get events --field-selector involvedObject.name=%s -o jsonpath='{range .items[*]}{.reason}: {.message}{\"\\n\"}{end}' 2>/dev/null | tail -n 5", name))
-	return fmt.Errorf("the validation pod on %s did not pass (phase %q)%s%s; check that the provider firewall allows 51820/udp and 10250/tcp between the nodes", node, phase, indented("pod output", logs), indented("events", events))
+	events, err := master.Run(fmt.Sprintf("kubectl -n kube-system get events --field-selector involvedObject.name=%s -o jsonpath='{range .items[*]}{.reason}: {.message}{\"\\n\"}{end}' 2>/dev/null | tail -n 5", name))
+	if err != nil {
+		events = failedRead("reading the validation pod's events", events, err).Error()
+	}
+	return fmt.Errorf("the validation pod on %s did not pass (phase %q)%s%s. Check that the provider firewall allows 51820/udp and 10250/tcp between the nodes", node, phase, indented("pod output", logs), indented("events", events))
 }
 
 const containerdHostsDir = "/var/lib/rancher/k3s/agent/etc/containerd/certs.d"
@@ -317,7 +329,7 @@ func openWorkerForChecks(master CommandRunner, node string, t joinTimeouts) erro
 	running := func() (bool, error) {
 		out, err := master.Run(fmt.Sprintf(`kubectl -n longhorn-system get instancemanagers.longhorn.io -o jsonpath='{range .items[?(@.spec.nodeID==%q)]}{.status.currentState}{" "}{end}' 2>/dev/null`, node))
 		if err != nil {
-			return false, fmt.Errorf("reading the Longhorn instance managers: %w", err)
+			return false, failedRead("reading the Longhorn instance managers", out, err)
 		}
 		states := strings.Fields(out)
 		for _, s := range states {
@@ -352,7 +364,7 @@ func uncordonWorker(master CommandRunner, node string, t joinTimeouts) error {
 	schedulable := func() (bool, error) {
 		out, err := master.Run(fmt.Sprintf(`kubectl -n longhorn-system get nodes.longhorn.io %s -o jsonpath='{.status.conditions[?(@.type=="Schedulable")].status}' 2>/dev/null`, node))
 		if err != nil {
-			return false, fmt.Errorf("reading the Longhorn node %s: %w", node, err)
+			return false, failedRead(fmt.Sprintf("reading the Longhorn node %s", node), out, err)
 		}
 		if strings.TrimSpace(out) != "True" {
 			return false, fmt.Errorf("the Longhorn node %s does not accept replicas yet", node)

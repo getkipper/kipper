@@ -177,7 +177,7 @@ func (r *resultSettings) validate() error {
 	}
 	if e := r.backup.Endpoint; e != "" {
 		if u, err := url.Parse(e); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-			return fmt.Errorf("install result: backup storage endpoint %q is not an http or https URL", e)
+			return fmt.Errorf("install result: backup storage endpoint %s must be an HTTP or HTTPS URL", installer.DisplayEndpoint(e))
 		}
 	}
 	for _, ip := range r.dnsResolvers {

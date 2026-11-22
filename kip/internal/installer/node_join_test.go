@@ -380,3 +380,19 @@ func TestRemoveTaintCommandSucceedsOnlyWhenTheTaintIsGone(t *testing.T) {
 func TestValidationPodPinsItsImageByDigest(t *testing.T) {
 	assert.Regexp(t, `image: \S+@sha256:[0-9a-f]{64}\n`, validationManifest("worker-1", "a1", "server-1"))
 }
+
+func TestValidateWorkerLeavesOutputOfAFailedDiagnosticRead(t *testing.T) {
+	master, worker := validationHosts("Failed", "nslookup: can't resolve\n")
+	master.routes = append([]route{
+		{contains: "logs kipper-node-check", out: "partial log marker-5d1e", err: errors.New("exit status 255")},
+		{contains: "get events", out: "FailedMount: partial event marker-5d1e", err: errors.New("exit status 255")},
+	}, master.routes...)
+
+	err := validateWorker(master, worker, testJoin, "worker-1", "server-1", "192.0.2.11", fastJoin)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "marker-5d1e")
+	assert.Contains(t, err.Error(), "51820/udp")
+	assert.Contains(t, err.Error(), "reading the validation pod's output failed", "a failed read says so rather than leaving the section out")
+	assert.Contains(t, err.Error(), "reading the validation pod's events failed")
+}

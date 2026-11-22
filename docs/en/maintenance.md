@@ -349,7 +349,8 @@ interrupted, the check reports that step instead.
 
 `--longhorn` needs backups on external storage. Backups in in-cluster MinIO live
 on the Longhorn storage the upgrade changes, so kip refuses to start on such a
-cluster, and on one with backups turned off. kip also resolves the backup
+cluster. It also refuses to start when backups are turned off or backup storage
+is read-only, as it is on recovery installs. kip also resolves the backup
 endpoint and refuses one that leads back into the cluster: a node's address, a
 Service's address or endpoint, an address in the pod or service range, or a
 loopback or link-local address. kip resolves the endpoint's name from your
@@ -580,13 +581,13 @@ ls -l --time-style=full-iso <replica directory>/
 
 None of these signs proves the copy is current, so treat a copy you are unsure about as possibly stale and compare it with your newest backup:
 
-- `"Rebuilding": true` in `volume.meta` means the copy was still being rebuilt and is incomplete. Do not use it.
+- `"Rebuilding":true` in `volume.meta` means the copy was still being rebuilt and is incomplete. Do not use it.
 - The modification time of the `volume-head-*.img` file is the last write this copy received. A time well before the server was lost means the copy had stopped receiving writes.
 - What Kipper reported before the loss: `kip service info` and `kip status` showing all copies healthy mean the copy was current at that point.
 
 Note the volume's size in bytes from the `Size` field of `volume.meta`.
 
-**2. Stop everything that holds the copy open.** `lsof +D <replica directory>` usually lists a `longhorn` process for the replica still running in the worker's instance manager. The cluster is gone with the server's disk, so stop k3s and every container on the worker with `/usr/local/bin/k3s-killall.sh`, then run `lsof +D <replica directory>` again. Continue only when it prints nothing. k3s on the worker cannot start again without its server, so the steps below run the engine with Docker instead.
+**2. Stop everything that holds the copy open.** The worker's instance manager can still run a `longhorn` process for the replica, even when `lsof +D <replica directory>` lists nothing. The cluster's state was lost with the server's disk, so stop k3s and all its containers on the worker with `/usr/local/bin/k3s-killall.sh`, then run `lsof +D <replica directory>`. Continue only when it prints nothing. k3s on the worker cannot start again without its server, so the steps below run the engine with Docker instead.
 
 **3. Make an untouched copy.** Copy the whole directory to another disk. If the worker has only one disk, use another directory on it. If it has no room, copy to another host. Keep that copy unchanged. The image files are sparse, so preserve that format when copying them. Each copy then takes about as much space as the data on the volume:
 
@@ -608,17 +609,27 @@ cp -a --sparse=always /mnt/spare/<replica directory name> /mnt/work/
 
 kip records that image after each `kip upgrade --longhorn` step settles by saving Longhorn's objects on the machine running the command, under `~/.kip/longhorn-upgrades/<cluster>/`. In the newest directory whose name ends in `-settled`, `volumes.yaml` records each volume's engine in `status.currentImage`. Volumes created afterward use the `default-engine-image` in that directory's `settings.yaml`, provided those settings remain unchanged. These records reflect the completed upgrade, so account for any later manual engine changes or interrupted upgrades. On a cluster that has never run `--longhorn` or had its engine images changed manually, every volume runs the engine from the Longhorn release kip installed. `kip upgrade --check` shows that release on its Longhorn line. Copy the export directory, or note the release, somewhere that survives the server, along with your other recovery material. Below, `<engine image>` is that image, such as `longhornio/longhorn-engine:v1.12.2`.
 
-The surviving worker already has `open-iscsi`. Its k3s cannot run containers without the server, so install Docker there and use it to start the engine. Docker pulls the engine image from Docker Hub, about 170 MB. `<volume name>` is the replica directory's name without its eight-character suffix, and `<size in bytes>` is the `Size` from step 1:
+The surviving worker already has `open-iscsi`. Its k3s cannot run containers without the server, so install Docker there and use it to start the engine. Docker pulls the engine image from Docker Hub, about 170 MB. On another host, first install `open-iscsi`, or `iscsi-initiator-utils` on Rocky Linux and AlmaLinux. On Rocky Linux and AlmaLinux, also install Docker from Docker's own repository. Enable and start the iSCSI service with `systemctl enable --now iscsid`, then load its kernel module with `modprobe iscsi_tcp`. `<volume name>` is the replica directory's name without its eight-character suffix, and `<size in bytes>` is the `Size` from step 1.
+
+The engine image's `launch-simple-longhorn` script passes the engine's listen address as `--listen,localhost:`. Engines starting with Longhorn v1.12 reject that form and stop with `flag provided but not defined: -listen10000`. The command below rewrites it to `--listen=localhost:` inside the container before running the script. It keeps the image's `tini` as the first process so that the stop signal reaches the engine. Older engines accept both forms.
+
+Before the first start, check that `/dev/longhorn/<volume name>` does not exist. If the volume was attached on this worker, `k3s-killall.sh` in step 2 can leave the device and its iSCSI session behind. Clear them as described after this block:
 
 ```bash
-apt-get install -y docker.io
+apt-get update
+apt-get install -y docker.io   # On Rocky Linux and AlmaLinux, install Docker from Docker's own repository instead.
+[ ! -e /dev/longhorn/<volume name> ] || echo "stale device: clear it before starting the engine"
 docker run -d --name longhorn-recovery --privileged \
   -v /dev:/host/dev -v /proc:/host/proc -v <working copy directory>:/volume \
-  <engine image> launch-simple-longhorn <volume name> <size in bytes>
+  --entrypoint /tini <engine image> -- sh -c \
+  'sed "s/--listen,localhost:/--listen=localhost:/g" /usr/local/bin/launch-simple-longhorn > /tmp/launch && exec bash /tmp/launch "$0" "$1"' \
+  <volume name> <size in bytes>
 timeout 120 sh -c 'until [ -b /dev/longhorn/<volume name> ]; do sleep 1; done'
 ```
 
 The block device takes about ten seconds to appear. If the wait times out, `docker logs longhorn-recovery` shows why the engine did not start.
+
+Stop the engine with `docker stop -t 60 longhorn-recovery`, then remove it with `docker rm longhorn-recovery`. `docker stop` lets the engine log the host out of its iSCSI session and remove `/dev/longhorn/<volume name>`. `docker rm -f` skips this cleanup and leaves a stale device behind. The wait above then mistakes that device for a running engine. Before starting the engine again, check that `/dev/longhorn/<volume name>` is gone. If it is still there, clear it with `iscsiadm -m node -T iqn.2019-10.io.longhorn:<volume name> --logout`, then `iscsiadm -m node -T iqn.2019-10.io.longhorn:<volume name> -o delete` and `rm -f /dev/longhorn/<volume name>`.
 
 On a working k3s node, such as a node in the new cluster, a static pod can run the engine instead of Docker. Write it to `/var/lib/rancher/k3s/agent/pod-manifests/longhorn-recovery.yaml`. `launch-simple-longhorn` expects the host's `/dev` and `/proc` at `/host/dev` and `/host/proc`:
 
@@ -631,13 +642,17 @@ metadata:
 spec:
   hostPID: true
   restartPolicy: Never
+  terminationGracePeriodSeconds: 60
   containers:
     - name: engine
       image: <engine image>
       securityContext:
         privileged: true
-      command: ["launch-simple-longhorn"]
-      args: ["<volume name>", "<size in bytes>"]
+      command: ["/tini", "--", "sh", "-c"]
+      args:
+        - 'sed "s/--listen,localhost:/--listen=localhost:/g" /usr/local/bin/launch-simple-longhorn > /tmp/launch && exec bash /tmp/launch "$0" "$1"'
+        - "<volume name>"
+        - "<size in bytes>"
       volumeMounts:
         - { name: dev, mountPath: /host/dev }
         - { name: proc, mountPath: /host/proc }
@@ -648,6 +663,13 @@ spec:
     - { name: data, hostPath: { path: <working copy directory> } }
 ```
 
+To stop this engine, remove the manifest and wait until its container has exited. The kubelet notices the removal only on its next scan of the directory. Then check that `/dev/longhorn/<volume name>` is gone, as with Docker:
+
+```bash
+rm /var/lib/rancher/k3s/agent/pod-manifests/longhorn-recovery.yaml
+timeout 120 sh -c 'until ids=$(k3s crictl ps -q --name "^engine$" --label io.kubernetes.pod.namespace=longhorn-system) && [ -z "$ids" ]; do sleep 1; done'
+```
+
 **5. Mount it read-only and copy the data off.** The volume appears as `/dev/longhorn/<volume name>`. Kipper formats volumes as ext4, and a plain `mount -o ro` still replays an unclean journal, which writes to the device. For a first look, `noload` skips the replay:
 
 ```bash
@@ -655,7 +677,7 @@ mkdir -p /mnt/recovery
 mount -o ro,noload /dev/longhorn/<volume name> /mnt/recovery
 ```
 
-Skipping the replay can leave the last writes before the loss missing or inconsistent. Reading a file written shortly before the loss can fail with `Structure needs cleaning`. Before copying data off, always replay the journal, including for a database. Run `umount /mnt/recovery`, then stop the engine with `docker rm -f longhorn-recovery` or by removing the static pod manifest. Make a fresh working copy as in step 3 and start the engine on it as in step 4. Mount it with `mount -o ro /dev/longhorn/<volume name> /mnt/recovery`, omitting `noload`. The journal then replays on that working copy only. Copy the files you need.
+Skipping the replay can leave the last writes before the loss missing or inconsistent. Reading a file written shortly before the loss can fail with `Structure needs cleaning`. Before copying data off, always replay the journal, including for a database. Run `umount /mnt/recovery`, then follow the Docker or static pod shutdown instructions in step 4. Make a fresh working copy as in step 3 and start the engine on it as in step 4. Mount it with `mount -o ro /dev/longhorn/<volume name> /mnt/recovery`, omitting `noload`. The journal then replays on that working copy only. Copy the files you need.
 
 For a Postgres service, the data directory is `pgdata` at the top of the volume, owned by the image's `postgres` user. That user's ID is 70 in Kipper's default Alpine image and 999 in the Debian image used below. When started as root, the official image adjusts ownership of the working data copy to its own `postgres` user. Kipper passes the TLS and access settings on the command line, leaving the data directory's configuration files usable by the official image during recovery. Start the same major version on a copy, wait for it to finish crash recovery, and take a dump. The user is `kipper` and Kipper's database is `app`. `psql -l` lists any other databases the service holds. Each one needs its own dump:
 
@@ -672,7 +694,7 @@ If the wait times out, check `docker logs pg-recovery` for startup errors, such 
 
 During crash recovery, Postgres uses its write-ahead log to restore committed transactions present in this copy. Load the dump into a service on the new cluster with `kip service import <name> --file app.dump`.
 
-**6. Unmount, then stop the engine.** If you started Postgres, run `docker rm -f pg-recovery`. Then run `umount /mnt/recovery`. Finally, stop the engine with `docker rm -f longhorn-recovery` or by removing the static pod manifest. Stopping the engine while the filesystem is mounted leaves the mount pointing at a device that no longer exists.
+**6. Unmount, then stop the engine.** If you started Postgres, run `docker rm -fv pg-recovery`, which also removes the anonymous volume created from the Postgres image's volume declaration. Then run `umount /mnt/recovery`. Finally, follow the Docker or static pod shutdown instructions in step 4. Stopping the engine while the filesystem is mounted leaves the mount pointing at a device that no longer exists.
 
 ## Host maintenance and recovery
 

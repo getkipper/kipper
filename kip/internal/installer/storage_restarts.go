@@ -202,7 +202,7 @@ func NodeForMachineBoot(runner CommandRunner, id HostIdentity) (string, error) {
 
 	out, err := runner.Run(nodeIdentityQuery())
 	if err != nil {
-		return "", fmt.Errorf("looking for the node running machine %s: %w", id.MachineID, err)
+		return "", failedRead("looking for the node running machine "+id.MachineID, out, err)
 	}
 
 	var names []string
@@ -284,7 +284,7 @@ func NodeNameForMachine(runner CommandRunner, machineID string) (string, error) 
 	cmd := "kubectl get nodes -o jsonpath=" + shellQuote(jsonpath) + " 2>/dev/null"
 	out, err := runner.Run(cmd)
 	if err != nil {
-		return "", fmt.Errorf("looking for the node with machine id %s: %w", machineID, err)
+		return "", failedRead("looking for the node with machine id "+machineID, out, err)
 	}
 
 	// Validate node names before counting matches.

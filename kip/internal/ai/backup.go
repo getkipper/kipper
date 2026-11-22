@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getkipper/kipper/kip/internal/backuplocation"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -96,17 +97,18 @@ const (
 	BackupFailed
 )
 
-// StartBackup creates the Velero Backup CRs and returns immediately.
-// All preflight (namespace ownership, name pre-flight) happens here so
-// callers see immediate-validation failures synchronously. The caller decides whether to block on completion
-// (via WaitBackup) or fire-and-forget with a short watch window (via
-// WatchBackupForWindow).
+// StartBackup creates the Velero Backup CRs without waiting for completion.
+// An empty name generates a timestamped name. It checks namespace ownership,
+// storage access and both backup names before creating anything, returning
+// backuplocation.ErrReadOnly for read-only storage. Storage read failures allow
+// creation to proceed. Names ending in the reserved configBackupSuffix are rejected.
+// Callers can wait with WaitBackup or watch briefly with WatchBackupForWindow.
+// If creating the config backup fails, the primary backup remains.
 //
-// Splitting the snapshot across two Backups is the simplest way to
-// back up a populated namespace plus a single cross-namespace
-// resource: Velero label selectors apply to every object in the
-// include scope, so a single Backup spanning both namespaces would
-// force every chart-rendered resource in kipper-ai to carry a label.
+// A separate backup includes cross-namespace configuration resources when present.
+// Velero applies label selectors to every included object, so combining these
+// resources with the populated AI namespace would require labeling every
+// chart-rendered resource in that namespace.
 func (i *Installer) StartBackup(ctx context.Context, name string) (*StartedBackup, error) {
 	if name == "" {
 		name = fmt.Sprintf("kipper-ai-%s", time.Now().UTC().Format("20060102-150405"))
@@ -117,6 +119,11 @@ func (i *Installer) StartBackup(ctx context.Context, name string) (*StartedBacku
 
 	if err := i.requireOwnedNamespace(ctx); err != nil {
 		return nil, err
+	}
+	// Velero also refuses deletions on a read-only location, so a Backup created
+	// there would fail validation and stay behind.
+	if backuplocation.ReadOnly(ctx, i.Dynamic) {
+		return nil, backuplocation.ErrReadOnly
 	}
 	// Refuse if either physical name is taken before creating
 	// anything. Otherwise a stale orphan sibling from a partially

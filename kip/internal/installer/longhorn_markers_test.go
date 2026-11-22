@@ -99,7 +99,7 @@ func TestReadLonghornMarkersFailsClosed(t *testing.T) {
 	r = longhornMarkerHost("longhornio/longhorn-manager:v1.7.3", "v1.7.3", longhornCRDs, "")
 	r.routes[2].err = errors.New("connection refused")
 	_, err = ReadLonghornMarkers(r)
-	assert.ErrorContains(t, err, "connection refused")
+	assert.ErrorContains(t, err, "current-longhorn-version setting", "a failed read stops kip instead of guessing the version")
 }
 
 func TestHopRecordIsWrittenAndRemoved(t *testing.T) {

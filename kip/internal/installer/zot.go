@@ -501,7 +501,7 @@ func InstallZot(client CommandRunner, storageMode string) error {
 	// Stop on lookup errors to avoid requesting a smaller volume.
 	existing, err := client.Run(zotStorageQuery)
 	if err != nil {
-		return fmt.Errorf("reading the registry volume size: %w", err)
+		return failedRead("reading the registry volume size", existing, err)
 	}
 	storage, err := zotStorageRequest(existing)
 	if err != nil {
@@ -520,7 +520,7 @@ func InstallZot(client CommandRunner, storageMode string) error {
 	// image pulls work without cluster DNS.
 	clusterIP, err := client.Run(`kubectl get svc zot -n kipper-system -o jsonpath='{.spec.clusterIP}'`)
 	if err != nil {
-		return fmt.Errorf("getting zot ClusterIP: %w", err)
+		return failedRead("getting zot ClusterIP", clusterIP, err)
 	}
 	clusterIP = strings.TrimSpace(clusterIP)
 	if clusterIP == "" {

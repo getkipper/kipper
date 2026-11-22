@@ -169,7 +169,7 @@ func (g StorageGrowth) stampStorageRestarts() {
 func requireStorageMoveSupport(server CommandRunner) error {
 	out, err := server.Run("kubectl get validatingadmissionpolicy " + platform.StorageMovePodsPolicy + " --ignore-not-found -o name")
 	if err != nil {
-		return fmt.Errorf("checking the cluster's storage move support: %w", err)
+		return failedRead("checking the cluster's storage move support", out, err)
 	}
 	if !strings.Contains(out, platform.StorageMovePodsPolicy) {
 		return fmt.Errorf("this cluster's platform is older than this kip. Run 'kip upgrade' first, then run this command again")
@@ -401,7 +401,7 @@ var growthHardenPayload = regexp.MustCompile(`harden\[(true|false|)\]`)
 func (g StorageGrowth) hardenDecision() (bool, error) {
 	out, err := g.Server.Run(`kubectl get platformconfig platform -o jsonpath='{"harden["}{.metadata.annotations.kipper\.run/storage-growth-harden}{"]"}'`)
 	if err != nil {
-		return false, fmt.Errorf("reading the hardening decision: %w", err)
+		return false, failedRead("reading the hardening decision", out, err)
 	}
 	if m := growthHardenPayload.FindStringSubmatch(out); len(m) > 1 && m[1] != "" {
 		return m[1] == "true", nil

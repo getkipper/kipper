@@ -136,3 +136,28 @@ func TestBackupsRestoreLeavesKipperClusterObjectsOut(t *testing.T) {
 	assert.Contains(t, spec["excludedResources"], "orders.acme.cert-manager.io")
 	assert.NotContains(t, spec, "includeClusterResources")
 }
+
+func TestBackupsCreateRefusesReadOnlyStorage(t *testing.T) {
+	dyn := backupDynamic(platform.BackupExternal)
+	readOnly := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "velero.io/v1", "kind": "BackupStorageLocation",
+		"metadata": map[string]interface{}{"name": "default", "namespace": "velero"},
+		"spec":     map[string]interface{}{"accessMode": "ReadOnly"},
+	}}
+	_, err := dyn.Resource(backupStorageLocationGVR).Namespace("velero").Create(context.Background(), readOnly, metav1.CreateOptions{})
+	require.NoError(t, err)
+	h := &Backups{Client: fake.NewClientset(), Dynamic: dyn}
+	r := chi.NewRouter()
+	r.Post("/backups", h.Create)
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/backups", strings.NewReader(`{}`)))
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, backupStorageReadOnly, body["error"])
+	list, err := dyn.Resource(backupGVR).Namespace("velero").List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items, "no Backup is created on read-only storage")
+}

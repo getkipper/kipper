@@ -727,3 +727,21 @@ func TestServerNetworkChangesComparesBothFiles(t *testing.T) {
 		assert.Equal(t, tc.want, got, "%q %q", tc.dropIn, tc.conf)
 	}
 }
+
+func TestWaitForServerNodeIPLeavesOutputOfAFailedReadOutOfItsError(t *testing.T) {
+	client := &routedRunner{routes: []route{{contains: "InternalIP", out: "partial marker-7a20", err: errors.New("exit status 255")}}}
+
+	err := waitForServerNodeIP(client, "192.0.2.20", fastNetworkChange)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "marker-7a20")
+	assert.Contains(t, err.Error(), "reading the server node's address failed")
+}
+
+func TestWaitForServerNodeIPNamesTheAddressTheNodeReports(t *testing.T) {
+	client := &routedRunner{routes: []route{{contains: "InternalIP", out: "192.0.2.10"}}}
+
+	err := waitForServerNodeIP(client, "192.0.2.20", fastNetworkChange)
+
+	assert.ErrorContains(t, err, `it reports "192.0.2.10"`)
+}

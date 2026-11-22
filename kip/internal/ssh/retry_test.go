@@ -2,10 +2,12 @@ package ssh
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -139,6 +141,31 @@ func TestControlSocket_IsShortEnoughForAUnixSocket(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(home, ".kip", "ssh"), filepath.Dir(path),
 		"the socket belongs under the user's own directory, where no other local account can sit on the path")
+}
+
+// TestControlSocket_DegradesForAHomeOpenSSHWouldMisread covers OpenSSH's splitting
+// of unquoted ControlPath values at spaces, % and ~ expansion, and relative paths.
+func TestControlSocket_DegradesForAHomeOpenSSHWouldMisread(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no connection multiplexing")
+	}
+	t.Chdir(t.TempDir())
+	// Use a short directory because macOS temporary paths can exceed the socket
+	// length limit, masking a missing path syntax check.
+	short, err := os.MkdirTemp("/tmp", "kip")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	for name, home := range map[string]string{
+		"a space":         filepath.Join(short, "a b"),
+		"a percent sign":  filepath.Join(short, "a%"),
+		"a relative path": "kip-review",
+		"a literal tilde": filepath.Join("~", "kip-review"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			assert.Empty(t, controlSocket(Config{Host: "203.0.113.10", User: "root"}), "a connection per command still works when a misread ControlPath would fail")
+		})
+	}
 }
 
 // Two hosts must not share a socket, or a command meant for one would run on
@@ -429,6 +456,7 @@ func TestRun_StopsACommandThatOverrunsItsTimeout(t *testing.T) {
 	_, runErr := c.Run("cat /proc/sys/kernel/random/boot_id")
 	require.Error(t, runErr)
 	assert.Contains(t, runErr.Error(), "did not finish within 2s")
+	assert.ErrorIs(t, runErr, context.DeadlineExceeded, "callers can tell a timeout from a failed command")
 	assert.Less(t, time.Since(started), 10*time.Second, "the timeout, not the stalled command, ended the call")
 
 	raw, err := os.ReadFile(pidFile)

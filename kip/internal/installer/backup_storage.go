@@ -2,6 +2,7 @@ package installer
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -45,16 +46,19 @@ type BackupStorageConfig struct {
 // CheckBackupEndpoint returns nil for an empty endpoint (AWS S3), an HTTPS URL,
 // or an HTTP URL with a loopback, private, or link-local unicast address,
 // localhost, a valid bare Service name, or a name ending in .svc or
-// .svc.cluster.local. Other endpoints return an error. Hostnames are checked
-// by syntax only. Backups contain cluster Secrets, so public endpoints require
-// HTTPS to protect those credentials in transit.
+// .svc.cluster.local. URLs containing user information and other endpoints return
+// an error. Hostnames are checked by syntax only. Backups contain cluster Secrets,
+// so public endpoints require HTTPS to protect those credentials in transit.
 func CheckBackupEndpoint(endpoint string) error {
 	if endpoint == "" {
 		return nil
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Hostname() == "" {
-		return fmt.Errorf("backup storage endpoint %q is not a URL such as https://objects.example.com", endpoint)
+		return errors.New("the backup storage endpoint is not a URL such as https://objects.example.com")
+	}
+	if u.User != nil {
+		return fmt.Errorf("backup storage endpoint %s contains a user name or password. Remove it from the URL and put the access key in the credentials file", DisplayEndpoint(endpoint))
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
@@ -63,11 +67,11 @@ func CheckBackupEndpoint(endpoint string) error {
 		if privateHost(u.Hostname()) {
 			return nil
 		}
-		return fmt.Errorf("backup storage endpoint %q uses plain HTTP with a host outside the allowed private address and Service name patterns, which risks exposing every Secret in each backup. "+
+		return fmt.Errorf("backup storage endpoint %s uses plain HTTP with a host outside the allowed private address and Service name patterns, which risks exposing every Secret in each backup. "+
 			"Use its https:// URL. Plain HTTP is accepted for localhost, a private IP address, a bare Service name, or a Service name ending in .svc or .svc.cluster.local, "+
-			"such as minio.storage.svc for Service minio in namespace storage. For another host on a private network, use its private IP address", endpoint)
+			"such as minio.storage.svc for Service minio in namespace storage. For another host on a private network, use its private IP address", DisplayEndpoint(endpoint))
 	default:
-		return fmt.Errorf("backup storage endpoint %q is not a URL such as https://objects.example.com", endpoint)
+		return fmt.Errorf("backup storage endpoint %s is not a URL such as https://objects.example.com", DisplayEndpoint(endpoint))
 	}
 }
 
@@ -156,15 +160,21 @@ func (c *AWSCredentials) VeleroCredentialsBlock() string {
 		c.AccessKeyID, c.SecretAccessKey)
 }
 
-// PlainEndpointWarning returns a warning for a plain HTTP endpoint rejected by
-// CheckBackupEndpoint, or "" for nil cfg or any other endpoint. Existing clusters
-// retain endpoints configured before that check until the operator changes them.
+// PlainEndpointWarning returns a warning for a plain HTTP endpoint whose display
+// form is rejected by CheckBackupEndpoint, or "" for nil cfg or any other endpoint.
+// DisplayEndpoint removes user information, queries and fragments before the check.
+// Existing clusters retain endpoints configured before endpoint validation until
+// the operator changes them.
 func PlainEndpointWarning(cfg *BackupStorageConfig) string {
-	if cfg == nil || !strings.HasPrefix(strings.ToLower(cfg.Endpoint), "http://") || CheckBackupEndpoint(cfg.Endpoint) == nil {
+	if cfg == nil || !strings.HasPrefix(strings.ToLower(cfg.Endpoint), "http://") {
+		return ""
+	}
+	endpoint := DisplayEndpoint(cfg.Endpoint)
+	if CheckBackupEndpoint(endpoint) == nil {
 		return ""
 	}
 	return fmt.Sprintf("Backups go to %s over plain HTTP with a host outside the allowed private address and Service name patterns, so every Secret in each backup crosses the network unencrypted. "+
-		"Re-run kip install with the backup storage flags and the storage provider's https:// URL", cfg.Endpoint)
+		"Re-run kip install with the backup storage flags and the storage provider's https:// URL", endpoint)
 }
 
 // BackupStorageFromRef restores external storage settings from persisted config.

@@ -948,7 +948,7 @@ func ReadJoinMaterial(server CommandRunner) (JoinMaterial, error) {
 	}
 	zotIP, err := server.Run(`kubectl get svc zot -n kipper-system -o jsonpath='{.spec.clusterIP}'`)
 	if err != nil {
-		return JoinMaterial{}, fmt.Errorf("reading zot ClusterIP from master: %w", err)
+		return JoinMaterial{}, failedRead("reading zot ClusterIP from master", zotIP, err)
 	}
 	zotIP = strings.TrimSpace(zotIP)
 	if zotIP == "" {
@@ -1162,13 +1162,8 @@ func waitForHostNode(master CommandRunner, id HostIdentity, timeout, interval ti
 func FetchKubeconfig(client CommandRunner, host string) (string, error) {
 	output, err := client.Run("cat /etc/rancher/k3s/k3s.yaml")
 	if err != nil {
-		// Unwrap the SSH runner's error to omit command output, which may contain
-		// the cluster's admin key.
-		cause := errors.Unwrap(err)
-		if cause == nil {
-			cause = errors.New("the command failed")
-		}
-		return "", fmt.Errorf("reading kubeconfig: %v", cause)
+		// Omit command output from the error because it may contain the cluster's admin key.
+		return "", fmt.Errorf("reading kubeconfig: %w", withoutOutput(err))
 	}
 
 	rewritten := replaceServerAddress(output, host)

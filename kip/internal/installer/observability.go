@@ -61,11 +61,11 @@ func markedSize(payload *regexp.Regexp, out string) (string, error) {
 func lokiStorage(client CommandRunner, storageMode string) (string, *string, error) {
 	templateOut, err := client.Run(lokiTemplateQuery)
 	if err != nil {
-		return "", nil, fmt.Errorf("reading the log volume size: %w", err)
+		return "", nil, failedRead("reading the log volume size", templateOut, err)
 	}
 	claimOut, err := client.Run(lokiClaimQuery)
 	if err != nil {
-		return "", nil, fmt.Errorf("reading the log volume size: %w", err)
+		return "", nil, failedRead("reading the log volume size", claimOut, err)
 	}
 	size, err := lokiStorageRequest(templateOut, claimOut)
 	if err != nil {

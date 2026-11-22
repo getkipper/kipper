@@ -184,6 +184,49 @@ func TestARefusedEndpointNamesTheAcceptedServiceForm(t *testing.T) {
 	assert.Contains(t, err.Error(), "private IP address")
 }
 
+func TestAnEndpointWithUserInfoIsRefused(t *testing.T) {
+	for _, endpoint := range []string{"https://key:secret@s3.example.com", "https://usersentinel@s3.example.com", "http://key:secret@10.0.0.5:9000"} {
+		err := CheckBackupEndpoint(endpoint)
+
+		require.Error(t, err, endpoint)
+		assert.NotContains(t, err.Error(), "secret", endpoint)
+		assert.NotContains(t, err.Error(), "usersentinel", endpoint)
+		assert.Contains(t, err.Error(), "credentials file", endpoint)
+	}
+}
+
+func TestARefusedEndpointNeverEchoesCredentials(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://key:secret@s3.example.com:bad",
+		"https://key:secret@",
+		"ftp://key:secret@s3.example.com",
+		"http://objects.example.com/?X-Amz-Signature=secret",
+	} {
+		err := CheckBackupEndpoint(endpoint)
+
+		require.Error(t, err, endpoint)
+		assert.NotContains(t, err.Error(), "secret", endpoint)
+	}
+}
+
+func TestTheStoredPlainEndpointWarningWithholdsCredentials(t *testing.T) {
+	warning := PlainEndpointWarning(&BackupStorageConfig{Endpoint: "http://key:secret@objects.example.com"}) //nolint:gosec // G101: a synthetic credentials fixture
+	assert.Contains(t, warning, "http://objects.example.com")
+	assert.NotContains(t, warning, "secret")
+
+	assert.Empty(t, PlainEndpointWarning(&BackupStorageConfig{Endpoint: "http://key:secret@10.0.0.5:9000"}), "a private host keeps plain HTTP") //nolint:gosec // G101: a synthetic credentials fixture
+}
+
+// Records written before URL user information was rejected may still contain it,
+// so location messages omit it.
+func TestAStorageLocationNamesItsEndpointWithoutCredentials(t *testing.T) {
+	l := StorageLocation{Bucket: "backups", Endpoint: "https://key:secret@s3.example.com/?X-Amz-Signature=abc#frag"} //nolint:gosec // G101: a synthetic credentials fixture
+
+	assert.Equal(t, "backups at https://s3.example.com", l.String())
+	assert.Equal(t, "backups at AWS S3", StorageLocation{Bucket: "backups"}.String())
+	assert.Equal(t, "backups at https://s3.example.com", StorageLocation{Bucket: "backups", Endpoint: "https://s3.example.com/"}.String())
+}
+
 // Clusters retain endpoints configured before the plain HTTP check, so install
 // and upgrade warn about rejected endpoints until the operator changes them.
 func TestAStoredPlainEndpointGetsAWarning(t *testing.T) {

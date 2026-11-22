@@ -81,7 +81,7 @@ func longhornNodeTags(client CommandRunner, node string, wait joinTimeouts) ([]s
 	err := pollUntil(wait.ready, wait.interval, func() (bool, error) {
 		out, err := client.Run(fmt.Sprintf("kubectl -n longhorn-system get nodes.longhorn.io %s --request-timeout=30s -o jsonpath='{.spec.tags}'", node))
 		if err != nil {
-			return false, err
+			return false, failedRead("reading the tags", out, err)
 		}
 		tags, err = parseJSONList(out)
 		return err == nil, err
@@ -100,7 +100,7 @@ func ReplicasOnNode(client CommandRunner, node string) (int, error) {
 	}
 	out, err := client.Run(`kubectl -n longhorn-system get replicas.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.spec.nodeID}{"\n"}{end}'`)
 	if err != nil {
-		return 0, fmt.Errorf("listing Longhorn replicas: %w", err)
+		return 0, failedRead("listing Longhorn replicas", out, err)
 	}
 	count := 0
 	for _, line := range strings.Split(out, "\n") {
@@ -151,15 +151,15 @@ func ReadCopiesInventory(client CommandRunner) (CopiesInventory, error) {
 	var inv CopiesInventory
 	replicas, err := client.Run(`kubectl -n longhorn-system get replicas.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.spec.nodeID}{"\t"}{.spec.healthyAt}{"\t"}{.spec.failedAt}{"\n"}{end}'`)
 	if err != nil {
-		return inv, fmt.Errorf("listing Longhorn replicas: %w", err)
+		return inv, failedRead("listing Longhorn replicas", replicas, err)
 	}
 	nodes, err := client.Run(`kubectl -n longhorn-system get nodes.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.tags}{"\n"}{end}'`)
 	if err != nil {
-		return inv, fmt.Errorf("listing Longhorn nodes: %w", err)
+		return inv, failedRead("listing Longhorn nodes", nodes, err)
 	}
 	objects, err := client.Run(`kubectl get services.kipper.run,volumes.kipper.run -A --request-timeout=30s -o jsonpath='{range .items[*]}{.kind}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.copies}{"\n"}{end}'`)
 	if err != nil {
-		return inv, fmt.Errorf("listing services and volumes: %w", err)
+		return inv, failedRead("listing services and volumes", objects, err)
 	}
 
 	tagged := map[string]bool{}

@@ -11,7 +11,7 @@ import (
 func checkLocalPathStorage(client CommandRunner) error {
 	out, err := client.Run("kubectl get storageclass local-path --ignore-not-found -o name")
 	if err != nil {
-		return fmt.Errorf("checking local storage: %w", err)
+		return failedRead("checking local storage", out, err)
 	}
 	if strings.TrimSpace(out) == "" {
 		return fmt.Errorf("local storage requires the local-path StorageClass. Reinstall k3s with its local-storage component enabled")
@@ -29,7 +29,7 @@ func ReadStorageMode(client CommandRunner) (string, error) {
 		if identityAbsentFromKubectl(out) {
 			return StorageLonghorn, nil
 		}
-		return "", fmt.Errorf("reading the storage mode: %w: %s", err, strings.TrimSpace(out))
+		return "", failedRead("reading the storage mode", out, err)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	mode := strings.Trim(strings.TrimSpace(lines[len(lines)-1]), "'")

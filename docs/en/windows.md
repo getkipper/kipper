@@ -56,7 +56,7 @@ ssh-add $env:USERPROFILE\.ssh\id_ed25519
 
 Windows OpenSSH refuses a key file that other users can read, which happens to keys copied from another machine. Restrict the file to your own account in its Security settings, or create a fresh key.
 
-The first connection records the server's host key in `%USERPROFILE%\.ssh\known_hosts`. If a reinstalled server presents a different key, kip stops and names that file. Remove the old line for that address from it and run the command again.
+The first connection records the server's host key in `%USERPROFILE%\.ssh\known_hosts`. If a reinstalled server presents a different key, kip stops. If kip confirms that the line containing the old key in that file applies only to this server, it identifies the line to delete. Delete that line and run the command again.
 
 ### If the connection drops
 

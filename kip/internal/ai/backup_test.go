@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/getkipper/kipper/kip/internal/backuplocation"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
 
@@ -2326,4 +2327,24 @@ func newBackupAt(name string, created time.Time) *unstructured.Unstructured {
 	u := newBackup(name, kipperLabels())
 	_ = unstructured.SetNestedField(u.Object, created.UTC().Format(time.RFC3339), "metadata", "creationTimestamp")
 	return u
+}
+
+// TestStartBackupRefusesReadOnlyStorage verifies that refusal leaves no Backup
+// objects behind. Velero would fail their validation and refuse their deletion.
+func TestStartBackupRefusesReadOnlyStorage(t *testing.T) {
+	client := veleroDynamicFake()
+	readOnly := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "velero.io/v1", "kind": "BackupStorageLocation",
+		"metadata": map[string]interface{}{"name": "default", "namespace": VeleroNamespace},
+		"spec":     map[string]interface{}{"accessMode": "ReadOnly"},
+	}}
+	_, err := client.Resource(backuplocation.GVR).Namespace(VeleroNamespace).Create(context.Background(), readOnly, metav1.CreateOptions{})
+	require.NoError(t, err)
+	inst := fastInstaller(client, installedNamespace())
+
+	_, err = inst.StartBackup(context.Background(), "on-recovery")
+	require.ErrorIs(t, err, backuplocation.ErrReadOnly)
+	list, err := client.Resource(veleroBackupGVR).Namespace(VeleroNamespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items, "no Backup is created on read-only storage")
 }

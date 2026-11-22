@@ -157,7 +157,7 @@ func scheduleInterval(cron string) time.Duration {
 func fetchBackupsOverSSH(r Runner) (BackupState, error) {
 	out, err := r.Run("kubectl get crd backups.velero.io -o name --ignore-not-found " + requestTimeout)
 	if err != nil {
-		return BackupState{}, commandError(err)
+		return BackupState{}, commandError(out, err)
 	}
 	if strings.TrimSpace(out) == "" {
 		return BackupState{}, nil

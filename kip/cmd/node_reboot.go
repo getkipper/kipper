@@ -57,7 +57,9 @@ Use --ignore-degraded-volumes to proceed with unhealthy volumes or when
 volume health cannot be read. If kip cannot read the node list before a
 server reboot, use --skip-backup to proceed without a backup. kip retries
 the node list before rebooting and checks volume health if workers are found.
-If the node list is still unavailable, it warns and proceeds.`,
+If the node list is still unavailable, it warns and proceeds. When the
+cluster has backups disabled or its backup storage is read-only, kip
+reports this and reboots without a backup.`,
 	Args:         cobra.MaximumNArgs(1),
 	SilenceUsage: true,
 	RunE:         runNodeReboot,
@@ -83,6 +85,7 @@ type nodeReboot struct {
 	Settle           func(within time.Duration) error
 	Backup           func() (string, error)
 	NoBackups        bool
+	BackupsReadOnly  bool
 	BootID           func(ssh.Config) (string, error)
 	Reboot           func(ssh.Config) (time.Time, error)
 	Healthy          func(within time.Duration, bootID string) (bool, string)
@@ -106,6 +109,13 @@ func (r *nodeReboot) run(host string, yes, skipBackup bool) error {
 		return fmt.Errorf("reaching %s over SSH before the reboot: %w", host, err)
 	}
 
+	if r.NoBackups && !skipBackup {
+		say(r.Out, "\n  ℹ  This cluster has no backups, so the reboot proceeds without one\n")
+	}
+	if r.BackupsReadOnly && !skipBackup && !r.NoBackups {
+		say(r.Out, "\n  ℹ  This cluster's backup storage is read-only, so the reboot proceeds without a backup\n")
+	}
+
 	if !yes {
 		ok, err := r.Confirm(fmt.Sprintf("\n  Reboot %s? %s [y/N] ", host, r.Impact))
 		if err != nil {
@@ -117,10 +127,7 @@ func (r *nodeReboot) run(host string, yes, skipBackup bool) error {
 		}
 	}
 
-	if r.NoBackups && !skipBackup {
-		say(r.Out, "\n  ℹ  This cluster has no backups, so the reboot proceeds without one\n")
-	}
-	if !skipBackup && !r.NoBackups {
+	if !skipBackup && !r.NoBackups && !r.BackupsReadOnly {
 		say(r.Out, "\n  ...  Backing up before the reboot\n")
 		name, err := r.Backup()
 		if err != nil {
@@ -338,7 +345,8 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 			defer cancel()
 			return backupBeforeReboot(ctx, cluster, client, 10*time.Second)
 		},
-		NoBackups: !backupsConfiguredOn(context.Background(), client.Dynamic()),
+		NoBackups:       !backupsConfiguredOn(context.Background(), client.Dynamic()),
+		BackupsReadOnly: !skipBackup && backupStorageReadOnly(client.Dynamic()),
 		BootID: func(cfg ssh.Config) (string, error) {
 			return onHost(cfg, func(c *ssh.Client) (string, error) { return installer.ReadBootID(c) })
 		},

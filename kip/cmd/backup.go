@@ -23,6 +23,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/kip/internal/backuplocation"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/doctor"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -133,13 +134,34 @@ func backupsConfiguredOn(ctx context.Context, dyn dynamic.Interface) bool {
 	return platform.BackupsConfigured(backup)
 }
 
+// backupStorageReadOnly reports whether Velero's default location is read-only.
+// The read has a ten-second timeout to bound the preflight delay.
+// Read failures, including timeouts, return false.
+func backupStorageReadOnly(dyn dynamic.Interface) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return backuplocation.ReadOnly(ctx, dyn)
+}
+
+// refuseBackupCreate returns an error if backups are disabled or storage is
+// read-only. Read failures are ignored. It returns nil if neither check refuses creation.
+func refuseBackupCreate(dyn dynamic.Interface) error {
+	if !backupsConfiguredOn(context.Background(), dyn) {
+		return errBackupsNotConfigured
+	}
+	if backupStorageReadOnly(dyn) {
+		return backuplocation.ErrReadOnly
+	}
+	return nil
+}
+
 func runBackupCreate(cmd *cobra.Command, args []string) error {
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
-	if !backupsConfiguredOn(context.Background(), k8sClient.Dynamic()) {
-		return errBackupsNotConfigured
+	if err := refuseBackupCreate(k8sClient.Dynamic()); err != nil {
+		return err
 	}
 
 	project, _ := cmd.Flags().GetString("project")

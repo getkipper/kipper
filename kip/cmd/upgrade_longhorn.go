@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/getkipper/kipper/kip/internal/backuplocation"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
@@ -264,8 +265,8 @@ var lookupBackupHost = func(ctx context.Context, host string) ([]net.IP, error) 
 	return net.DefaultResolver.LookupIP(ctx, "ip", host)
 }
 
-// backupLocationProblem returns a blocking reason for a missing backup
-// location, an unreadable or unresolvable endpoint, or a name or address
+// backupLocationProblem returns a blocking reason for a missing or read-only
+// backup location, an unreadable or unresolvable endpoint, or a name or address
 // associated with the cluster. Loopback, link-local and unspecified addresses
 // also block the upgrade. An empty endpoint means AWS S3.
 // An empty result means these checks pass. API read failures return an error.
@@ -279,6 +280,9 @@ func backupLocationProblem(ctx context.Context, cs kubernetes.Interface, dyn dyn
 	if err != nil {
 		return "", fmt.Errorf("reading Velero's backup location: %w", err)
 	}
+	if backuplocation.IsReadOnly(bsl) {
+		return need + "Velero's backup location is read-only, as it is on recovery installs, so kip cannot take the required backup. See \"Read the old backups\" in the backup docs", nil
+	}
 	endpoint, _, err := unstructured.NestedString(bsl.Object, "spec", "config", "s3Url")
 	if err != nil {
 		return fmt.Sprintf("%skip cannot read the endpoint of Velero's backup location (%v). %s", need, err, longhornBackupFix), nil
@@ -291,7 +295,7 @@ func backupLocationProblem(ctx context.Context, cs kubernetes.Interface, dyn dyn
 		host = u.Hostname()
 	}
 	if host == "" {
-		return fmt.Sprintf("%skip cannot read the endpoint %q of Velero's backup location. %s", need, endpoint, longhornBackupFix), nil
+		return fmt.Sprintf("%skip cannot read the endpoint %s of Velero's backup location. %s", need, installer.DisplayEndpoint(endpoint), longhornBackupFix), nil
 	}
 	nsList, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {

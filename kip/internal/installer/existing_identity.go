@@ -37,7 +37,7 @@ func ReadExistingClusterIdentity(client CommandRunner) (*ExistingIdentity, bool,
 		if identityAbsentFromKubectl(out + " " + err.Error()) {
 			return nil, true, nil
 		}
-		return nil, true, fmt.Errorf("this host already runs a cluster but its serving identity could not be read (fix the apiserver or kubectl first, or wipe the host with 'kip cluster uninstall'): %w", err)
+		return nil, true, fmt.Errorf("this host already runs a cluster but its serving identity could not be read (fix the apiserver or kubectl first, or wipe the host with 'kip cluster uninstall'): %w", failedRead("reading the cluster identity", out, err))
 	}
 	identity, err := ParseExistingIdentity(out)
 	if err != nil {

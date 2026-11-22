@@ -113,7 +113,7 @@ func ReadAccessRecord(client CommandRunner) (AccessRecord, bool, error) {
 	out, err := client.Run(fmt.Sprintf("kubectl -n %s get configmap %s --ignore-not-found -o jsonpath='{.data}' 2>/dev/null",
 		NodeRecordsNamespace, accessRecordConfigMap))
 	if err != nil {
-		return AccessRecord{}, false, fmt.Errorf("reading the operator access record: %w", err)
+		return AccessRecord{}, false, failedRead("reading the operator access record", out, err)
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {

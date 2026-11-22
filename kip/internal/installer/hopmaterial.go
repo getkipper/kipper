@@ -13,6 +13,9 @@ import (
 
 // CommandRunner runs installer shell commands on the cluster host.
 // SSH and local runners implement it, and tests can substitute a fake.
+// Failed commands must return all captured output in the string result. Errors
+// must not include additional command output because readfailure.Error preserves
+// the error when the returned output is blank.
 type CommandRunner interface {
 	Run(command string) (string, error)
 	RunStdin(command string, stdin io.Reader) (string, error)
@@ -90,7 +93,7 @@ func RestartTraefikOntoCopy(client CommandRunner) error {
 	copyVersion, err := client.Run(fmt.Sprintf("kubectl -n %s get secret %s -o jsonpath='{.metadata.resourceVersion}'",
 		hopca.TraefikNamespace, hopca.TraefikCopyName))
 	if err != nil {
-		return fmt.Errorf("reading Traefik's copy of the hop certificate: %w", err)
+		return failedRead("reading Traefik's copy of the hop certificate", copyVersion, err)
 	}
 	copyVersion = strings.TrimSpace(copyVersion)
 	if copyVersion == "" {
@@ -99,7 +102,7 @@ func RestartTraefikOntoCopy(client CommandRunner) error {
 	current, err := client.Run(fmt.Sprintf("kubectl -n %s get deployment %s -o jsonpath='{.spec.template.metadata.annotations.%s}'",
 		hopca.TraefikNamespace, hopca.TraefikDeploymentName, strings.ReplaceAll(hopca.TraefikCopyAnnotation, ".", `\.`)))
 	if err != nil {
-		return fmt.Errorf("reading Traefik's Deployment: %w", err)
+		return failedRead("reading Traefik's Deployment", current, err)
 	}
 	if strings.TrimSpace(current) != copyVersion {
 		if _, err := client.Run(fmt.Sprintf("kubectl -n %s patch deployment %s --type merge -p '%s'",

@@ -374,7 +374,7 @@ func (r *retainedCopyReader) veleroList(what, cmd string, into any) error {
 		if identityAbsentFromKubectl(out) {
 			return nil
 		}
-		return fmt.Errorf("listing %s: %w", what, err)
+		return failedRead("listing "+what, out, err)
 	}
 	list := struct {
 		Items json.RawMessage `json:"items"`

@@ -226,7 +226,7 @@ func liveCRDWriterVersion(client CommandRunner, name string) (string, error) {
 		name, strings.ReplaceAll(CRDWrittenByAnnotation, ".", `\.`))
 	out, err := client.Run(cmd)
 	if err != nil {
-		return "", fmt.Errorf("asking the cluster which kip wrote %s: %w", name, err)
+		return "", failedRead("asking the cluster which kip wrote "+name, out, err)
 	}
 	return strings.TrimSpace(strings.Trim(out, "'")), nil
 }

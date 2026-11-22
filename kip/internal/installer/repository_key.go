@@ -148,11 +148,19 @@ type backupTarget struct {
 // https://s3.example.com name the same location.
 func normalizeEndpoint(s3URL string) string { return strings.TrimRight(s3URL, "/") }
 
-func describeEndpoint(s3URL string) string {
-	if s3URL == "" {
+// DisplayEndpoint strips URL user information, queries and fragments for display.
+// It preserves the scheme, host and path, then removes trailing slashes.
+// It returns "AWS S3" for an empty endpoint and "(withheld, not a URL)" when
+// URL parsing fails or the host is empty.
+func DisplayEndpoint(endpoint string) string {
+	if endpoint == "" {
 		return "AWS S3"
 	}
-	return normalizeEndpoint(s3URL)
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "(withheld, not a URL)"
+	}
+	return normalizeEndpoint((&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String())
 }
 
 // newBackupTarget describes the location cfg configures, or in-cluster MinIO
@@ -182,7 +190,7 @@ func newBackupTarget(cfg *BackupStorageConfig, minioPassword string) (backupTarg
 		if !ok {
 			// Defer listing restrictions so upgrades can reuse an endpoint
 			// that Velero already accepts. A move or a missing key may need a listing.
-			t.noList = fmt.Sprintf("listing bucket contents requires an HTTP or HTTPS endpoint with no credentials, path, query or fragment. Got %q", cfg.Endpoint)
+			t.noList = fmt.Sprintf("listing bucket contents requires an HTTP or HTTPS endpoint with no credentials, path, query or fragment. Got %s", DisplayEndpoint(cfg.Endpoint))
 			return t, nil
 		}
 		scheme, host = u.Scheme, u.Host
@@ -223,7 +231,7 @@ func prepareBackupRepository(client CommandRunner, target backupTarget, check *b
 
 	out, err := client.Run("kubectl -n velero get secret " + repositoryKeySecret + " --ignore-not-found -o name 2>/dev/null")
 	if err != nil {
-		return fmt.Errorf("checking for the backup repository key: %w", err)
+		return failedRead("checking for the backup repository key", out, err)
 	}
 	if strings.TrimSpace(out) == "secret/"+repositoryKeySecret {
 		if key != nil {
@@ -319,11 +327,11 @@ func refuseMoveToPopulatedBucket(client CommandRunner, check *bucketCheck) error
 	populated, err := check.populated()
 	if err != nil {
 		return fmt.Errorf("backups move from bucket %s at %s to bucket %s at %s, which kip must check for existing backups first: %w. Re-run kip install with the storage credentials",
-			liveBucket, describeEndpoint(liveURL), check.target.bucket, describeEndpoint(check.target.s3URL), err)
+			liveBucket, DisplayEndpoint(liveURL), check.target.bucket, DisplayEndpoint(check.target.s3URL), err)
 	}
 	if populated {
 		return fmt.Errorf("backups move from bucket %s at %s to bucket %s at %s, which already holds backups, possibly another cluster's. Point this cluster at an empty bucket",
-			liveBucket, describeEndpoint(liveURL), check.target.bucket, describeEndpoint(check.target.s3URL))
+			liveBucket, DisplayEndpoint(liveURL), check.target.bucket, DisplayEndpoint(check.target.s3URL))
 	}
 	return nil
 }
@@ -342,14 +350,14 @@ type liveLocation struct {
 func liveBackupLocation(client CommandRunner) (liveLocation, error) {
 	crd, err := client.Run("kubectl get crd backupstoragelocations.velero.io --ignore-not-found -o name 2>/dev/null")
 	if err != nil {
-		return liveLocation{}, fmt.Errorf("checking for Velero: %w", err)
+		return liveLocation{}, failedRead("checking for Velero", crd, err)
 	}
 	if strings.TrimSpace(crd) == "" {
 		return liveLocation{}, nil
 	}
 	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}|{.spec.config.customerKeyEncryptionSecret}|{.spec.config.region}|{.spec.objectStorage.prefix}|{.spec.accessMode}' 2>/dev/null`)
 	if err != nil {
-		return liveLocation{}, fmt.Errorf("reading the current backup location: %w", err)
+		return liveLocation{}, failedRead("reading the current backup location", out, err)
 	}
 	fields := strings.SplitN(strings.TrimSpace(out), "|", 6)
 	for len(fields) < 6 {
@@ -436,7 +444,7 @@ func waitForJobLogs(client CommandRunner, job, what string, timeout time.Duratio
 	for {
 		status, err := client.Run(fmt.Sprintf("kubectl -n velero get job %s -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null", job))
 		if err != nil {
-			return "", fmt.Errorf("waiting for %s: %w", what, err)
+			return "", failedRead(fmt.Sprintf("waiting for %s", what), status, err)
 		}
 		if succeeded, failed, _ := strings.Cut(strings.TrimSpace(status), "/"); succeeded == "1" || failed == "1" {
 			break
@@ -449,7 +457,7 @@ func waitForJobLogs(client CommandRunner, job, what string, timeout time.Duratio
 
 	logs, err := client.Run(fmt.Sprintf("kubectl -n velero logs job/%s --tail=20", job))
 	if err != nil {
-		return "", fmt.Errorf("reading the result of %s: %w", what, err)
+		return "", failedRead("reading the result of "+what, logs, err)
 	}
 	return logs, nil
 }

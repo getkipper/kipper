@@ -49,7 +49,7 @@ func (u LonghornUpgrade) waitForGlobalLeader(client CommandRunner) error {
 func globalLeaderProblem(client CommandRunner, seen string) (renewed, problem string) {
 	out, err := client.Run(globalManagerLeaseQuery)
 	if err != nil {
-		return "", fmt.Sprintf("reading the global manager's lease: %v", err)
+		return "", failedRead("reading the global manager's lease", out, err).Error()
 	}
 	var lease struct {
 		Spec struct {
@@ -66,7 +66,7 @@ func globalLeaderProblem(client CommandRunner, seen string) (renewed, problem st
 	}
 	running, err := runningGlobalManagers(client)
 	if err != nil {
-		return renew, fmt.Sprintf("reading the global manager's pods: %v", err)
+		return renew, err.Error()
 	}
 	if !running[holder] {
 		return renew, fmt.Sprintf("its lease is held by %s, which is not a running global manager pod", holder)
@@ -82,7 +82,7 @@ func globalLeaderProblem(client CommandRunner, seen string) (renewed, problem st
 func runningGlobalManagers(client CommandRunner) (map[string]bool, error) {
 	out, err := client.Run(globalManagerPodQuery)
 	if err != nil {
-		return nil, err
+		return nil, failedRead("reading the global manager's pods", out, err)
 	}
 	var list struct {
 		Items []struct {

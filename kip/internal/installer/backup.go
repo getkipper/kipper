@@ -215,7 +215,7 @@ func installInClusterMinIO(client CommandRunner, password, class string) error {
 	// Preserve existing capacity because Kubernetes rejects PVC shrink requests.
 	existing, err := client.Run(minioStorageQuery)
 	if err != nil {
-		return fmt.Errorf("reading the backup volume size: %w", err)
+		return failedRead("reading the backup volume size", existing, err)
 	}
 	storage, err := minioStorageRequest(existing)
 	if err != nil {
@@ -533,7 +533,7 @@ data:
 func configureRestoreHelper(client CommandRunner) error {
 	names, err := client.Run("kubectl -n velero get configmap -l velero.io/plugin-config,velero.io/pod-volume-restore=RestoreItemAction -o jsonpath='{.items[*].metadata.name}'")
 	if err != nil {
-		return fmt.Errorf("reading Velero's restore helper settings: %w", err)
+		return failedRead("reading Velero's restore helper settings", names, err)
 	}
 	for _, name := range strings.Fields(names) {
 		if name != "fs-restore-action-config" {
@@ -555,7 +555,7 @@ func configureRestoreHelper(client CommandRunner) error {
 func EnsureVeleroCoversNodes(client CommandRunner) (bool, error) {
 	values, err := client.Run("kubectl -n kube-system get helmchart velero -o jsonpath='{.spec.valuesContent}' --ignore-not-found")
 	if err != nil {
-		return false, fmt.Errorf("reading the Velero chart: %w", err)
+		return false, failedRead("reading the Velero chart", values, err)
 	}
 	if strings.TrimSpace(values) == "" {
 		return false, nil
@@ -657,7 +657,7 @@ var rhelOSImagePrefixes = []string{"Rocky Linux", "AlmaLinux", "CentOS Stream", 
 func clusterHasRHELNode(client CommandRunner) (bool, error) {
 	out, err := client.Run(`kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.osImage}{"\n"}{end}'`)
 	if err != nil {
-		return false, fmt.Errorf("reading node operating systems: %w", err)
+		return false, failedRead("reading node operating systems", out, err)
 	}
 	for _, image := range strings.Split(out, "\n") {
 		for _, prefix := range rhelOSImagePrefixes {
@@ -783,7 +783,7 @@ func installVeleroCredentials(client Uploader, cfg *BackupStorageConfig, minioPa
 	if cfg != nil && cfg.AccessKeyID == "" && cfg.SecretAccessKey == "" {
 		out, err := client.Run("kubectl -n velero get secret cloud-credentials --ignore-not-found -o name")
 		if err != nil {
-			return fmt.Errorf("checking for existing velero credentials: %w", err)
+			return failedRead("checking for existing velero credentials", out, err)
 		}
 		if strings.TrimSpace(out) == "" {
 			return fmt.Errorf("external backup storage configured but cloud-credentials Secret is missing from the velero namespace. Reinstall with --backup-storage-credentials to bootstrap")

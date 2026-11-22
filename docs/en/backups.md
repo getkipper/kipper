@@ -460,6 +460,8 @@ flowchart LR
 - Local `~/.kip/config.yaml` records mode + bucket + region + endpoint, never the keys
 - With SSE-C, which `kip install` turns on where the store supports it, the store encrypts Velero's own objects with a key in the `kipper-backup-sse-key` Secret, and volume data stays encrypted by the backup repository key. See [SSE-C](/en/installation#backup-sse-c)
 
+`kip backup storage show` shows whether backups go to in-cluster MinIO or an external bucket. For external storage, it prints the bucket, region and endpoint. It also shows the configured object encryption. For Velero, it shows when the server last checked the location or reports that the server is stopped. Credentials are never printed.
+
 To rotate keys later, run `kip install` again with the updated credentials file pointing at the same host. That replaces the Secret in place. Note it re-runs the rest of the install too, which is not free: see [what an upgrade moves](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not).
 
 ## Move backups to another bucket {#move-backup-storage}
@@ -493,7 +495,7 @@ kip install --host 203.0.113.20 --domain recovery.example.com \
   --backup-storage-read-only --backup-repository-key-file ~/example-old-backups.key
 ```
 
-Add `--backup-storage-sse-c-key-file` when the old backups use SSE-C. Velero marks the location `ReadOnly`, which blocks new backups, deletion and repository maintenance there, and both backup schedules are off. Restores and drills work as usual. Velero still writes each restore's log and results under `restores/` in the bucket, so the recovery credentials need write access there. Upgrades preserve read-only access even when run from a machine whose kip settings lack the flag, so the recovery cluster stays read-only for that bucket permanently.
+Add `--backup-storage-sse-c-key-file` when the old backups use SSE-C. Velero marks the location `ReadOnly`, which blocks new backups, deletion and repository maintenance there, and both backup schedules are off. kip and the console refuse a new backup there, `kip node reboot` reboots without one, and `kip upgrade --longhorn` refuses to start. Restores and drills work as usual. Velero still writes each restore's log and results under `restores/` in the bucket, so the recovery credentials need write access there. Upgrades preserve read-only access even when run from a machine whose kip settings lack the flag, so the recovery cluster stays read-only for that bucket permanently.
 
 ### Forget the old bucket
 

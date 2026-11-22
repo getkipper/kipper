@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -158,9 +161,10 @@ func shellCommandAnnotation(script string) string {
 	return string(b)
 }
 
-// syncDumpTemplate carries the dump volume and hook annotations of desired
-// onto a live template, or strips them when desired has none. A service that
-// has neither a live nor a desired pre-hook keeps its template unchanged.
+// syncDumpTemplate copies the desired dump volume and hook annotations to the
+// live template, or removes them when the desired pre-hook is absent. A live
+// template with a pre-hook retains its existing timeout. If both templates lack
+// a pre-hook, the live template stays unchanged.
 func syncDumpTemplate(live, desired *corev1.PodTemplateSpec, svcName string) {
 	_, on := desired.Annotations[preHookCommand]
 	_, wasOn := live.Annotations[preHookCommand]
@@ -173,6 +177,11 @@ func syncDumpTemplate(live, desired *corev1.PodTemplateSpec, svcName string) {
 			live.Annotations = map[string]string{}
 		}
 		for _, k := range dumpHookAnnotations {
+			// Preserve the template timeout to avoid replacing database pods when
+			// storage growth increases it. syncDumpTimeout updates the pods directly.
+			if _, ok := live.Annotations[k]; ok && wasOn && k == preHookTimeout {
+				continue
+			}
 			live.Annotations[k] = desired.Annotations[k]
 		}
 		return
@@ -187,6 +196,62 @@ func syncDumpTemplate(live, desired *corev1.PodTemplateSpec, svcName string) {
 	for _, k := range dumpHookAnnotations {
 		delete(live.Annotations, k)
 	}
+}
+
+// syncDumpTimeout updates the timeout for the current storage size on selected,
+// nonterminating pods owned by the StatefulSet that have a pre-hook, because
+// Velero reads hook annotations from pods. It retries conflicting updates and
+// skips a pod deleted meanwhile.
+// An empty timeout or missing selector leaves pods unchanged. Recreated pods
+// retain the template's timeout until the StatefulSet watch triggers reconciliation.
+func (r *ServiceReconciler) syncDumpTimeout(ctx context.Context, sts *appsv1.StatefulSet, timeout string) error {
+	if timeout == "" || sts.Spec.Selector == nil {
+		return nil
+	}
+	selector, err := metav1.LabelSelectorAsSelector(sts.Spec.Selector)
+	if err != nil {
+		return fmt.Errorf("reading the selector of StatefulSet %s: %w", sts.Name, err)
+	}
+	var pods corev1.PodList
+	if err := r.hostReader().List(ctx, &pods, client.InNamespace(sts.Namespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !needsDumpTimeout(pod, sts, timeout) {
+			continue
+		}
+		first := true
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if !first {
+				if err := r.hostReader().Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+					return err
+				}
+				if !needsDumpTimeout(pod, sts, timeout) {
+					return nil
+				}
+			}
+			first = false
+			pod.Annotations[preHookTimeout] = timeout
+			return r.Update(ctx, pod)
+		})
+		// A pod deleted since the list has nothing left to update.
+		if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("setting the dump timeout on pod %s: %w", pod.Name, err)
+		}
+	}
+	return nil
+}
+
+// needsDumpTimeout reports whether pod is a nonterminating pod of sts with a
+// pre-hook whose timeout differs from timeout.
+func needsDumpTimeout(pod *corev1.Pod, sts *appsv1.StatefulSet, timeout string) bool {
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil || owner.UID != sts.UID || pod.DeletionTimestamp != nil {
+		return false
+	}
+	_, hooked := pod.Annotations[preHookCommand]
+	return hooked && pod.Annotations[preHookTimeout] != timeout
 }
 
 // postgresDumpScript runs before Velero copies the pod's volumes. The space

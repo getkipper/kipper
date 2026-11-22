@@ -45,7 +45,7 @@ func PinPlatformToServer(client CommandRunner) error {
 	for _, ns := range platformNamespaces {
 		out, err := client.Run(fmt.Sprintf(`kubectl -n %s get deployments,statefulsets -o jsonpath='{range .items[*]}{.kind} {.metadata.name} {.metadata.ownerReferences[0].kind}{"\n"}{end}'`, ns))
 		if err != nil {
-			return fmt.Errorf("listing workloads in %s: %w", ns, err)
+			return failedRead(fmt.Sprintf("listing workloads in %s", ns), out, err)
 		}
 		for _, w := range unownedWorkloads(out) {
 			if _, err := pinWorkload(client, ns, w, false); err != nil {

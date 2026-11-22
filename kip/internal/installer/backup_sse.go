@@ -328,7 +328,7 @@ func sseWarning(format string, args ...any) string {
 func sseKeyExists(client CommandRunner) (bool, error) {
 	out, err := client.Run("kubectl -n velero get secret " + sseKeySecret + " --ignore-not-found -o name 2>/dev/null")
 	if err != nil {
-		return false, fmt.Errorf("checking for the backup SSE-C key: %w", err)
+		return false, failedRead("checking for the backup SSE-C key", out, err)
 	}
 	return strings.TrimSpace(out) == "secret/"+sseKeySecret, nil
 }
@@ -424,7 +424,7 @@ func CheckSSECStorage(cfg *BackupStorageConfig) error {
 			"Native AWS S3 backups are already encrypted with SSE-S3, so leave --backup-storage-sse-c off")
 	}
 	if !strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
-		return fmt.Errorf("SSE-C needs an HTTPS endpoint, because S3 refuses customer keys sent over plain HTTP. Got %q", cfg.Endpoint)
+		return fmt.Errorf("SSE-C needs an HTTPS endpoint, because S3 refuses customer keys sent over plain HTTP. Got %s", DisplayEndpoint(cfg.Endpoint))
 	}
 	return nil
 }

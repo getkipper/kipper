@@ -48,8 +48,10 @@ func (l StorageLocation) sameBucket(o StorageLocation) bool {
 }
 
 // String names the bucket and its store, such as "backups at AWS S3".
+// DisplayEndpoint formats the endpoint, omitting URL user information, queries
+// and fragments.
 func (l StorageLocation) String() string {
-	return l.Bucket + " at " + describeEndpoint(l.Endpoint)
+	return l.Bucket + " at " + DisplayEndpoint(l.Endpoint)
 }
 
 // BackupStorageMove records an unfinished move so it can resume from its last phase.
@@ -60,6 +62,10 @@ type BackupStorageMove struct {
 	StartedAt    string          `json:"startedAt"`
 	SSEGenerated bool            `json:"sseGenerated,omitempty"`
 }
+
+// Cancelable reports whether kip backup storage set --abort can cancel the move.
+// Cancellation is allowed only during preparation, before the switch begins.
+func (m BackupStorageMove) Cancelable() bool { return m.Phase == movePreparing }
 
 // PreviousLocation is the location a cluster moved away from, kept until
 // kip backup storage retire-previous.
@@ -125,7 +131,7 @@ func UpgradeBackupStorage(rec StorageRecord, local *BackupStorageConfig, cluster
 func readStorageRecord(client CommandRunner) (StorageRecord, error) {
 	out, err := client.Run("kubectl -n velero get configmap " + StorageRecordConfigMap + " --ignore-not-found -o jsonpath='{.data}' 2>/dev/null")
 	if err != nil {
-		return StorageRecord{}, fmt.Errorf("reading the backup storage record: %w", err)
+		return StorageRecord{}, failedRead("reading the backup storage record", out, err)
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {
@@ -220,7 +226,7 @@ var settledPhases = map[string]bool{
 func backupWorkInFlight(client CommandRunner) ([]string, error) {
 	out, err := client.Run(`kubectl -n velero get backups.velero.io,restores.velero.io,podvolumebackups.velero.io,podvolumerestores.velero.io,deletebackuprequests.velero.io -o jsonpath='{range .items[*]}{.kind}/{.metadata.name} {.status.phase}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return nil, fmt.Errorf("listing Velero's backups and restores: %w", err)
+		return nil, failedRead("listing Velero's backups and restores", out, err)
 	}
 	var busy []string
 	for _, line := range strings.Split(out, "\n") {
@@ -242,7 +248,7 @@ func backupWorkInFlight(client CommandRunner) ([]string, error) {
 	}
 	jobs, err := client.Run(`kubectl -n velero get jobs -l velero.io/repo-name -o jsonpath='{range .items[*]}{.metadata.name} {.status.active}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return nil, fmt.Errorf("listing repository maintenance jobs: %w", err)
+		return nil, failedRead("listing repository maintenance jobs", jobs, err)
 	}
 	for _, line := range strings.Split(jobs, "\n") {
 		if fields := strings.Fields(line); len(fields) == 2 && fields[1] != "0" {
@@ -294,7 +300,7 @@ func stopVelero(client CommandRunner) error {
 	for {
 		out, err := client.Run(`kubectl -n velero get pods -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.ownerReferences[0].kind} {.metadata.ownerReferences[0].name}{"\n"}{end}' 2>/dev/null`)
 		if err != nil {
-			return fmt.Errorf("waiting for Velero to stop: %w", err)
+			return failedRead("waiting for Velero to stop", out, err)
 		}
 		running := false
 		for _, line := range strings.Split(out, "\n") {
@@ -839,8 +845,11 @@ func finishMove(client CommandRunner, opts MoveOptions, rec *StorageRecord) erro
 	_, _ = fmt.Fprintf(opts.Out, "  ✔  Velero restarted with the new bucket's credentials\n")
 	if err := waitForMove(func() (bool, string, error) {
 		out, err := client.Run("kubectl -n velero get backupstoragelocation default -o jsonpath='{.status.phase}|{.status.message}' 2>/dev/null")
+		if err != nil {
+			return false, "", failedRead("reading the backup location's status", out, err)
+		}
 		phase, message, _ := strings.Cut(strings.TrimSpace(out), "|")
-		return err == nil && phase == "Available", message, err
+		return phase == "Available", message, nil
 	}, "bucket "+m.Target.String()+" to be available"); err != nil {
 		return fmt.Errorf("%w. Fix the credentials or the bucket, then run this command again with --credentials", err)
 	}
@@ -942,7 +951,7 @@ func RetirePreviousBackupStorage(client CommandRunner, confirm func(summary []st
 	}
 	list, err := client.Run(`kubectl -n velero get backups.velero.io -o jsonpath='{range .items[*]}{.status.phase} {.status.startTimestamp}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return fmt.Errorf("listing backups: %w", err)
+		return failedRead("listing backups", list, err)
 	}
 	completed := false
 	for _, line := range strings.Split(list, "\n") {

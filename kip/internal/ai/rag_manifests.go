@@ -216,11 +216,13 @@ spec:
 // AnythingLLMManifest renders credentials, an Ollama/Qdrant-connected HelmChart,
 // and a Kipper-managed TLS Ingress. AUTH_TOKEN protects initial setup.
 //
-// Keep Recreate to serialize access to the SQLite/uploads PVC and avoid surge
-// memory. Override probes to /api/ping on port 3001 and size the PVC from cfg.
-// Use config for plain env and env secretKeyRef entries for credentials.
-// OLLAMA_BASE_PATH and EMBEDDING_BASE_PATH use the bare origin; the application
-// adds its API paths.
+// The strategy value is null to omit the invalid pod spec field rendered by
+// chart 1.0.0. InstallRAG sets Recreate on the Deployment after the chart job.
+// Probes use /api/ping on port 3001, and cfg determines the PVC size.
+// Plain environment variables use config, and credentials use env secretKeyRef
+// entries. OLLAMA_BASE_PATH and EMBEDDING_BASE_PATH use the bare origin because
+// the application adds its API paths. An empty EmbeddingModel uses
+// DefaultEmbeddingModel.
 func AnythingLLMManifest(cfg AnythingLLMConfig) string {
 	embeddingModel := cfg.EmbeddingModel
 	if embeddingModel == "" {
@@ -261,8 +263,7 @@ spec:
   targetNamespace: %[1]s
   valuesContent: |-
     replicaCount: 1
-    strategy:
-      type: Recreate
+    strategy: null
     service:
       type: ClusterIP
       port: %[9]d

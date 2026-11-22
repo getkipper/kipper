@@ -619,7 +619,7 @@ func (u LonghornUpgrade) saveObjects(client CommandRunner, suffix, when string) 
 	for _, kind := range longhornExportKinds {
 		out, err := client.Run(fmt.Sprintf("kubectl -n longhorn-system get %s.longhorn.io --request-timeout=60s -o yaml", kind))
 		if err != nil {
-			return "", fmt.Errorf("saving Longhorn's %s %s: %w", kind, when, err)
+			return "", failedRead(fmt.Sprintf("saving Longhorn's %s %s", kind, when), out, err)
 		}
 		path := filepath.Join(staging, kind+".yaml")
 		if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
@@ -740,7 +740,7 @@ func RHEL97LevelProblems(nodes []NodeFacts) []string {
 func crdsStoringV1beta1(client CommandRunner) ([]string, error) {
 	out, err := client.Run("kubectl get crd --request-timeout=30s -o json")
 	if err != nil {
-		return nil, fmt.Errorf("reading the Longhorn CRDs' stored versions: %w", err)
+		return nil, failedRead("reading the Longhorn CRDs' stored versions", out, err)
 	}
 	return parseCRDsStoringV1beta1(jsonPayload(out))
 }

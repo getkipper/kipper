@@ -52,7 +52,7 @@ func ReadLonghornMarkers(client CommandRunner) (LonghornMarkers, error) {
 	var m LonghornMarkers
 	out, err := client.Run(longhornRecordQuery)
 	if err != nil {
-		return m, fmt.Errorf("reading the Longhorn hop record: %w", err)
+		return m, failedRead("reading the Longhorn hop record", out, err)
 	}
 	if line := kubectlLine(out); line != "" {
 		f := strings.Split(line, "\t")
@@ -63,7 +63,7 @@ func ReadLonghornMarkers(client CommandRunner) (LonghornMarkers, error) {
 	}
 	out, err = client.Run(longhornCRDQuery)
 	if err != nil {
-		return m, fmt.Errorf("checking for Longhorn's CRDs: %w", err)
+		return m, failedRead("checking for Longhorn's CRDs", out, err)
 	}
 	settingsCRD := false
 	for _, line := range strings.Split(out, "\n") {
@@ -73,7 +73,7 @@ func ReadLonghornMarkers(client CommandRunner) (LonghornMarkers, error) {
 	}
 	out, err = client.Run(longhornImageQuery)
 	if err != nil {
-		return m, fmt.Errorf("reading the longhorn-manager image: %w", err)
+		return m, failedRead("reading the longhorn-manager image", out, err)
 	}
 	if line := kubectlLine(out); line != "" {
 		if m.Applied, err = LonghornManagerVersion(line); err != nil {
@@ -83,7 +83,7 @@ func ReadLonghornMarkers(client CommandRunner) (LonghornMarkers, error) {
 	if settingsCRD {
 		out, err = client.Run(longhornRunningQuery)
 		if err != nil {
-			return m, fmt.Errorf("reading Longhorn's current-longhorn-version setting: %w", err)
+			return m, failedRead("reading Longhorn's current-longhorn-version setting", out, err)
 		}
 		m.Running = kubectlLine(out)
 	}

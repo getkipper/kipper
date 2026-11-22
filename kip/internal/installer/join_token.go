@@ -22,7 +22,7 @@ func withJoinToken(server CommandRunner, serverHost string, join func(token stri
 		defer deleteJoinToken(server, id)
 	}
 	if mintErr != nil {
-		return fmt.Errorf("creating a join token on the k3s server at %s: %v", serverHost, withoutOutput(mintErr))
+		return fmt.Errorf("creating a join token on the k3s server at %s: %w", serverHost, withoutOutput(mintErr))
 	}
 	if !ok {
 		return fmt.Errorf("creating a join token on the k3s server at %s: no valid bootstrap token found in the command output", serverHost)
