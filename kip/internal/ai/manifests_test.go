@@ -258,3 +258,35 @@ func TestLibreChatMongoDBDisablesMongoshTelemetry(t *testing.T) {
 	assert.Equal(t, "/etc/mongosh.conf", mount["mountPath"])
 	assert.Equal(t, "mongosh.conf", mount["subPath"])
 }
+
+func chartValues(t *testing.T, doc string) map[string]any {
+	t.Helper()
+	var values map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(parseDoc(t, doc)["spec"].(map[string]any)["valuesContent"].(string)), &values))
+	return values
+}
+
+func TestOllamaManifestKeepsTheModelCacheOnAReinstall(t *testing.T) {
+	values := chartValues(t, OllamaManifest(OllamaConfig{Model: "m", PVCSize: "10Gi", MemoryRequest: "6Gi", NodeName: "n"}))
+	annotations := values["persistentVolume"].(map[string]any)["annotations"].(map[string]any)
+	assert.Equal(t, "keep", annotations["helm.sh/resource-policy"])
+}
+
+func TestLibreChatManifestKeepsItsVolumesOnAReinstall(t *testing.T) {
+	docs := SplitYAMLDocuments(LibreChatManifest(LibreChatConfig{Host: "chat.example.com", Model: "m", Credentials: libreChatTestCreds()}))
+	values := chartValues(t, docs[2])
+
+	mongodb := values["mongodb"].(map[string]any)
+	assert.Equal(t, "keep", mongodb["persistence"].(map[string]any)["resourcePolicy"])
+	meili := values["meilisearch"].(map[string]any)["persistence"].(map[string]any)
+	assert.Equal(t, "keep", meili["annotations"].(map[string]any)["helm.sh/resource-policy"])
+
+	// kip owns the images claim, so the chart must neither render nor mount its own.
+	libreChat := values["librechat"].(map[string]any)
+	assert.Equal(t, false, libreChat["imageVolume"].(map[string]any)["enabled"])
+	volume := values["volumes"].([]any)[0].(map[string]any)
+	assert.Equal(t, LibreChatImagesClaimName, volume["persistentVolumeClaim"].(map[string]any)["claimName"])
+	mount := values["volumeMounts"].([]any)[0].(map[string]any)
+	assert.Equal(t, volume["name"], mount["name"])
+	assert.Equal(t, "/app/client/public/images", mount["mountPath"])
+}

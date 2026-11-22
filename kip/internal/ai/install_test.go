@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	metadatafake "k8s.io/client-go/metadata/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -150,6 +151,7 @@ func TestInstallHappyPath(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		Out:          out,
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
@@ -189,6 +191,7 @@ func TestInstallTier3EnablesGPUValue(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
 	}
@@ -212,6 +215,7 @@ func TestInstallUsesDefaultModelForTier(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
 	}
@@ -229,6 +233,7 @@ func TestInstallTimesOutWhenNothingProgresses(t *testing.T) {
 	inst := &Installer{
 		Clientset:    fake.NewSimpleClientset(), //nolint:staticcheck
 		Dynamic:      newDynamicFake(t),
+		Metadata:     deployedReleases(t),
 		PollInterval: time.Millisecond,
 		PollTimeout:  20 * time.Millisecond,
 	}
@@ -245,6 +250,7 @@ func TestInstallPropagatesApplyError(t *testing.T) {
 	inst := &Installer{
 		Clientset:    fake.NewSimpleClientset(), //nolint:staticcheck
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: time.Millisecond,
 		PollTimeout:  20 * time.Millisecond,
 	}
@@ -808,11 +814,10 @@ func TestWaitForHelmChartJobFirstInstallCompletes(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
 	}
-	// First install: prevJobUID is empty, expectNewJob is true, the
-	// Job exists with Succeeded=1.
 	require.NoError(t, inst.waitForHelmChartJob(context.Background(), "ollama", "", true))
 }
 
@@ -823,6 +828,7 @@ func TestWaitForHelmChartJobNoOpReApplyAcceptsExistingSucceeded(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
 	}
@@ -840,9 +846,8 @@ func TestWaitForHelmChartJobUpgradeSkipsStaleSucceededJob(t *testing.T) {
 	require.NoError(t, dyn.Tracker().Create(helmChartGVR, helmChart(2, "helm-install-ollama"), "kube-system"))
 	clientset := fake.NewSimpleClientset() //nolint:staticcheck
 
-	// Stage a first Get response that returns the stale Job, then
-	// flip to a fresh Job after one poll cycle. This emulates
-	// helm-controller's delete+recreate.
+	// Return the stale Job for two polls before replacing it to emulate
+	// helm-controller deleting and recreating the Job.
 	calls := 0
 	clientset.PrependReactor("get", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		getAction := action.(k8stesting.GetAction)
@@ -860,6 +865,7 @@ func TestWaitForHelmChartJobUpgradeSkipsStaleSucceededJob(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: 5 * time.Millisecond,
 		PollTimeout:  500 * time.Millisecond,
 	}
@@ -999,6 +1005,7 @@ func TestWaitForHelmChartJobToleratesTransientPodFailures(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: 5 * time.Millisecond,
 		PollTimeout:  500 * time.Millisecond,
 	}
@@ -1029,6 +1036,7 @@ func TestWaitForHelmChartJobTolersJobNotYetCreated(t *testing.T) {
 	inst := &Installer{
 		Clientset:    clientset,
 		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
 		PollInterval: 5 * time.Millisecond,
 		PollTimeout:  500 * time.Millisecond,
 	}
@@ -1036,6 +1044,393 @@ func TestWaitForHelmChartJobTolersJobNotYetCreated(t *testing.T) {
 	assert.GreaterOrEqual(t, calls, 3)
 }
 
-// staticDynamic is a tiny dynamic.Interface stub used only to avoid
-// compile-time references to unused symbols when test files grow.
 var _ dynamic.Interface = (*dynamicfake.FakeDynamicClient)(nil)
+
+func helmRelease(name, namespace string, version int, status string) *metav1.PartialObjectMetadata {
+	return &metav1.PartialObjectMetadata{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("sh.helm.release.v1.%s.v%d", name, version),
+			Namespace: namespace,
+			Labels:    map[string]string{"owner": "helm", "name": name, "version": fmt.Sprint(version), "status": status},
+		},
+	}
+}
+
+func releaseMetadata(t *testing.T, releases ...*metav1.PartialObjectMetadata) *metadatafake.FakeMetadataClient {
+	t.Helper()
+	scheme := metadatafake.NewTestScheme()
+	require.NoError(t, metav1.AddMetaToScheme(scheme))
+	objects := make([]runtime.Object, len(releases))
+	for i, r := range releases {
+		objects[i] = r
+	}
+	return metadatafake.NewSimpleMetadataClient(scheme, objects...)
+}
+
+// deployedReleases seeds revision 1 as deployed for all four AI charts in
+// the AI namespace and kube-system. Both namespaces support fixtures with
+// an explicit target namespace and those that fall back to the chart namespace.
+func deployedReleases(t *testing.T) *metadatafake.FakeMetadataClient {
+	t.Helper()
+	var releases []*metav1.PartialObjectMetadata
+	for _, name := range []string{"ollama", "librechat", "qdrant", "anythingllm"} {
+		for _, namespace := range []string{Namespace, "kube-system"} {
+			releases = append(releases, helmRelease(name, namespace, 1, "deployed"))
+		}
+	}
+	return releaseMetadata(t, releases...)
+}
+
+func completedOllamaInstaller(t *testing.T, releases ...*metav1.PartialObjectMetadata) *Installer {
+	t.Helper()
+	dyn := newDynamicFake(t)
+	chart := helmChart(2, "helm-install-ollama")
+	require.NoError(t, unstructured.SetNestedField(chart.Object, Namespace, "spec", "targetNamespace"))
+	require.NoError(t, dyn.Tracker().Create(helmChartGVR, chart, "kube-system"))
+	return &Installer{
+		Clientset:    fake.NewSimpleClientset(helmInstallJob("job-2", batchv1.JobComplete)), //nolint:staticcheck
+		Dynamic:      dyn,
+		Metadata:     releaseMetadata(t, releases...),
+		PollInterval: time.Millisecond,
+		PollTimeout:  100 * time.Millisecond,
+	}
+}
+
+func TestWaitForHelmChartJobReportsAReleaseHelmLeftFailed(t *testing.T) {
+	// A failed upgrade can advance the release revision, causing the retry
+	// to exit successfully while the release remains failed.
+	inst := completedOllamaInstaller(t,
+		helmRelease("ollama", Namespace, 1, "deployed"),
+		helmRelease("ollama", Namespace, 2, "failed"))
+
+	err := inst.waitForHelmChartJob(context.Background(), "ollama", "", true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"ollama"`)
+	assert.Contains(t, err.Error(), "failed")
+	assert.Contains(t, err.Error(), "kip ai backup --wait")
+	assert.Contains(t, err.Error(), "--reinstall-failed")
+}
+
+func TestWaitForHelmChartJobReadsTheNewestRevisionNumerically(t *testing.T) {
+	inst := completedOllamaInstaller(t,
+		helmRelease("ollama", Namespace, 9, "failed"),
+		helmRelease("ollama", Namespace, 10, "deployed"))
+
+	require.NoError(t, inst.waitForHelmChartJob(context.Background(), "ollama", "", true))
+}
+
+func TestWaitForHelmChartJobIgnoresOtherReleases(t *testing.T) {
+	inst := completedOllamaInstaller(t,
+		helmRelease("ollama", Namespace, 1, "deployed"),
+		helmRelease("librechat", Namespace, 3, "failed"),
+		helmRelease("ollama", "elsewhere", 4, "failed"))
+
+	require.NoError(t, inst.waitForHelmChartJob(context.Background(), "ollama", "", true))
+}
+
+func TestWaitForHelmChartJobRefusesWithoutAReleaseReader(t *testing.T) {
+	inst := completedOllamaInstaller(t, helmRelease("ollama", Namespace, 1, "deployed"))
+	inst.Metadata = nil
+
+	require.Error(t, inst.waitForHelmChartJob(context.Background(), "ollama", "", true))
+}
+
+func TestWaitForHelmChartJobRefusesWithoutAReadableReleaseRecord(t *testing.T) {
+	for name, releases := range map[string][]*metav1.PartialObjectMetadata{
+		"none":             nil,
+		"unreadable label": {unreadableRelease()},
+		"unreadable newer": {helmRelease("ollama", Namespace, 1, "deployed"), unreadableRelease()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := completedOllamaInstaller(t, releases...)
+			err := inst.waitForHelmChartJob(context.Background(), "ollama", "", true)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot tell whether the chart was applied")
+		})
+	}
+}
+
+func unreadableRelease() *metav1.PartialObjectMetadata {
+	r := helmRelease("ollama", Namespace, 2, "failed")
+	r.Labels["version"] = "x"
+	return r
+}
+
+func TestWaitForHelmChartJobReadsTheReleaseInTheChartNamespaceWithoutATarget(t *testing.T) {
+	dyn := newDynamicFake(t)
+	require.NoError(t, dyn.Tracker().Create(helmChartGVR, helmChart(1, "helm-install-ollama"), "kube-system"))
+	inst := &Installer{
+		Clientset:    fake.NewSimpleClientset(helmInstallJob("job-1", batchv1.JobComplete)), //nolint:staticcheck
+		Dynamic:      dyn,
+		Metadata:     releaseMetadata(t, helmRelease("ollama", "kube-system", 1, "failed")),
+		PollInterval: time.Millisecond,
+		PollTimeout:  100 * time.Millisecond,
+	}
+
+	err := inst.waitForHelmChartJob(context.Background(), "ollama", "", true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed")
+}
+
+func helmOwnedImagesClaim() *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      LibreChatImagesClaimName,
+		Namespace: Namespace,
+		UID:       "images-uid",
+		Labels:    map[string]string{"app.kubernetes.io/managed-by": "Helm"},
+		Annotations: map[string]string{
+			"meta.helm.sh/release-name":      "librechat",
+			"meta.helm.sh/release-namespace": Namespace,
+		},
+	}}
+}
+
+func TestEnsureLibreChatImagesClaimCreatesAKeptClaim(t *testing.T) {
+	clientset := fake.NewSimpleClientset() //nolint:staticcheck
+	inst := &Installer{Clientset: clientset}
+
+	require.NoError(t, inst.ensureLibreChatImagesClaim(context.Background()))
+
+	claim, err := clientset.CoreV1().PersistentVolumeClaims(Namespace).Get(context.Background(), LibreChatImagesClaimName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "kipper", claim.Labels["app.kubernetes.io/managed-by"])
+	assert.Equal(t, "kipper-ai", claim.Labels["app.kubernetes.io/part-of"])
+	assert.Equal(t, "keep", claim.Annotations["helm.sh/resource-policy"])
+	assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, claim.Spec.AccessModes)
+	size := claim.Spec.Resources.Requests[corev1.ResourceStorage]
+	assert.Equal(t, "10G", size.String(), "the chart's default size, so new and adopted claims match")
+	assert.Nil(t, claim.Spec.StorageClassName, "the cluster's default class, as the chart used")
+}
+
+// libreChatChartFake holds the librechat HelmChart, labeled as kip's when
+// owned is true.
+func libreChatChartFake(t *testing.T, owned bool) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	dyn := newDynamicFake(t)
+	chart := ragHelmChartUnstructured("librechat")
+	if !owned {
+		chart.SetLabels(nil)
+	}
+	_, err := dyn.Resource(helmChartGVR).Namespace("kube-system").Create(context.Background(), chart, metav1.CreateOptions{})
+	require.NoError(t, err)
+	return dyn
+}
+
+func TestEnsureLibreChatImagesClaimTakesOverTheChartClaim(t *testing.T) {
+	clientset := fake.NewSimpleClientset(helmOwnedImagesClaim()) //nolint:staticcheck
+	inst := &Installer{Clientset: clientset, Dynamic: libreChatChartFake(t, true)}
+
+	require.NoError(t, inst.ensureLibreChatImagesClaim(context.Background()))
+
+	claim, err := clientset.CoreV1().PersistentVolumeClaims(Namespace).Get(context.Background(), LibreChatImagesClaimName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, k8stypes.UID("images-uid"), claim.UID, "the claim holding the uploads stays")
+	assert.Equal(t, "kipper", claim.Labels["app.kubernetes.io/managed-by"])
+	assert.Equal(t, "kipper-ai", claim.Labels["app.kubernetes.io/part-of"])
+	assert.Equal(t, "keep", claim.Annotations["helm.sh/resource-policy"],
+		"Helm skips deleting a claim marked keep when the chart upgrade drops it")
+	assert.NotContains(t, claim.Annotations, "meta.helm.sh/release-name")
+	assert.NotContains(t, claim.Annotations, "meta.helm.sh/release-namespace")
+}
+
+func TestEnsureLibreChatImagesClaimRefusesAForeignClaim(t *testing.T) {
+	foreign := helmOwnedImagesClaim()
+	foreign.Annotations["meta.helm.sh/release-name"] = "someone-else"
+	for name, tc := range map[string]struct {
+		claim *corev1.PersistentVolumeClaim
+		dyn   *dynamicfake.FakeDynamicClient
+	}{
+		"another release's claim":            {foreign, libreChatChartFake(t, true)},
+		"a librechat chart kip does not own": {helmOwnedImagesClaim(), libreChatChartFake(t, false)},
+		"no librechat chart":                 {helmOwnedImagesClaim(), newDynamicFake(t)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset(tc.claim) //nolint:staticcheck
+			inst := &Installer{Clientset: clientset, Dynamic: tc.dyn}
+
+			err := inst.ensureLibreChatImagesClaim(context.Background())
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "not managed by kipper")
+			claim, getErr := clientset.CoreV1().PersistentVolumeClaims(Namespace).Get(context.Background(), LibreChatImagesClaimName, metav1.GetOptions{})
+			require.NoError(t, getErr)
+			assert.Equal(t, tc.claim.Annotations, claim.Annotations, "the claim is left untouched")
+			assert.Equal(t, tc.claim.Labels, claim.Labels)
+		})
+	}
+}
+
+func TestEnsureLibreChatImagesClaimRefusesAClaimBeingDeleted(t *testing.T) {
+	// A reinstall from a release recorded before kip owned the claim deletes
+	// it, so kip must not count a terminating claim as present.
+	terminating := helmOwnedImagesClaim()
+	terminating.Labels = map[string]string{managedByLabel: managedByValue}
+	now := metav1.Now()
+	terminating.DeletionTimestamp = &now
+	inst := &Installer{Clientset: fake.NewSimpleClientset(terminating)} //nolint:staticcheck
+
+	err := inst.ensureLibreChatImagesClaim(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "being deleted")
+}
+
+func TestInstallRecreatesAnImagesClaimTheChartJobDeleted(t *testing.T) {
+	clientset := fake.NewSimpleClientset(readyDeployment("ollama"), readyDeployment("librechat-librechat")) //nolint:staticcheck
+	autoSucceedProbeJob(clientset)
+	autoSucceedHelmInstallJob(clientset)
+	// The chart job's reinstall deletes the claim of a release recorded with it.
+	clientset.PrependReactor("get", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.(k8stesting.GetAction).GetName() == "helm-install-librechat" {
+			_ = clientset.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), Namespace, LibreChatImagesClaimName)
+		}
+		return false, nil, nil
+	})
+	inst := &Installer{
+		Clientset:    clientset,
+		Dynamic:      newDynamicFake(t),
+		Metadata:     deployedReleases(t),
+		PollInterval: time.Millisecond,
+		PollTimeout:  100 * time.Millisecond,
+	}
+
+	require.NoError(t, inst.Install(context.Background(), TierOne, Options{Host: "chat.example.com", NodeName: "test-node"}))
+
+	_, err := clientset.CoreV1().PersistentVolumeClaims(Namespace).Get(context.Background(), LibreChatImagesClaimName, metav1.GetOptions{})
+	require.NoError(t, err, "LibreChat must not be left waiting for a claim that is gone")
+}
+
+func TestInstallKeepsTheImagesClaimBeforeApplyingTheLibreChatChart(t *testing.T) {
+	clientset := fake.NewSimpleClientset( //nolint:staticcheck
+		readyDeployment("ollama"),
+		readyDeployment("librechat-librechat"),
+		helmOwnedImagesClaim(),
+	)
+	autoSucceedProbeJob(clientset)
+	autoSucceedHelmInstallJob(clientset)
+	dyn := libreChatChartFake(t, true)
+	keptAtApply := false
+	dyn.PrependReactor("update", "helmcharts", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		obj := action.(k8stesting.UpdateAction).GetObject().(*unstructured.Unstructured)
+		if obj.GetName() == "librechat" {
+			claim, err := clientset.CoreV1().PersistentVolumeClaims(Namespace).Get(context.Background(), LibreChatImagesClaimName, metav1.GetOptions{})
+			keptAtApply = err == nil && claim.Annotations["helm.sh/resource-policy"] == "keep"
+		}
+		return false, nil, nil
+	})
+	inst := &Installer{
+		Clientset:    clientset,
+		Dynamic:      dyn,
+		Metadata:     deployedReleases(t),
+		PollInterval: time.Millisecond,
+		PollTimeout:  100 * time.Millisecond,
+	}
+
+	require.NoError(t, inst.Install(context.Background(), TierOne, Options{Host: "chat.example.com", NodeName: "test-node"}))
+	assert.True(t, keptAtApply, "the claim must be marked keep before the chart upgrade that drops it")
+}
+
+func TestRefuseUndeployedReleasesStopsAReinstall(t *testing.T) {
+	// Applying the chart of a release in any of these states can make the
+	// Helm controller reinstall it or retry an upgrade that may still be running.
+	for _, status := range []string{"failed", "pending-install", "pending-upgrade", "pending-rollback", "uninstalling", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			inst := &Installer{Metadata: releaseMetadata(t,
+				helmRelease("librechat", Namespace, 1, "deployed"),
+				helmRelease("librechat", Namespace, 2, status))}
+
+			err := inst.refuseUndeployedReleases(context.Background(), false, "ollama", "librechat")
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `"librechat"`)
+			assert.Contains(t, err.Error(), status)
+			assert.Contains(t, err.Error(), "kip ai backup --wait")
+			assert.Contains(t, err.Error(), "--reinstall-failed")
+		})
+	}
+}
+
+func TestRefuseUndeployedReleasesAllowsDeployedAndNewReleases(t *testing.T) {
+	inst := &Installer{Metadata: releaseMetadata(t, helmRelease("ollama", Namespace, 3, "deployed"))}
+
+	require.NoError(t, inst.refuseUndeployedReleases(context.Background(), false, "ollama", "librechat"))
+}
+
+func TestRefuseUndeployedReleasesWarnsWhenAReinstallIsAllowed(t *testing.T) {
+	out := &bytes.Buffer{}
+	inst := &Installer{
+		Metadata: releaseMetadata(t, helmRelease("librechat", Namespace, 2, "failed")),
+		Out:      out,
+	}
+
+	require.NoError(t, inst.refuseUndeployedReleases(context.Background(), true, "librechat"))
+	assert.Contains(t, out.String(), `"librechat"`)
+	assert.Contains(t, out.String(), "reinstall")
+}
+
+func TestRefuseUndeployedReleasesRefusesWithoutAReadableRecord(t *testing.T) {
+	inst := &Installer{Metadata: releaseMetadata(t, unreadableRelease())}
+	require.Error(t, inst.refuseUndeployedReleases(context.Background(), false, "ollama"))
+
+	inst.Metadata = nil
+	require.Error(t, inst.refuseUndeployedReleases(context.Background(), false, "ollama"))
+}
+
+// writeActions lists the create, update, patch and delete calls a fake client saw.
+func writeActions(actions []k8stesting.Action) []string {
+	var writes []string
+	for _, a := range actions {
+		switch a.GetVerb() {
+		case "create", "update", "patch", "delete", "delete-collection":
+			writes = append(writes, a.GetVerb()+" "+a.GetResource().Resource)
+		}
+	}
+	return writes
+}
+
+func TestInstallAppliesNoChartOverAFailedRelease(t *testing.T) {
+	clientset := fake.NewSimpleClientset( //nolint:staticcheck
+		readyDeployment("ollama"), readyDeployment("librechat-librechat"), helmOwnedImagesClaim())
+	dyn := libreChatChartFake(t, true)
+	dyn.ClearActions()
+	inst := &Installer{
+		Clientset:    clientset,
+		Dynamic:      dyn,
+		Metadata:     releaseMetadata(t, helmRelease("librechat", Namespace, 2, "failed")),
+		PollInterval: time.Millisecond,
+		PollTimeout:  20 * time.Millisecond,
+	}
+
+	err := inst.Install(context.Background(), TierOne, Options{Host: "chat.example.com", NodeName: "test-node"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--reinstall-failed")
+	assert.Empty(t, writeActions(clientset.Actions()), "nothing is changed before the refusal")
+	assert.Empty(t, writeActions(dyn.Actions()), "no chart is applied, so the Helm controller starts no reinstall")
+}
+
+func TestInstallAppliesTheChartsOverAFailedReleaseWhenAsked(t *testing.T) {
+	clientset := fake.NewSimpleClientset(readyDeployment("ollama"), readyDeployment("librechat-librechat")) //nolint:staticcheck
+	autoSucceedProbeJob(clientset)
+	autoSucceedHelmInstallJob(clientset)
+	dyn := newDynamicFake(t)
+	inst := &Installer{
+		Clientset:    clientset,
+		Dynamic:      dyn,
+		Metadata:     releaseMetadata(t, helmRelease("ollama", Namespace, 1, "deployed"), helmRelease("librechat", Namespace, 2, "failed")),
+		PollInterval: time.Millisecond,
+		PollTimeout:  100 * time.Millisecond,
+	}
+
+	// The fake release records never change, so the chart job check still
+	// reports the failed release after the apply.
+	err := inst.Install(context.Background(), TierOne, Options{Host: "chat.example.com", NodeName: "test-node", ReinstallFailed: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `helm left the "librechat" release in status failed`)
+
+	_, err = dyn.Resource(helmChartGVR).Namespace("kube-system").Get(context.Background(), "librechat", metav1.GetOptions{})
+	require.NoError(t, err, "the chart is applied")
+}

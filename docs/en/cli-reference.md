@@ -746,6 +746,7 @@ kip ai uninstall                          # remove the bundle and wipe its data
 | `--model` | install | tier-appropriate Qwen 2.5 | Ollama model tag to preload |
 | `--pvc-size` | install | 10/30/60 GiB by tier | Model cache PVC size |
 | `-y, --yes` | install | `false` | Skip the auto-configure prompt |
+| `--reinstall-failed` | install | `false` | Apply the charts even when a Helm release is not deployed, which can reinstall it. See [When a chart upgrade fails](./ai#when-a-chart-upgrade-fails) |
 
 ### AI bundle health on the Platform page {#ai-bundle-health-on-the-platform-page}
 

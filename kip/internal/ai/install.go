@@ -7,18 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
 	"sigs.k8s.io/yaml"
 )
 
@@ -70,26 +73,21 @@ var (
 	helmChartGVR = schema.GroupVersionResource{Group: "helm.cattle.io", Version: "v1", Resource: "helmcharts"}
 )
 
-// Options controls an Install or Uninstall run.
+// Options controls Install. Uninstall ignores these options.
 type Options struct {
-	// Host is the external chat UI hostname, e.g. "chat.example.com".
-	// Required for Install. Ignored by Uninstall.
-	Host string
-	// NodeName is the cluster node that passed tier preflight. Install
-	// pins the Ollama Deployment here via nodeSelector so the scheduler
-	// cannot place the pod on a smaller node. Required for Install.
-	NodeName string
-	// Model overrides the default model for the detected tier. Optional.
-	Model string
-	// PVCSize overrides the model-cache PVC size. Optional, defaults by
-	// tier.
-	PVCSize string
+	Host            string
+	NodeName        string
+	Model           string
+	PVCSize         string
+	ReinstallFailed bool
 }
 
 // Installer applies and removes the Kipper AI bundle against a cluster.
+// Install and InstallRAG require Metadata to verify Helm release status.
 type Installer struct {
 	Clientset kubernetes.Interface
 	Dynamic   dynamic.Interface
+	Metadata  metadata.Interface
 	// Out receives step-status output. nil routes to io.Discard.
 	Out io.Writer
 	// PollInterval and PollTimeout govern rollout polling. Zero values
@@ -135,10 +133,17 @@ func (i *Installer) timeout() time.Duration {
 	return i.PollTimeout
 }
 
-// Install applies the AI bundle. The cluster must already meet the tier-1
-// minimum; the caller is expected to have run Detect first, refused
-// below tier 1, and passed the BestNode through opts.NodeName so the
-// pod is pinned to the node that actually has the headroom.
+// Install applies the AI bundle and waits for the charts, deployments, and model
+// to be ready. The caller must run Detect first and require at least tier 1.
+// opts.Host is the external chat hostname, such as "chat.example.com".
+// opts.NodeName must be report.BestNode.Name so Ollama is pinned to the node
+// with enough headroom. Both fields are required. Model and PVCSize override
+// the tier defaults for the model and model-cache volume size. Empty values
+// use those defaults.
+//
+// Existing releases must be deployed unless opts.ReinstallFailed is true.
+// That option allows Helm to uninstall and reinstall a release, which can
+// delete chart-owned volumes. Back up the data before enabling it.
 func (i *Installer) Install(ctx context.Context, tier Tier, opts Options) error {
 	if !tier.MeetsMinimum() {
 		return fmt.Errorf("cluster below tier 1 minimum, refusing to install")
@@ -150,6 +155,9 @@ func (i *Installer) Install(ctx context.Context, tier Tier, opts Options) error 
 		return fmt.Errorf("nodeName is required (run Detect and pass report.BestNode.Name)")
 	}
 	if err := i.refuseOccupiedRouteName(ctx, libreChatRoute()); err != nil {
+		return err
+	}
+	if err := i.refuseUndeployedReleases(ctx, opts.ReinstallFailed, "ollama", "librechat"); err != nil {
 		return err
 	}
 
@@ -193,6 +201,7 @@ func (i *Installer) Install(ctx context.Context, tier Tier, opts Options) error 
 			ollamaState = state
 			return err
 		}},
+		{"Preparing LibreChat image storage", func() error { return i.ensureLibreChatImagesClaim(ctx) }},
 		{"Installing LibreChat", func() error {
 			state, err := i.applyHelmChart(ctx, LibreChatManifest(LibreChatConfig{
 				Host:        opts.Host,
@@ -206,6 +215,7 @@ func (i *Installer) Install(ctx context.Context, tier Tier, opts Options) error 
 		{"Waiting for Ollama to be ready", func() error { return i.waitForDeployment(ctx, "ollama") }},
 		{"Verifying Ollama loaded the model", func() error { return i.waitForModelLoaded(ctx, model) }},
 		{"Waiting for LibreChat chart job", func() error { return i.waitForHelmChartJobFromState(ctx, libreChatState) }},
+		{"Checking LibreChat image storage", func() error { return i.ensureLibreChatImagesClaim(ctx) }},
 		{"Waiting for LibreChat to be ready", func() error { return i.waitForDeployment(ctx, LibreChatDeploymentName) }},
 		{"Recording bundle state", func() error { return i.writeBundleState(ctx, model, opts.Host) }},
 	}
@@ -223,14 +233,10 @@ func (i *Installer) Install(ctx context.Context, tier Tier, opts Options) error 
 // Uninstall removes the AI bundle and its data. The order is:
 //  1. Delete the HelmChart CRs so helm-controller stops reconciling.
 //  2. Delete the namespace, which cascades through every remaining
-//     resource (PVCs, Secrets, ConfigMaps, Ingress, leftover Pods).
+//     resource (PVCs, Secrets, ConfigMaps, Ingress, leftover Pods),
+//     including the claims the charts mark to survive a Helm uninstall.
 //
-// We tried preserving PVCs across uninstall via
-// `helm.sh/resource-policy: keep`, but k3s helm-controller's bundled
-// helm does not honour that annotation: chart-owned PVCs are deleted
-// regardless. Rather than ship a half-working preservation promise, we
-// document `kip ai uninstall` as fully destructive and defer
-// data-preservation to a Phase 2 Velero-backed backup/restore command.
+// Use 'kip ai backup' before uninstalling to preserve data in a backup.
 func (i *Installer) Uninstall(ctx context.Context, _ Options) error {
 	// Refuse to delete the namespace while the Phase 2 RAG bundle is
 	// still installed. Removing kipper-ai would cascade through Qdrant
@@ -394,9 +400,10 @@ func (i *Installer) helmChartGeneration(ctx context.Context, chartName string) (
 	return chart.GetGeneration(), nil
 }
 
-// waitForHelmChartJob waits for JobComplete and reports JobFailed. When a
-// chart update requires replacement, the Job UID must differ from prevJobUID;
-// a no-op apply can reuse the completed Job. This prevents an old available
+// waitForHelmChartJob waits for JobComplete, verifies that the latest Helm
+// release revision is deployed, and reports JobFailed. When a chart update
+// requires replacement, the Job UID must differ from prevJobUID. A no-op
+// apply can reuse the completed Job. This prevents an old available
 // Deployment from satisfying readiness before Helm applies the new spec.
 func (i *Installer) waitForHelmChartJob(ctx context.Context, chartName string, prevJobUID types.UID, expectNewJob bool) error {
 	deadline := time.Now().Add(i.timeout())
@@ -435,7 +442,7 @@ func (i *Installer) waitForHelmChartJob(ctx context.Context, chartName string, p
 			// still retrying. Only Complete=True or Failed=True on the
 			// Job's conditions list mean the Job has actually stopped.
 			if jobCondition(job, batchv1.JobComplete) {
-				return nil
+				return i.checkReleaseDeployed(ctx, chart)
 			}
 			if jobCondition(job, batchv1.JobFailed) {
 				return fmt.Errorf("helm-controller job %s for chart %s failed; check 'kubectl logs -n kube-system jobs/%s'", jobName, chartName, jobName)
@@ -452,6 +459,156 @@ func (i *Installer) waitForHelmChartJob(ctx context.Context, chartName string, p
 		}
 	}
 }
+
+// releaseSecretGVR identifies the Secrets holding Helm release revisions,
+// labeled with the release name, revision, and status.
+var releaseSecretGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+
+// checkReleaseDeployed verifies that the newest Helm release revision is
+// deployed using only Secret metadata. It returns an error if the records
+// are missing, unreadable, or show another status. A failed upgrade can advance
+// the revision, causing the chart Job's retry to exit successfully while the
+// release remains failed.
+func (i *Installer) checkReleaseDeployed(ctx context.Context, chart *unstructured.Unstructured) error {
+	name := chart.GetName()
+	namespace, _, _ := unstructured.NestedString(chart.Object, "spec", "targetNamespace")
+	if namespace == "" {
+		namespace = chart.GetNamespace()
+	}
+	revision, status, err := i.newestRelease(ctx, name, namespace)
+	if err != nil {
+		return fmt.Errorf("%w, so kip cannot tell whether the chart was applied", err)
+	}
+	if revision < 0 {
+		return fmt.Errorf("the %q chart job finished, but Helm has no release record for it in namespace %s, so kip cannot tell whether the chart was applied", name, namespace)
+	}
+	if status == "deployed" {
+		return nil
+	}
+	return fmt.Errorf("helm left the %q release in status %s at revision %d, so the chart change was not applied. "+
+		"The next chart change can make the Helm controller uninstall and reinstall the release, "+
+		"which can delete the volumes the chart created. Back up with 'kip ai backup --wait', "+
+		"then run this command again with --reinstall-failed", name, status, revision)
+}
+
+// refuseUndeployedReleases allows new installs and charts whose newest release
+// in the AI namespace is deployed. Other statuses require reinstallFailed
+// because applying the chart can trigger an uninstall and reinstall that deletes
+// chart-owned volumes.
+// With reinstallFailed, it reports those releases and continues.
+func (i *Installer) refuseUndeployedReleases(ctx context.Context, reinstallFailed bool, names ...string) error {
+	for _, name := range names {
+		revision, status, err := i.newestRelease(ctx, name, Namespace)
+		if err != nil {
+			return fmt.Errorf("%w, so kip cannot tell whether applying the chart reinstalls it", err)
+		}
+		if revision < 0 || status == "deployed" {
+			continue
+		}
+		if reinstallFailed {
+			_, _ = fmt.Fprintf(i.out(), "  !   The %q Helm release is %s at revision %d. Applying its chart can make the Helm controller reinstall it\n", name, status, revision)
+			continue
+		}
+		return fmt.Errorf("the %q Helm release is %s at revision %d. Applying its chart now can make the Helm controller "+
+			"uninstall and reinstall the release, which can delete the volumes the chart created. "+
+			"If a chart job is still running, wait for it to finish. Otherwise back up with 'kip ai backup --wait', "+
+			"then run this command again with --reinstall-failed", name, status, revision)
+	}
+	return nil
+}
+
+// newestRelease returns the revision and status of the newest Helm release
+// record for name in namespace, using only Secret metadata. It returns revision
+// -1 when no nonnegative revision exists and an error if any record's revision
+// cannot be parsed as an int.
+func (i *Installer) newestRelease(ctx context.Context, name, namespace string) (int, string, error) {
+	if i.Metadata == nil {
+		return 0, "", fmt.Errorf("reading the %q Helm release: no metadata client", name)
+	}
+	list, err := i.Metadata.Resource(releaseSecretGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "owner=helm,name=" + name,
+	})
+	if err != nil {
+		return 0, "", fmt.Errorf("reading the %q Helm release: %w", name, err)
+	}
+	newest, status := -1, ""
+	for _, record := range list.Items {
+		version, err := strconv.Atoi(record.Labels["version"])
+		if err != nil {
+			return 0, "", fmt.Errorf("the %q Helm release record %s has no readable revision", name, record.Name)
+		}
+		if version > newest {
+			newest, status = version, record.Labels["status"]
+		}
+	}
+	return newest, status, nil
+}
+
+// ensureLibreChatImagesClaim creates LibreChat's images claim or adopts it from
+// an earlier chart for kip's librechat release. It marks the claim keep before
+// the upgrade removes it from the chart, preserving uploaded images. A reinstall
+// from a release recorded before adoption still deletes the claim, so Install
+// calls this again after the chart job. Foreign or terminating claims are refused.
+func (i *Installer) ensureLibreChatImagesClaim(ctx context.Context) error {
+	claims := i.Clientset.CoreV1().PersistentVolumeClaims(Namespace)
+	existing, err := claims.Get(ctx, LibreChatImagesClaimName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		claim := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        LibreChatImagesClaimName,
+				Namespace:   Namespace,
+				Labels:      map[string]string{managedByLabel: managedByValue, "app.kubernetes.io/part-of": "kipper-ai"},
+				Annotations: map[string]string{helmResourcePolicy: "keep"},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(libreChatImagesClaimSize)},
+				},
+			},
+		}
+		if _, err := claims.Create(ctx, claim, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("creating volume claim %s: %w", LibreChatImagesClaimName, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading volume claim %s: %w", LibreChatImagesClaimName, err)
+	}
+	if existing.DeletionTimestamp != nil {
+		return fmt.Errorf("volume claim %s is being deleted. Run this command again once it is gone", LibreChatImagesClaimName)
+	}
+	if isManagedByKipper(existing.Labels) {
+		return nil
+	}
+	if existing.Annotations["meta.helm.sh/release-name"] != "librechat" || existing.Annotations["meta.helm.sh/release-namespace"] != Namespace {
+		return &errNotOwnedByKipper{kind: "PersistentVolumeClaim", name: LibreChatImagesClaimName}
+	}
+	chart, err := i.Dynamic.Resource(helmChartGVR).Namespace("kube-system").Get(ctx, "librechat", metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return &errNotOwnedByKipper{kind: "PersistentVolumeClaim", name: LibreChatImagesClaimName}
+	}
+	if err != nil {
+		return fmt.Errorf("reading helmchart librechat: %w", err)
+	}
+	if !isManagedByKipper(chart.GetLabels()) {
+		return &errNotOwnedByKipper{kind: "HelmChart", name: "librechat"}
+	}
+	patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%q,"app.kubernetes.io/part-of":"kipper-ai"},`+
+		`"annotations":{%q:"keep","meta.helm.sh/release-name":null,"meta.helm.sh/release-namespace":null}}}`,
+		managedByLabel, managedByValue, helmResourcePolicy)
+	if _, err := claims.Patch(ctx, LibreChatImagesClaimName, types.MergePatchType, []byte(patch), metav1.PatchOptions{FieldManager: "kip"}); err != nil {
+		return fmt.Errorf("taking over volume claim %s: %w", LibreChatImagesClaimName, err)
+	}
+	return nil
+}
+
+// helmResourcePolicy is the annotation that stops Helm from deleting an object
+// when an uninstall or upgrade removes it from a release.
+const helmResourcePolicy = "helm.sh/resource-policy"
+
+// libreChatImagesClaimSize is the images volume size of LibreChat chart 1.9.2.
+const libreChatImagesClaimSize = "10G"
 
 // helmApplyState records the pre-apply state needed to recognise the
 // helm-install Job that helm-controller will spawn for the new chart

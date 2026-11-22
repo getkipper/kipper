@@ -186,6 +186,17 @@ Re-running `kip ai install` afterwards starts fresh: a new admin must be created
 
 Re-running `kip ai install` updates the existing bundle. Ollama uses a `Recreate` rollout: the old pod stops before the new one starts, allowing the replacement to use its memory and GPU. Chat is unavailable while the replacement starts and loads the model.
 
+### When a chart upgrade fails
+
+`kip ai install` and `kip ai rag install` report an error when Helm leaves a release failed, for example `helm left the "librechat" release in status failed at revision 2`. The next time a failed release's chart is applied, the Helm controller in k3s uninstalls the release and installs it again. The bundle marks its volumes for retention during a reinstall. A release that failed under an older kip version may lack those retention settings. Both commands therefore require existing releases to have deployed status before applying a chart.
+
+A release with pending status may still have a chart job running, so wait a few minutes and try again first. Otherwise, create a backup and wait for it to finish, then run the command again with `--reinstall-failed`:
+
+```bash
+kip ai backup --name before-reinstall --wait
+kip ai install --reinstall-failed
+```
+
 ## Protecting AI data
 
 <span id="backup-and-restore"></span>

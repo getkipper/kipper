@@ -307,3 +307,9 @@ func TestQdrantManifestDisablesTelemetry(t *testing.T) {
 
 	assert.Equal(t, true, values["config"].(map[string]any)["telemetry_disabled"])
 }
+
+func TestAnythingLLMManifestKeepsItsStorageOnAReinstall(t *testing.T) {
+	values := chartValues(t, SplitYAMLDocuments(AnythingLLMManifest(anythingLLMTestConfig()))[1])
+	annotations := values["persistentVolume"].(map[string]any)["annotations"].(map[string]any)
+	assert.Equal(t, "keep", annotations["helm.sh/resource-policy"])
+}

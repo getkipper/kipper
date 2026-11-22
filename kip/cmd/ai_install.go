@@ -14,10 +14,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
 
 	"github.com/getkipper/kipper/kip/internal/ai"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
 var aiInstallCmd = &cobra.Command{
@@ -47,6 +49,7 @@ func init() {
 	aiInstallCmd.Flags().String("pvc-size", "", "model cache PVC size (defaults to 10Gi/30Gi/60Gi by tier)")
 	aiInstallCmd.Flags().BoolP("yes", "y", false, "skip the auto-configure prompt and accept all defaults")
 	aiInstallCmd.Flags().Bool("skip-storage-check", false, "skip the MinIO storage preflight (only for evaluation installs that will not run kip ai backup)")
+	aiInstallCmd.Flags().Bool("reinstall-failed", false, "apply charts even when a Helm release is not deployed. This can trigger a reinstall and delete the chart's volumes. Back up with 'kip ai backup --wait' first")
 	aiCmd.AddCommand(aiInstallCmd)
 }
 
@@ -67,6 +70,7 @@ func runAIInstall(cmd *cobra.Command, _ []string) error {
 	pvcSize, _ := cmd.Flags().GetString("pvc-size")
 	yes, _ := cmd.Flags().GetBool("yes")
 	skipStorageCheck, _ := cmd.Flags().GetBool("skip-storage-check")
+	reinstallFailed, _ := cmd.Flags().GetBool("reinstall-failed")
 
 	ctx := context.Background()
 
@@ -122,16 +126,16 @@ func runAIInstall(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("\n  Installing AI bundle on %s\n\n", cluster.Name)
 
-	installer := &ai.Installer{
-		Clientset: client.Clientset(),
-		Dynamic:   client.Dynamic(),
-		Out:       os.Stdout,
+	installer, err := chartInstaller(client)
+	if err != nil {
+		return err
 	}
 	if err := installer.Install(ctx, tier, ai.Options{
-		Host:     host,
-		NodeName: report.BestNode.Name,
-		Model:    model,
-		PVCSize:  pvcSize,
+		Host:            host,
+		NodeName:        report.BestNode.Name,
+		Model:           model,
+		PVCSize:         pvcSize,
+		ReinstallFailed: reinstallFailed,
 	}); err != nil {
 		return err
 	}
@@ -331,4 +335,19 @@ func checkBackupStorage(ctx context.Context, clientset kubernetes.Interface, pvc
 	fmt.Printf("  ✔   MinIO has %s capacity, projected backup needs %s\n",
 		humanBytes(report.MinIOCapacity), humanBytes(report.Projected))
 	return nil
+}
+
+// chartInstaller configures an AI installer to apply HelmCharts, verify their
+// release metadata, and write progress to standard output.
+func chartInstaller(client *k8s.Client) (*ai.Installer, error) {
+	meta, err := metadata.NewForConfig(client.RESTConfig())
+	if err != nil {
+		return nil, fmt.Errorf("creating metadata client: %w", err)
+	}
+	return &ai.Installer{
+		Clientset: client.Clientset(),
+		Dynamic:   client.Dynamic(),
+		Metadata:  meta,
+		Out:       os.Stdout,
+	}, nil
 }

@@ -43,7 +43,7 @@ const (
 	// readinessProbe and livenessProbe to 3001.
 	AnythingLLMServicePort = 3001
 	// AnythingLLMDeploymentName is the rendered Deployment name. Used
-	// by the installer's wait-for-rollout step in Step 4.
+	// by the installer's rollout readiness check.
 	AnythingLLMDeploymentName = "anythingllm"
 
 	// AnythingLLMCredentialsSecretName carries the boot-required
@@ -282,6 +282,9 @@ spec:
       enabled: true
       size: %[13]s
       mountPath: /app/server/storage
+      # Keeps workspaces and documents when the Helm controller reinstalls a failed release.
+      annotations:
+        helm.sh/resource-policy: keep
       labels:
         app.kubernetes.io/component: rag
         app.kubernetes.io/part-of: kipper-ai
