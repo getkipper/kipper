@@ -18,3 +18,12 @@ func TestInstallKEDASizesTheInterceptorsByProfile(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallKEDAKeepsItsCRDsOnAReinstall(t *testing.T) {
+	// Deleting KEDA's CRDs would delete every ScaledObject in the cluster.
+	host := &hostScript{}
+	require.NoError(t, InstallKEDA(host, ProfileSmall))
+	chart := host.commands[0]
+	assert.Contains(t, chart, "name: keda\n")
+	assert.Contains(t, chart, "    crds:\n      additionalAnnotations:\n        helm.sh/resource-policy: keep\n")
+}

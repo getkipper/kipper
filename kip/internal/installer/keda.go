@@ -41,6 +41,12 @@ spec:
           memory: 32Mi
         limits:
           memory: 128Mi
+    # Keeps the CRDs, and with them every ScaledObject, when the Helm
+    # controller reinstalls a failed release. Chart 2.16.1 applies this to
+    # every CRD except ClusterCloudEventSource.
+    crds:
+      additionalAnnotations:
+        helm.sh/resource-policy: keep
 `, kedaVersion)
 
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)
