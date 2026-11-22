@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
 	globalManagerLeaseQuery = `kubectl -n longhorn-system get leases.coordination.k8s.io longhorn-global-manager --request-timeout=30s -o json`
-	globalManagerPodQuery   = `kubectl -n longhorn-system get pods -l app=longhorn-global-manager --request-timeout=30s -o json`
+	globalManagerPodArgs    = "-n longhorn-system -l app=longhorn-global-manager --request-timeout=30s"
 )
 
 // waitForGlobalLeader waits until a running, ready global manager pod holds
@@ -80,36 +82,18 @@ func globalLeaderProblem(client CommandRunner, seen string) (renewed, problem st
 // runningGlobalManagers returns the names of the global manager's pods that
 // run, are ready and are not being deleted.
 func runningGlobalManagers(client CommandRunner) (map[string]bool, error) {
-	out, err := client.Run(globalManagerPodQuery)
+	pods, err := readPods(client, "the global manager's pods", globalManagerPodArgs)
 	if err != nil {
-		return nil, failedRead("reading the global manager's pods", out, err)
-	}
-	var list struct {
-		Items []struct {
-			Metadata struct {
-				Name              string `json:"name"`
-				DeletionTimestamp string `json:"deletionTimestamp"`
-			} `json:"metadata"`
-			Status struct {
-				Phase      string `json:"phase"`
-				Conditions []struct {
-					Type   string `json:"type"`
-					Status string `json:"status"`
-				} `json:"conditions"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(jsonPayload(out), &list); err != nil {
 		return nil, err
 	}
 	running := map[string]bool{}
-	for _, p := range list.Items {
-		if p.Status.Phase != "Running" || p.Metadata.DeletionTimestamp != "" {
+	for _, p := range pods {
+		if p.Status.Phase != corev1.PodRunning || p.DeletionTimestamp != nil {
 			continue
 		}
 		for _, c := range p.Status.Conditions {
-			if c.Type == "Ready" && strings.EqualFold(c.Status, "True") {
-				running[p.Metadata.Name] = true
+			if c.Type == corev1.PodReady && strings.EqualFold(string(c.Status), "True") {
+				running[p.Name] = true
 			}
 		}
 	}

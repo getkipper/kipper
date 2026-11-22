@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/util/jsonpath"
 )
 
 // pruneServer answers like routedHost, and serves each volume in pvs until
@@ -32,6 +34,9 @@ func (p *pruneServer) Run(cmd string) (string, error) {
 		}
 	}
 	out, err := p.routedHost.Run(cmd)
+	if strings.Contains(cmd, "kubectl get pods ") {
+		out = renderJSONPath(cmd, `{"items":[`+out+`]}`)
+	}
 	if strings.Contains(out, "(NotFound)") {
 		err = errors.New("exit 1")
 	}
@@ -59,6 +64,29 @@ func prunePod(service, ready string) string {
 	return `{"metadata":{"name":"` + service + `-0"},"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-` + service + `-0"}}]},"status":{"phase":"Running","conditions":[` + ready + `]}}`
 }
 
+// renderJSONPath prints listJSON with the template in cmd's -o jsonpath
+// argument, as kubectl does.
+func renderJSONPath(cmd, listJSON string) string {
+	_, template, found := strings.Cut(cmd, "-o jsonpath='")
+	if !found {
+		panic("no jsonpath template in " + cmd)
+	}
+	var list any
+	if err := json.Unmarshal([]byte(listJSON), &list); err != nil {
+		panic(err)
+	}
+	jp := jsonpath.New("render").AllowMissingKeys(true)
+	template, _, _ = strings.Cut(template, "'")
+	if err := jp.Parse(template); err != nil {
+		panic(err)
+	}
+	var out bytes.Buffer
+	if err := jp.Execute(&out, list); err != nil {
+		panic(err)
+	}
+	return out.String()
+}
+
 // pruneGateHost serves the moved copies pvs, keyed by volume name, with routes
 // for their services, claims and pods, and no Velero backups.
 func pruneGateHost(pvs map[string]string, routes map[string]string) *pruneServer {
@@ -83,7 +111,7 @@ func pruneHost() *pruneServer {
 	return pruneGateHost(map[string]string{"pvc-a": prunePV("pvc-a", "shop/db", "2026-10-22T12:00:00Z", "c1"), "pvc-b": moving}, map[string]string{
 		"get services.kipper.run 'db'": `{"metadata":{"uid":"s1"},"spec":{}}`,
 		"get pvc 'data-db-0'":          `{"metadata":{"name":"data-db-0","uid":"c1"},"spec":{"storageClassName":"longhorn-single"},"status":{"phase":"Bound"}}`,
-		"get pod 'db-0'":               prunePod("db", `{"type":"Ready","status":"True","lastTransitionTime":"2026-10-22T13:00:00Z"}`),
+		"metadata.name=db-0":           prunePod("db", `{"type":"Ready","status":"True","lastTransitionTime":"2026-10-22T13:00:00Z"}`),
 	})
 }
 
@@ -144,8 +172,8 @@ func gateHost() *pruneServer {
 		"get pvc 'data-db-0'":            claim("data-db-0", "c1"),
 		"get pvc 'data-pg-0'":            claim("data-pg-0", "c2"),
 		"get pvc 'data-gone-0'":          `Error from server (NotFound): persistentvolumeclaims "data-gone-0" not found`,
-		"get pod 'db-0'":                 prunePod("db", readyTwoHours),
-		"get pod 'pg-0'":                 prunePod("pg", notReady),
+		"metadata.name=db-0":             prunePod("db", readyTwoHours),
+		"metadata.name=pg-0":             prunePod("pg", notReady),
 	})
 }
 

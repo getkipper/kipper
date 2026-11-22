@@ -340,8 +340,7 @@ func (r *retainedCopyReader) facts(a map[string]string) (RetainedCopyFacts, erro
 	if !f.NeedsServiceHealth() {
 		return f, nil
 	}
-	var pod corev1.Pod
-	found, err = r.cluster.getJSON("pod "+svc+"-0", fmt.Sprintf("kubectl -n %s get pod %s", shellQuote(ns), shellQuote(svc+"-0")), &pod)
+	pod, found, err := r.cluster.getPod("pod "+svc+"-0", ns, svc+"-0")
 	if err != nil {
 		return f, err
 	}

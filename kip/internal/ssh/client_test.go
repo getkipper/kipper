@@ -193,3 +193,10 @@ func TestPasswordRefused(t *testing.T) {
 	assert.Error(t, passwordRefused("Permission denied (publickey,keyboard-interactive).\n"))
 	assert.Error(t, passwordRefused("ssh: connect to host 203.0.113.10 port 22: Connection refused\n"), "no answer proves nothing")
 }
+
+func TestSSHArgsQuietSSHsOwnNoticesOnCommandConnections(t *testing.T) {
+	c := &Client{cfg: Config{Host: "203.0.113.10"}}
+
+	assert.Contains(t, strings.Join(c.sshArgs(), " "), "-o LogLevel=ERROR", "a banner or host key notice would land in front of a command's output")
+	assert.NotContains(t, strings.Join(c.connectionArgs(false, true), " "), "LogLevel", "the login probes read ssh's own messages")
+}

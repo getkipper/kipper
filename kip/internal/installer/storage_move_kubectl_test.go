@@ -269,7 +269,7 @@ func TestKubectlMoveClusterListsLivePodsOnTheClaims(t *testing.T) {
 {"metadata":{"name":"dump-1"},"spec":{"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"db-dump"}}]},"status":{"phase":"Succeeded"}},
 {"metadata":{"name":"web"},"spec":{"volumes":[{"name":"c","persistentVolumeClaim":{"claimName":"other"}}]},"status":{"phase":"Running"}},
 {"metadata":{"name":"dt-1-import","uid":"p-dt"},"spec":{"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"data-db-0"}}]},"status":{"phase":"Pending"}}]}`
-	host := &routedRunner{routes: []route{{contains: "get pods", out: pods}}}
+	host := &routedRunner{routes: []route{{contains: "get pods", out: asProjected(pods)}}}
 	got, err := KubectlMoveCluster{Server: host}.PodsMounting("shop", []string{"data-db-0", "db-dump"})
 	require.NoError(t, err)
 	assert.Equal(t, []MovePod{{Name: "db-0", UID: "p-db", StatefulSet: "db"}, {Name: "dt-1-import", UID: "p-dt"}}, got)
@@ -278,7 +278,7 @@ func TestKubectlMoveClusterListsLivePodsOnTheClaims(t *testing.T) {
 func TestKubectlMoveClusterTrustsOnlyAFlushedCopy(t *testing.T) {
 	result := func(phase, log string) CopyResult {
 		host := &routedRunner{routes: []route{
-			{contains: "get pod", out: `{"metadata":{"name":"kipper-move-copy-db"},"status":{"phase":"` + phase + `"}}`},
+			{contains: "get pod", out: projectedPod(`{"metadata":{"name":"kipper-move-copy-db"},"status":{"phase":"` + phase + `"}}`)},
 			{contains: "logs", out: log},
 		}}
 		r, err := KubectlMoveCluster{Server: host}.CopyResult("shop", "kipper-move-copy-db")
@@ -295,7 +295,7 @@ func TestKubectlMoveClusterTrustsOnlyAFlushedCopy(t *testing.T) {
 func TestKubectlMoveClusterTrustsOnlyAVerification(t *testing.T) {
 	result := func(phase, log string) CopyResult {
 		host := &routedRunner{routes: []route{
-			{contains: "get pod", out: `{"metadata":{"name":"kipper-move-verify-db"},"status":{"phase":"` + phase + `"}}`},
+			{contains: "get pod", out: projectedPod(`{"metadata":{"name":"kipper-move-verify-db"},"status":{"phase":"` + phase + `"}}`)},
 			{contains: "logs", out: log},
 		}}
 		r, err := KubectlMoveCluster{Server: host}.VerifyResult("shop", "kipper-move-verify-db")
@@ -374,7 +374,11 @@ func TestKubectlMoveClusterReadsAClaimsResize(t *testing.T) {
 
 func TestKubectlMoveClusterSaysHowTheCopyPodEnded(t *testing.T) {
 	read := func(pod string) CopyResult {
-		host := &routedRunner{routes: []route{{contains: "get pod", out: pod}, {contains: "logs", out: ""}}}
+		host := &routedRunner{routes: []route{
+			{contains: "jsonpath='{.status.message}'", out: "The node was low on resource: memory.\nContainer copy was using 2Gi.\n"},
+			{contains: "get pod", out: projectedPod(pod)},
+			{contains: "logs", out: ""},
+		}}
 		r, err := KubectlMoveCluster{Server: host}.CopyResult("shop", "kipper-move-copy-db")
 		require.NoError(t, err)
 		return r
@@ -386,7 +390,7 @@ func TestKubectlMoveClusterSaysHowTheCopyPodEnded(t *testing.T) {
 	assert.Equal(t, "OOMKilled (exit 137)", oom.Reason)
 
 	evicted := read(`{"metadata":{"name":"kipper-move-copy-db","uid":"pod-1"},"status":{"phase":"Failed","reason":"Evicted","message":"The node was low on resource: memory."}}`)
-	assert.Equal(t, "Evicted: The node was low on resource: memory.", evicted.Reason)
+	assert.Equal(t, "Evicted: The node was low on resource: memory.\nContainer copy was using 2Gi.", evicted.Reason)
 
 	running := read(`{"metadata":{"name":"kipper-move-copy-db","uid":"pod-1"},"status":{"phase":"Running"}}`)
 	assert.Equal(t, CopyResult{UID: "pod-1"}, running, "a running pod is known by its UID")
@@ -632,7 +636,7 @@ func TestKubectlMoveClusterLabelsTheSourceClaim(t *testing.T) {
 func TestKubectlMoveClusterReadsTheResourcesAMoveNeeds(t *testing.T) {
 	host := &routedRunner{routes: []route{
 		{contains: "kubectl get nodes", out: listJSON(t, moveNode("server-1", "2", "4Gi"))},
-		{contains: "kubectl get pods -A", out: listJSON(t, servicePod("shop", "db", "server-1", "500m", "1Gi"))},
+		{contains: "kubectl get pods -A", out: projectedPods(t, servicePod("shop", "db", "server-1", "500m", "1Gi"))},
 		{contains: "kubectl -n 'shop' get resourcequota", out: listJSON(t, moveQuota("kipper-quota", list("pods", "10"), list("pods", "1")))},
 		{contains: "kubectl get priorityclasses", out: `{"items":[{"metadata":{"name":"system-node-critical"},"value":2000001000},` +
 			`{"metadata":{"name":"low"},"value":10,"globalDefault":true},{"metadata":{"name":"standard"},"value":100,"globalDefault":true}]}`},
