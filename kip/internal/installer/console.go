@@ -33,7 +33,8 @@ metadata:
   name: console-api
 rules:
   # Workloads, config and storage the console manages across every project namespace.
-  # The update permission lets the Volume controller adopt restored holder pods by setting their owner reference.
+  # Pod updates let the Volume controller adopt restored holder pods by setting their owner reference.
+  # They also let the Service controller update the dump-hook timeout annotation on existing Postgres pods.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

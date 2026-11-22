@@ -801,6 +801,9 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	if err := r.Update(ctx, &existing); err != nil {
 		return err
 	}
+	if err := r.syncDumpTimeout(ctx, &existing, desired.Spec.Template.Annotations[preHookTimeout]); err != nil {
+		return fmt.Errorf("reconciling the dump timeout: %w", err)
+	}
 	if err := r.removeStalePostgresTLS(ctx, svc); err != nil {
 		return err
 	}
