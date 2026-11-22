@@ -249,7 +249,8 @@ func (c *Client) masterIsServing() bool {
 // controlSocket hashes connection options and key selection as well as the
 // destination, preventing reuse across distinct routes or identities. It uses
 // the private kip directory and returns empty when multiplexing is unsupported,
-// the directory is unavailable, or the socket path would exceed the limit.
+// the directory is unavailable, OpenSSH would reinterpret the home path, or the
+// socket path would exceed the limit.
 func controlSocket(cfg Config) string {
 	// Windows OpenSSH has no connection multiplexing, and asking for it there
 	// is worse than going without: ssh treats a ControlPath it cannot bind as
@@ -260,8 +261,10 @@ func controlSocket(cfg Config) string {
 		return ""
 	}
 
+	// Use a fresh connection per command when OpenSSH's whitespace parsing,
+	// path expansion or resolution could make the unquoted ControlPath unusable.
 	home, err := os.UserHomeDir()
-	if err != nil {
+	if err != nil || !readsAsWritten(home) || strings.ContainsAny(home, " \t\r\n") {
 		return ""
 	}
 	dir := filepath.Join(home, ".kip", "ssh")
@@ -763,6 +766,17 @@ func fileExists(path string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+// readsAsWritten reports whether path is absolute and free of OpenSSH path
+// syntax: % tokens, ${...} variables, double quotes and backslashes. Relative
+// paths and paths starting with ~ require resolution. On Windows, separators
+// are converted to forward slashes before checking for OpenSSH syntax.
+func readsAsWritten(path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	return !strings.ContainsAny(filepath.ToSlash(path), `%"\`) && !strings.Contains(path, "${")
 }
 
 // sshArgs builds the connection arguments, including multiplexing when available.
