@@ -270,6 +270,24 @@ func TestLonghornBackupChecksTheLocationBeforeEachStep(t *testing.T) {
 	assert.Len(t, taken, 1, "no backup is taken into the cluster")
 }
 
+// A read-only location fails every backup with FailedValidation, so a step
+// must refuse before it starts one.
+func TestLonghornRefusesAStepWhenTheBackupLocationIsReadOnly(t *testing.T) {
+	c := defaultLonghornCluster()
+	c.useResolver(t)
+	cs, dyn := c.clients()
+	bsl := backupLocation("https://s3.example.com")
+	require.NoError(t, unstructured.SetNestedField(bsl.Object, "ReadOnly", "spec", "accessMode"))
+	_, err := dyn.Resource(backupStorageLocationGVR).Namespace("velero").Update(context.Background(), bsl, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	taken := 0
+
+	_, err = longhornBackup(cs, dyn, func(context.Context, string) error { taken++; return nil })("v1.8.2")
+
+	assert.ErrorContains(t, err, "read-only")
+	assert.Zero(t, taken)
+}
+
 // A step's backup copies files from running pods only, so a volume nothing
 // mounts would be missing from the backup the step relies on.
 func TestLonghornRefusesAStepWhoseBackupWouldOmitAVolume(t *testing.T) {

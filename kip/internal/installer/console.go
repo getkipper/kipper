@@ -156,6 +156,11 @@ rules:
   - apiGroups: ["velero.io"]
     resources: ["schedules"]
     verbs: ["get", "list", "update"]
+  # Allow the console to refuse backups on read-only storage before creating them.
+  - apiGroups: ["velero.io"]
+    resources: ["backupstoragelocations"]
+    resourceNames: ["default"]
+    verbs: ["get"]
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects", "triggerauthentications"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

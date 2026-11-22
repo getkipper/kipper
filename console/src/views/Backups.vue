@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { isAxiosError } from 'axios'
 import { Archive, Plus, RefreshCw, Clock, Undo2, CheckCircle, XCircle, Loader, ExternalLink, Trash2 } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useModal } from '@/composables/useModal'
@@ -97,8 +98,9 @@ async function handleCreate() {
     newNamespaces.value = ''
     showCreate.value = false
     await loadAll()
-  } catch {
-    toast.error('Failed to create backup')
+  } catch (e) {
+    const detail = isAxiosError(e) ? e.response?.data?.error : null
+    toast.error(detail || 'Failed to create backup')
   } finally {
     creating.value = false
   }

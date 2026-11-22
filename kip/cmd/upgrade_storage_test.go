@@ -11,6 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/kip/internal/backuplocation"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
@@ -144,4 +146,23 @@ func TestRequireBackupDestination(t *testing.T) {
 	assert.NoError(t, requireBackupDestination(installer.PlatformState{Backup: installer.BackupExternal, BackupStorage: &installer.BackupStorageConfig{Bucket: "b"}}))
 	assert.NoError(t, requireBackupDestination(installer.PlatformState{Backup: installer.BackupInCluster}))
 	assert.NoError(t, requireBackupDestination(installer.PlatformState{Backup: installer.BackupNone}))
+}
+
+func TestRefuseBackupCreate(t *testing.T) {
+	readOnly := backupLocation("https://s3.example.com")
+	require.NoError(t, unstructured.SetNestedField(readOnly.Object, "ReadOnly", "spec", "accessMode"))
+	readWrite := backupLocation("https://s3.example.com")
+	require.NoError(t, unstructured.SetNestedField(readWrite.Object, "ReadWrite", "spec", "accessMode"))
+
+	assert.ErrorIs(t, refuseBackupCreate(platformConfigClient("", readOnly)), backuplocation.ErrReadOnly)
+	assert.NoError(t, refuseBackupCreate(platformConfigClient("", readWrite)))
+	assert.NoError(t, refuseBackupCreate(platformConfigClient("")), "a location kip cannot read leaves the backup to report the problem")
+
+	noBackups := platformConfigClient("", readOnly)
+	pc, err := noBackups.Resource(platformConfigGVR).Get(context.Background(), "platform", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, unstructured.SetNestedField(pc.Object, platform.BackupNone, "spec", "backup"))
+	_, err = noBackups.Resource(platformConfigGVR).Update(context.Background(), pc, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	assert.ErrorIs(t, refuseBackupCreate(noBackups), errBackupsNotConfigured, "a cluster without backups says how to enable them first")
 }

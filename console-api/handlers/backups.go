@@ -51,6 +51,25 @@ func (b *Backups) refuseWithoutBackups(w http.ResponseWriter, r *http.Request) b
 	return true
 }
 
+var backupStorageLocationGVR = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "backupstoragelocations"}
+
+const backupStorageReadOnly = "This cluster's backup storage is read-only, as it is on recovery installs, so new backups cannot be saved there. Restores from this storage work as usual."
+
+// refuseOnReadOnlyStorage returns true after sending a conflict response when
+// Velero's default location is read-only, preventing a backup validation failure.
+// Read failures allow the request to continue.
+func (b *Backups) refuseOnReadOnlyStorage(w http.ResponseWriter, r *http.Request) bool {
+	location, err := b.Dynamic.Resource(backupStorageLocationGVR).Namespace("velero").Get(r.Context(), "default", metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	if mode, _, _ := unstructured.NestedString(location.Object, "spec", "accessMode"); mode != "ReadOnly" {
+		return false
+	}
+	respondError(w, http.StatusConflict, backupStorageReadOnly)
+	return true
+}
+
 type backupResponse struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
@@ -150,7 +169,7 @@ func (b *Backups) List(w http.ResponseWriter, r *http.Request) {
 // Create creates a new backup.
 // POST /api/v1/backups
 func (b *Backups) Create(w http.ResponseWriter, r *http.Request) {
-	if b.refuseWithoutBackups(w, r) {
+	if b.refuseWithoutBackups(w, r) || b.refuseOnReadOnlyStorage(w, r) {
 		return
 	}
 	var req struct {

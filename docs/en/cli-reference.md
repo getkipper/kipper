@@ -526,7 +526,7 @@ Apps on a single-server cluster are unavailable during the reboot. For a server,
 
 1. Reads the server's boot ID over SSH. Stops if the server cannot be reached.
 2. Asks for confirmation, unless you pass `--yes`.
-3. Unless `--skip-backup` is set, takes a backup using the defaults from `kip backup create` and waits up to 30 minutes for completion. A failed or timed-out backup cancels the reboot.
+3. Unless `--skip-backup` is set, takes a backup using the defaults from `kip backup create` and waits up to 30 minutes for completion. A failed or timed-out backup cancels the reboot. When the cluster has backups disabled or its backup storage is read-only (as on a recovery install), kip reports this and reboots without a backup.
 4. Records apps with at least one ready replica, then reboots the server. If listing apps fails, it warns and skips the app readiness checks. If console-api uses `:latest`, it may start with a newer image. Before rebooting, run `kip upgrade --check` to check for required data updates.
 5. Waits until the server reports a new boot ID. If it still reports the old ID after three minutes, the command stops with instructions for investigating the cause.
 6. Waits for Kubernetes to report the new boot ID and for every node and component from `kip status` to pass two consecutive readiness checks. Then it reads the kernel log and warns at once when the kernel it booted blocks signals inside containers (see [`kip node kernel`](#kip-node-kernel)). It also warns if the node booted a different kernel than the pinned one, indicating that the pin did not take effect. If the kernel log could not be read, it reports that too.

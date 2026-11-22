@@ -121,6 +121,22 @@ func TestNodeReboot(t *testing.T) {
 		assert.Contains(t, out.String(), "no backups")
 	})
 
+	t.Run("a cluster with read-only backup storage reboots without a backup and says why", func(t *testing.T) {
+		h := &rebootingHost{bootID: "old-boot", confirm: true}
+		r, out := h.reboot(t)
+		r.BackupsReadOnly = true
+		var toldBeforePrompt bool
+		r.Confirm = func(string) (bool, error) {
+			h.calls = append(h.calls, "confirm")
+			toldBeforePrompt = strings.Contains(out.String(), "read-only")
+			return true, nil
+		}
+
+		require.NoError(t, r.run("example.com", false, false))
+		assert.Equal(t, []string{"confirm", "list apps", "reboot", "report"}, h.calls)
+		assert.True(t, toldBeforePrompt, "the user learns about the missing backup before confirming")
+	})
+
 	t.Run("backs up, reboots, waits for the new boot and a healthy cluster, then reports", func(t *testing.T) {
 		h := &rebootingHost{bootID: "old-boot", downReads: 6, unhealthyReads: 3, confirm: true}
 		r, out := h.reboot(t)

@@ -349,7 +349,8 @@ interrupted, the check reports that step instead.
 
 `--longhorn` needs backups on external storage. Backups in in-cluster MinIO live
 on the Longhorn storage the upgrade changes, so kip refuses to start on such a
-cluster, and on one with backups turned off. kip also resolves the backup
+cluster. It also refuses to start when backups are turned off or backup storage
+is read-only, as it is on recovery installs. kip also resolves the backup
 endpoint and refuses one that leads back into the cluster: a node's address, a
 Service's address or endpoint, an address in the pod or service range, or a
 loopback or link-local address. kip resolves the endpoint's name from your

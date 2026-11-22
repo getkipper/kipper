@@ -495,7 +495,7 @@ kip install --host 203.0.113.20 --domain recovery.example.com \
   --backup-storage-read-only --backup-repository-key-file ~/example-old-backups.key
 ```
 
-Add `--backup-storage-sse-c-key-file` when the old backups use SSE-C. Velero marks the location `ReadOnly`, which blocks new backups, deletion and repository maintenance there, and both backup schedules are off. Restores and drills work as usual. Velero still writes each restore's log and results under `restores/` in the bucket, so the recovery credentials need write access there. Upgrades preserve read-only access even when run from a machine whose kip settings lack the flag, so the recovery cluster stays read-only for that bucket permanently.
+Add `--backup-storage-sse-c-key-file` when the old backups use SSE-C. Velero marks the location `ReadOnly`, which blocks new backups, deletion and repository maintenance there, and both backup schedules are off. kip and the console refuse a new backup there, `kip node reboot` reboots without one, and `kip upgrade --longhorn` refuses to start. Restores and drills work as usual. Velero still writes each restore's log and results under `restores/` in the bucket, so the recovery credentials need write access there. Upgrades preserve read-only access even when run from a machine whose kip settings lack the flag, so the recovery cluster stays read-only for that bucket permanently.
 
 ### Forget the old bucket
 

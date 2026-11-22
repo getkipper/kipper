@@ -234,3 +234,22 @@ func TestOnlyOwnersAndConsoleAPICanSetCopies(t *testing.T) {
 		require.True(t, grants(console, "kipper.run", resource, "set-copies"), "console-api sets copies on %s", resource)
 	}
 }
+
+// TestConsoleClusterRoleReadsOnlyTheDefaultBackupLocation verifies the permission
+// needed to refuse backups on read-only storage, scoped to the default location.
+func TestConsoleClusterRoleReadsOnlyTheDefaultBackupLocation(t *testing.T) {
+	console := parseConsoleClusterRole(t)
+	var found bool
+	for _, rule := range console.Rules {
+		for _, r := range rule.Resources {
+			if r != "backupstoragelocations" {
+				continue
+			}
+			found = true
+			require.Equal(t, []string{"velero.io"}, rule.APIGroups)
+			require.Equal(t, []string{"default"}, rule.ResourceNames, "console-api reads only the location kip's backups use")
+			require.Equal(t, []string{"get"}, rule.Verbs)
+		}
+	}
+	require.True(t, found, "console-api needs get on velero/default to see a read-only location")
+}
