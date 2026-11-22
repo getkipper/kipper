@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -382,6 +383,27 @@ func TestInstallRAGHappyPath(t *testing.T) {
 	assert.Contains(t, output, "✔   Installing AnythingLLM")
 	assert.Contains(t, output, "✔   Pulling embedding model into Ollama")
 	assert.Contains(t, output, "✔   Recording RAG bundle state")
+}
+
+func TestInstallRAGSetsAnythingLLMToRecreate(t *testing.T) {
+	inst, _ := ragInstallerWithReadyPhase1(t)
+	deployments := inst.Clientset.AppsV1().Deployments(Namespace)
+	dep, err := deployments.Get(context.Background(), AnythingLLMDeploymentName, metav1.GetOptions{})
+	require.NoError(t, err)
+	quarter := intstr.FromString("25%")
+	dep.Spec.Strategy = appsv1.DeploymentStrategy{
+		Type:          appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{MaxSurge: &quarter, MaxUnavailable: &quarter},
+	}
+	_, err = deployments.Update(context.Background(), dep, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, inst.InstallRAG(context.Background(), RAGOptions{Host: "ask.example.com"}))
+
+	dep, err = deployments.Get(context.Background(), AnythingLLMDeploymentName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, appsv1.RecreateDeploymentStrategyType, dep.Spec.Strategy.Type)
+	assert.Nil(t, dep.Spec.Strategy.RollingUpdate, "the API server refuses rollingUpdate settings on a Recreate Deployment")
 }
 
 // -------------------- UninstallRAG --------------------

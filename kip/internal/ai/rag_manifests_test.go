@@ -207,16 +207,16 @@ func TestAnythingLLMManifestProbeOverride(t *testing.T) {
 	assert.NotContains(t, values, "/v1/api/health", "the broken default health path must not leak through")
 }
 
-// TestAnythingLLMManifestPinsRecreateStrategy locks in the Recreate
-// deployment strategy. The chart's current default already matches,
-// but pinning protects against an upstream flip to RollingUpdate
-// which would surge a second AnythingLLM pod (~2 GiB request)
-// against the 4 GiB RAG headroom budget AND race two pods on the
-// same SQLite/uploads PVC.
-func TestAnythingLLMManifestPinsRecreateStrategy(t *testing.T) {
-	values := parseDoc(t, SplitYAMLDocuments(AnythingLLMManifest(anythingLLMTestConfig()))[1])["spec"].(map[string]any)["valuesContent"].(string)
-	assert.Contains(t, values, "strategy:\n  type: Recreate",
-		"strategy must be pinned in valuesContent so an upstream chart default change can't break tier-1 RAG installs")
+// TestAnythingLLMManifestClearsTheChartStrategy checks that null suppresses the
+// invalid pod spec strategy field rendered by chart 1.0.0, including its default.
+// InstallRAG sets the Deployment strategy after the chart job.
+func TestAnythingLLMManifestClearsTheChartStrategy(t *testing.T) {
+	raw := parseDoc(t, SplitYAMLDocuments(AnythingLLMManifest(anythingLLMTestConfig()))[1])["spec"].(map[string]any)["valuesContent"].(string)
+	var values map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(raw), &values))
+	strategy, present := values["strategy"]
+	assert.True(t, present, "a null strategy removes the chart's default")
+	assert.Nil(t, strategy)
 }
 
 // TestAnythingLLMQdrantEndpointMatchesQdrantService is a cross-manifest

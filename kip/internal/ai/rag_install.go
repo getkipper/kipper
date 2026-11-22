@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // RAGBundleStateConfigMapName records what the RAG bundle install
@@ -291,6 +292,7 @@ func (i *Installer) InstallRAG(ctx context.Context, opts RAGOptions) error {
 		{"Waiting for Qdrant chart job", func() error { return i.waitForHelmChartJobFromState(ctx, qdrantState) }},
 		{"Waiting for Qdrant to be ready", func() error { return i.waitForStatefulSet(ctx, Namespace, QdrantServiceName) }},
 		{"Waiting for AnythingLLM chart job", func() error { return i.waitForHelmChartJobFromState(ctx, anyllmState) }},
+		{"Configuring AnythingLLM to stop its old pod before starting its replacement during updates", func() error { return i.useRecreateStrategy(ctx, AnythingLLMDeploymentName) }},
 		{"Waiting for AnythingLLM to be ready", func() error { return i.waitForDeployment(ctx, AnythingLLMDeploymentName) }},
 		{"Pulling embedding model into Ollama", func() error { return i.waitForEmbeddingModelLoaded(ctx, embeddingModel) }},
 		{"Recording RAG bundle state", func() error { return i.writeRAGBundleState(ctx, embeddingModel, opts.Host) }},
@@ -302,6 +304,20 @@ func (i *Installer) InstallRAG(ctx context.Context, opts RAGOptions) error {
 			return fmt.Errorf("%s: %w", s.name, err)
 		}
 		_, _ = fmt.Fprintf(i.out(), "  ✔   %s\n", s.name)
+	}
+	return nil
+}
+
+// useRecreateStrategy configures Deployment updates to stop the old pod before
+// starting its replacement, avoiding concurrent access to the SQLite and uploads
+// volume and extra memory use during rollouts. Chart 1.0.0 has no value for the
+// Deployment strategy. Helm preserves this field on upgrades because the chart
+// omits it from the Deployment spec.
+func (i *Installer) useRecreateStrategy(ctx context.Context, name string) error {
+	patch := []byte(`{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}`)
+	_, err := i.Clientset.AppsV1().Deployments(Namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{FieldManager: "kip"})
+	if err != nil {
+		return fmt.Errorf("setting deployment %s/%s to Recreate: %w", Namespace, name, err)
 	}
 	return nil
 }
