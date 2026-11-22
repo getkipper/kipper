@@ -459,6 +459,9 @@ func planReductionStep(target int64, v *lhVolume, c *lhCluster, now time.Time, r
 	if node := unavailableCopyNode(v.Replicas, c); node != "" {
 		return blocked(copyNodeDown(node))
 	}
+	if node := unavailableEligibleNode(c); node != "" {
+		return blocked(eligibleNodeDown(node))
+	}
 	if n.evictingNode != "" {
 		return blocked(evictingCopy(n.evictingNode))
 	}
@@ -610,6 +613,32 @@ func unavailableCopyNode(replicas []lhReplica, c *lhCluster) string {
 		}
 	}
 	return ""
+}
+
+// unavailableEligibleNode returns the alphabetically first unavailable node
+// eligible to hold copies, or "" if all eligible nodes are available. Such a
+// node may hold writes missing from the listed copies even if Longhorn has
+// removed its copy from the inventory.
+func unavailableEligibleNode(c *lhCluster) string {
+	var down []string
+	for node, eligible := range c.Eligible {
+		if eligible && !c.Available[node] {
+			down = append(down, node)
+		}
+	}
+	if len(down) == 0 {
+		return ""
+	}
+	slices.Sort(down)
+	return down[0]
+}
+
+// eligibleNodeDown explains a block caused by an unavailable node that can
+// hold copies, and how to proceed if the node is permanently lost.
+func eligibleNodeDown(node string) string {
+	return fmt.Sprintf("%s, which can hold copies, is not Ready or is fenced. It may hold a copy of this volume with writes the other copies lack, so Kipper keeps every copy. "+
+		"The change continues once the node is back. If %s is gone for good, run 'kip node fence %s' and then 'kip node remove %s --force'.",
+		node, node, node, node)
 }
 
 // evictingCopy explains a block caused by Longhorn evicting the copy on node.

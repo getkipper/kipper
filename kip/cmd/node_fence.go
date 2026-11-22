@@ -31,10 +31,14 @@ stays off until you rejoin it, and refuses while its kubelet still answers
 or cannot be checked.
 
 Before Kubernetes moves anything, kip checks each service with a volume on
-the worker. A service starts elsewhere only if another node holds a current
-copy of every one of its volumes. A service whose other copies are older
-stays stopped until you accept the older data, interactively or with
---accept-stale-data. A service whose only copy is on the worker stays
+the worker. A service starts elsewhere on its own only if each of its
+volumes has a single current copy on another node. With more copies, a copy
+elsewhere may lack writes the service made through the worker after the
+worker lost contact with the cluster, and Longhorn's records cannot show
+that. Such a service, and one whose other copies are known to be older, stays
+stopped until you accept that those writes are lost, interactively or with
+--accept-stale-data. Without a terminal, pass --yes to stop k3s on a worker
+that answers over SSH. A service whose only copy is on the worker stays
 stopped until the worker rejoins or the service is deleted and restored from
 a backup taken before the fence. kip also checks services paused by a
 migration whose data transfer runs on the worker. After checking the services,
@@ -60,7 +64,7 @@ give it up, run 'kip node remove <node> --force'.`,
 func init() {
 	nodeFenceCmd.Flags().Bool("powered-off", false, "confirm that the unreachable worker is powered off and stays off until 'kip node add'")
 	nodeFenceCmd.Flags().Bool("yes", false, "stop k3s on a worker that answers over SSH without asking for confirmation")
-	nodeFenceCmd.Flags().Bool("accept-stale-data", false, "start services whose only other copies are older than the data on the worker")
+	nodeFenceCmd.Flags().Bool("accept-stale-data", false, "start services using other nodes' copies that may lack writes made on the worker")
 	nodeFenceCmd.Flags().String("ssh-key", "", "path to SSH private key")
 	nodeFenceCmd.Flags().Duration("timeout", 10*time.Minute, "how long to wait for the worker's services to run on other nodes")
 	nodeCmd.AddCommand(nodeFenceCmd)
@@ -75,6 +79,7 @@ type fenceCluster interface {
 	KubeletAnswers(address string) (bool, error)
 	View(node string) (installer.FenceView, error)
 	Stop(ns, name string, mark installer.FenceStopMark) error
+	MarkMayLackWrites(ns, name string) error
 	Start(ns, name string) error
 	Taint(node string) error
 	FailTransfer(ns, name, reason string) error
@@ -508,19 +513,26 @@ func (f *nodeFence) stopStale(rec *installer.NodeRecord) (installer.FenceView, e
 	}
 	kept := rec.Fence.Stopped[:0:0]
 	for _, svc := range view.Services {
-		fresh := installer.JudgeFreshness(rec.Name, svc.Volumes, view.Replicas)
+		fresh, err := f.judge(rec.Name, svc, view)
+		if err != nil {
+			return view, err
+		}
 		if fresh.Current {
 			continue
 		}
 		if svc.Stop == nil {
-			if err := f.Cluster.Stop(svc.Namespace, svc.StatefulSet, installer.FenceStopMark{Node: rec.Name, Reason: fresh.Reason, Volumes: svc.Volumes, Replicas: svc.Replicas}); err != nil {
+			if err := f.Cluster.Stop(svc.Namespace, svc.StatefulSet, installer.FenceStopMark{Node: rec.Name, Reason: fresh.Reason, Volumes: svc.Volumes, Replicas: svc.Replicas, MayLackWrites: fresh.MayLackWrites}); err != nil {
 				return view, err
 			}
-			say(f.Out, "  ✔  Stopped %s: no other node holds a current copy of its data\n", svc.Label())
+			if fresh.Reason == installer.FenceStopUnverified {
+				say(f.Out, "  ✔  Stopped %s: it wrote through %s, so its copies on other nodes may lack writes %s made after it lost contact with the cluster\n", svc.Label(), rec.Name, rec.Name)
+			} else {
+				say(f.Out, "  ✔  Stopped %s: no other node holds a current copy of its data\n", svc.Label())
+			}
 		}
 		entry := stopEntry(*rec, svc.Namespace, svc.StatefulSet)
 		entry.Reason = fresh.Reason
-		if fresh.Reason != installer.FenceStopStale {
+		if !installer.NeedsConsent(fresh.Reason) {
 			entry.Consent = nil
 		} else if !installer.SameStamps(entry.Consent, fresh.Stamps) {
 			entry.Consent = nil
@@ -541,7 +553,23 @@ func (f *nodeFence) stopStale(rec *installer.NodeRecord) (installer.FenceView, e
 	return view, f.stopHolders(rec.Name, view.Holders)
 }
 
-// consent asks whether to start svc on copies older than the node's data.
+// judge checks svc's freshness relative to node and preserves any uncertainty
+// recorded in its stop mark. For a stopped service, it records newly detected
+// uncertainty before deciding whether to start, so rejoin and service start
+// require consent too. A failure to update the mark returns an error.
+func (f *nodeFence) judge(node string, svc installer.FenceService, view installer.FenceView) (installer.Freshness, error) {
+	fresh := installer.JudgeFreshness(node, svc.Volumes, view.Replicas, view.Copies)
+	if svc.Stop != nil && fresh.MayLackWrites && !svc.Stop.MayLackWrites {
+		if err := f.Cluster.MarkMayLackWrites(svc.Namespace, svc.StatefulSet); err != nil {
+			return fresh, err
+		}
+		svc.Stop.MayLackWrites = true
+	}
+	return fresh.KeepDoubt(svc.Stop), nil
+}
+
+// consent asks whether to start svc on copies that may lack writes made
+// through node, unless --accept-stale-data already supplies consent.
 func (f *nodeFence) consent(node string, svc installer.FenceService, fresh installer.Freshness) (bool, error) {
 	if f.AcceptStale {
 		return true, nil
@@ -553,11 +581,19 @@ func (f *nodeFence) consent(node string, svc installer.FenceService, fresh insta
 }
 
 // askStaleConsent shows every copy of svc's volumes with its timestamps and
-// asks whether to start svc on the newest of them.
+// asks whether to start svc on the newest of them, which may lack writes made
+// through node.
 func askStaleConsent(out io.Writer, confirm func(string) (bool, error), node string, svc installer.FenceService, fresh installer.Freshness) (bool, error) {
-	say(out, "\n  No copy of %s is known to be current with its data on %s:\n", svc.Label(), node)
+	if fresh.Reason == installer.FenceStopUnverified {
+		say(out, "\n  %s wrote through %s. kip cannot tell whether these copies hold every write %s made after it lost contact with the cluster:\n", svc.Label(), node, node)
+	} else {
+		say(out, "\n  No copy of %s is known to be current with its data on %s:\n", svc.Label(), node)
+	}
 	for _, s := range fresh.Stamps {
 		say(out, "    %s  %s on %s  healthy at %s, last failed at %s%s\n", s.Volume, s.Name, s.Node, orDash(s.HealthyAt), orDash(s.LastFailedAt), failedNote(s.FailedAt))
+	}
+	if fresh.Reason == installer.FenceStopUnverified {
+		return confirm(fmt.Sprintf("  Start %s on the newest of these copies? Writes that exist only on %s are then lost. [y/N] ", svc.Label(), node))
 	}
 	return confirm(fmt.Sprintf("  Start %s on the newest of these copies? Writes made since then are lost. [y/N] ", svc.Label()))
 }
@@ -656,14 +692,17 @@ func (f *nodeFence) startConsented(rec *installer.NodeRecord) error {
 		if svc.Stop == nil {
 			continue
 		}
-		fresh := installer.JudgeFreshness(rec.Name, svc.Volumes, view.Replicas)
+		fresh, err := f.judge(rec.Name, svc, view)
+		if err != nil {
+			return err
+		}
 		var consent []config.ReplicaStamp
 		for _, s := range rec.Fence.Stopped {
 			if s.Namespace == svc.Namespace && s.StatefulSet == svc.StatefulSet {
 				consent = s.Consent
 			}
 		}
-		if !fresh.Current && (fresh.Reason != installer.FenceStopStale || !installer.SameStamps(consent, fresh.Stamps)) {
+		if !fresh.Current && (!installer.NeedsConsent(fresh.Reason) || !installer.SameStamps(consent, fresh.Stamps)) {
 			continue
 		}
 		if err := f.Cluster.Start(svc.Namespace, svc.StatefulSet); err != nil {
@@ -698,10 +737,11 @@ func (f *nodeFence) report(rec installer.NodeRecord, view installer.FenceView) e
 			f.reportStopped(rec, svc, *stop)
 			continue
 		}
-		current := installer.JudgeFreshness(rec.Name, svc.Volumes, view.Replicas).Current
+		fresh := installer.JudgeFreshness(rec.Name, svc.Volumes, view.Replicas, view.Copies).KeepDoubt(svc.Stop)
+		current := fresh.Current
 		pods := svc.Pods
 		if len(pods) == 0 && current && svc.Stop == nil {
-			say(f.Out, "  ✔  %s had no pod on %s, so there is none to move. Its data is current on another node\n", svc.Label(), rec.Name)
+			say(f.Out, "  ✔  %s had no pod on %s, so there is none to move. The only copy of its data is on another node\n", svc.Label(), rec.Name)
 			continue
 		}
 		if len(pods) == 0 {
@@ -724,9 +764,12 @@ func (f *nodeFence) report(rec installer.NodeRecord, view installer.FenceView) e
 			say(f.Out, "  ⚠  %s is not running on another node yet. Check it with 'kip status'\n", svc.Label())
 			continue
 		}
-		if current {
-			say(f.Out, "  ✔  %s runs again on %s, on data current up to when %s stopped reporting\n", svc.Label(), where, rec.Name)
-		} else {
+		switch {
+		case current:
+			say(f.Out, "  ✔  %s runs again on %s, on the only copy of its data\n", svc.Label(), where)
+		case fresh.Reason == installer.FenceStopUnverified:
+			say(f.Out, "  ✔  %s runs again on %s, using copies that may lack writes made through %s. You accepted this risk. Any writes missing from those copies are lost\n", svc.Label(), where, rec.Name)
+		default:
 			say(f.Out, "  ✔  %s runs again on %s, on older copies of its data, as accepted. Writes made on %s after those copies fell behind are lost\n", svc.Label(), where, rec.Name)
 		}
 	}
@@ -760,7 +803,11 @@ func (f *nodeFence) reportStopped(rec installer.NodeRecord, svc installer.FenceS
 		say(f.Out, "  ⚠  %s stays stopped: the only copy of its data is on %s. Bring the worker back with 'kip node add %s'. If it is lost, %s\n", svc.Label(), rec.Name, rec.Host, restoreAdvice(svc.Namespace, svc.StatefulSet))
 		return
 	}
-	say(f.Out, "  ⚠  %s stays stopped: its other copies may be older than its data on %s. Bring the worker back with 'kip node add %s', or start it on the older data with 'kip node fence %s --accept-stale-data'\n", svc.Label(), rec.Name, rec.Host, rec.Name)
+	if stop.Reason == installer.FenceStopUnverified {
+		say(f.Out, "  ⚠  %s stays stopped: writes %s made after it lost contact with the cluster may exist only on %s. Start it on the other copies with 'kip node fence %s --accept-stale-data', which gives up those writes. Keeping it stopped cannot preserve those writes because kip cannot recover them yet\n", svc.Label(), rec.Name, rec.Name, rec.Name)
+		return
+	}
+	say(f.Out, "  ⚠  %s stays stopped: its other copies may be older than its data on %s. Start it on the older data with 'kip node fence %s --accept-stale-data', which gives up the newer writes. A rejoin with 'kip node add %s' asks the same question first because Longhorn can rebuild the worker's copies from the older ones. kip cannot preserve the newer writes yet\n", svc.Label(), rec.Name, rec.Name, rec.Host)
 }
 
 // waitRunning waits until every pod is Ready on a node other than node. It
@@ -815,6 +862,10 @@ func (s fenceServer) View(node string) (installer.FenceView, error) {
 
 func (s fenceServer) Stop(ns, name string, mark installer.FenceStopMark) error {
 	return installer.StopForFence(s.master, ns, name, mark)
+}
+
+func (s fenceServer) MarkMayLackWrites(ns, name string) error {
+	return installer.MarkMayLackWrites(s.master, ns, name)
 }
 
 func (s fenceServer) Start(ns, name string) error {

@@ -46,7 +46,21 @@ func reportStranded(ctx context.Context, out io.Writer, client kubernetes.Interf
 		}
 		var mark installer.FenceStopMark
 		_ = json.Unmarshal([]byte(raw), &mark)
-		stopped = append(stopped, fmt.Sprintf("%s (%s), stopped when %s was fenced. Start it with 'kip service start %s'", s.Name, s.Namespace, orDash(mark.Node), s.Name))
+		var hint string
+		switch {
+		case mark.Reason == installer.FenceStopOnlyCopy:
+			hint = fmt.Sprintf("At least one of its volumes has its only copy on %s. Start it after %s rejoins with 'kip node add %s'", orDash(mark.Node), orDash(mark.Node), recordedHost(records, mark.Node))
+			if mark.MayLackWrites {
+				hint += ". Rejoining requires consent to give up writes that may be missing from its other copies"
+			}
+		case mark.MayLackWrites || mark.Reason == installer.FenceStopUnverified:
+			hint = fmt.Sprintf("Its copies may lack writes made through %s. Start it with 'kip service start %s --accept-stale-data', which gives up those writes", orDash(mark.Node), s.Name)
+		case mark.Reason == installer.FenceStopStale:
+			hint = fmt.Sprintf("Its other copies may be older. Start it on them with 'kip service start %s --accept-stale-data', which gives up the newer writes on %s", s.Name, orDash(mark.Node))
+		default:
+			hint = fmt.Sprintf("Start it with 'kip service start %s'", s.Name)
+		}
+		stopped = append(stopped, fmt.Sprintf("%s (%s), stopped when %s was fenced. %s", s.Name, s.Namespace, orDash(mark.Node), hint))
 	}
 	if len(down) == 0 && len(stopped) == 0 {
 		return
@@ -128,13 +142,14 @@ func strandedOn(node corev1.Node, found []stranded.Service, replicas []stranded.
 }
 
 // currentCopyText names the nodes other than node that hold a current copy
-// of every one of volumes.
+// of every one of volumes. Such a copy may still lack writes made through
+// node, which the fence checks.
 func currentCopyText(node string, volumes []string, replicas []stranded.Replica) string {
 	copies := stranded.CopiesOfAll(volumes, node, replicas)
 	if len(copies) == 0 {
 		return "no other node holds a current copy of its data"
 	}
-	return "current copy on " + strings.Join(copies, ", ")
+	return "another copy on " + strings.Join(copies, ", ")
 }
 
 func readReplicas(ctx context.Context, dyn dynamic.Interface) ([]stranded.Replica, error) {
@@ -150,4 +165,14 @@ func readReplicas(ctx context.Context, dyn dynamic.Interface) ([]stranded.Replic
 		return nil, err
 	}
 	return stranded.ReplicasFromJSON(data)
+}
+
+// recordedHost returns the node's recorded host, or "<host>" if no record matches.
+func recordedHost(records []installer.NodeRecord, name string) string {
+	for _, r := range records {
+		if r.Name == name {
+			return r.Host
+		}
+	}
+	return "<host>"
 }
