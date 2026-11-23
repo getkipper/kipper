@@ -98,6 +98,7 @@ const DataUpdatedAtAnnotation = "kipper.run/data-updated-at"
 // +kubebuilder:validation:XValidation:rule="!has(self.health) || !has(self.health.port) || self.health.port != self.port + 10000",message="health.port must not be port + 10000, which Kipper uses for the instance proxy"
 type AppSpec struct {
 	// Image is the container image to deploy.
+	// +kubebuilder:validation:Pattern=`^\S*$`
 	Image string `json:"image"`
 
 	// Port is the container port the application listens on.
