@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1337,4 +1339,32 @@ func TestPlatformConfigReconciler_LeavesADisabledChartThatIsAlreadyDeleting(t *t
 	}
 
 	assert.Zero(t, chartDeletes)
+}
+
+// TestPlatformConfigReconciler_KeepsAMissingChartOutOfTheDefaultLog verifies that
+// expected chart absences, such as Velero when kip installs without backups,
+// stay out of the default log. This avoids repeated messages during the
+// reconciler's five-second polling while waiting for chart deletion.
+func TestPlatformConfigReconciler_KeepsAMissingChartOutOfTheDefaultLog(t *testing.T) {
+	scheme := testScheme()
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec:       kipperv1.PlatformConfigSpec{Profile: platform.ProfileMedium},
+	}
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pc, nodeExporterCertSecret()).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+	var lines []string
+	logger := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: 0})
+	ctx := logr.NewContext(context.Background(), logger)
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+	require.NoError(t, err)
+
+	for _, line := range lines {
+		assert.NotContains(t, line, "HelmChart not present")
+	}
 }
