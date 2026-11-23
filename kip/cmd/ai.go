@@ -339,12 +339,16 @@ func bundleModelState(ctx context.Context, clientset kubernetes.Interface, expec
 	if err != nil {
 		return fmt.Sprintf("?  model %q: malformed Ollama /api/tags response", expectedModel)
 	}
+	return modelLoadedLine(expectedModel, loaded)
+}
+
+func modelLoadedLine(expectedModel string, loaded []string) string {
 	for _, name := range loaded {
 		if name == expectedModel {
 			return fmt.Sprintf("✔  model %q loaded", expectedModel)
 		}
 	}
-	return fmt.Sprintf("✗  model %q not loaded; run 'kubectl logs -n %s deployment/ollama' for pull progress", expectedModel, ai.Namespace)
+	return fmt.Sprintf("✗  model %q is not loaded. Run 'kip ai logs ollama' to see the download progress.", expectedModel)
 }
 
 // parseLoadedModels decodes the Ollama /api/tags response shape and

@@ -91,15 +91,15 @@ func (i *Installer) waitForEmbeddingModelLoaded(ctx context.Context, model strin
 			}
 			if got.Status.Failed > 0 {
 				return fmt.Errorf(
-					"embedding model %q did not load; check 'kubectl logs -n %s job/%s' and 'kubectl logs -n %s deployment/ollama'",
-					model, Namespace, jobName, Namespace,
+					"embedding model %q did not load. See the download job's log with 'kip ai logs embedding-pull' and Ollama's log with 'kip ai logs ollama'",
+					model,
 				)
 			}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf(
-				"embedding model %q not ready within %s; check 'kubectl logs -n %s deployment/ollama' for pull progress",
-				model, i.timeout(), Namespace,
+				"embedding model %q was not ready within %s. See the download progress with 'kip ai logs ollama'",
+				model, i.timeout(),
 			)
 		}
 		select {
@@ -124,7 +124,7 @@ func (i *Installer) waitForEmbeddingModelLoaded(ctx context.Context, model strin
 // which busybox wget handles cleanly.
 func buildEmbeddingPullJob(model string) *batchv1.Job {
 	noBackoff := int32(0)
-	ttl := int32(60)
+	ttl := int32(oneShotJobTTL / time.Second)
 	deadline := int64(1800) // 30 minutes upper bound on the in-pod loop.
 
 	script := fmt.Sprintf(`set -eu

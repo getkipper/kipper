@@ -748,6 +748,21 @@ kip ai uninstall                          # remove the bundle and wipe its data
 | `-y, --yes` | install | `false` | Skip the auto-configure prompt |
 | `--reinstall-failed` | install | `false` | Apply the charts even when a Helm release is not deployed, which can reinstall it. See [When a chart upgrade fails](./ai#when-a-chart-upgrade-fails) |
 
+### kip ai logs {#kip-ai-logs}
+
+Show the logs of one AI bundle component: `ollama`, `librechat`, `mongodb`, `meilisearch`, `qdrant` or `anythingllm`. `model-probe` checks that the chat model is available, and `embedding-pull` downloads and checks the embedding model. For these two components, logs come from the newest existing job, and kip keeps a finished job for an hour. With `--chart`, the command shows logs from the Helm controller's job that installs or upgrades the component's chart.
+
+```bash
+kip ai logs ollama --follow               # watch a model download
+kip ai logs librechat --chart             # why a LibreChat chart upgrade failed
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--chart` | `false` | Show logs from the Helm job for the component's chart |
+| `-f, --follow` | `false` | Keep streaming new lines until all log streams end or you press Ctrl+C |
+| `--tail` | `100` | Lines to show from the end of each pod's log |
+
 ### AI bundle health on the Platform page {#ai-bundle-health-on-the-platform-page}
 
 The Platform page surfaces a drift check for each installed AI bundle. The check reads the `kipper-ai-bundle-state` and `kipper-rag-bundle-state` ConfigMaps in `kipper-ai` and confirms every expected workload (Ollama, LibreChat, AnythingLLM, Qdrant, plus their Ingresses) still exists.

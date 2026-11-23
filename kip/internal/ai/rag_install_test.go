@@ -71,8 +71,9 @@ func TestWaitForEmbeddingModelLoadedFailsWhenJobFailed(t *testing.T) {
 	err := inst.waitForEmbeddingModelLoaded(context.Background(), DefaultEmbeddingModel)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not load")
-	assert.Contains(t, err.Error(), "kubectl logs",
+	assert.Contains(t, err.Error(), "'kip ai logs embedding-pull'",
 		"failure message must point at the right diagnostic so a user knows where to look")
+	assert.NotContains(t, err.Error(), "kubectl")
 	assert.Contains(t, err.Error(), DefaultEmbeddingModel,
 		"failure message must name the model that failed so a user with multiple bundles knows which to check")
 }
