@@ -10,7 +10,10 @@
 // than a matching pair.
 package servicecatalog
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // ConditionCredentialsReady is the status condition a service carries while its
 // credentials Secret cannot be used, under one of two reasons that no retry
@@ -83,6 +86,76 @@ func CheckNewVersion(serviceType, version string) error {
 		return fmt.Errorf("minio %s is not available: MinIO no longer publishes images, and Kipper builds %s only", version, MinIORelease)
 	}
 	return nil
+}
+
+// majorUpgradeNotes provides engine-specific upgrade steps for the confirmation error.
+var majorUpgradeNotes = map[string]string{
+	"mongodb":  ". Upgrade MongoDB one major version at a time and specify the release, such as 8.0",
+	"rabbitmq": ". To upgrade RabbitMQ 3.13 to 4.3 or later, upgrade to 4.2 first and specify that release explicitly",
+}
+
+// CheckVersionChange checks whether next may replace the running image tag on
+// existing data. Identical tags, MinIO, and MailHog always pass. Callers must
+// validate MinIO releases separately with CheckNewVersion. MailHog keeps no data.
+//
+// For other services, leading decimal integers determine the major versions.
+// Equal majors pass. To protect data compatibility, lower majors and any
+// Postgres major change return an error even with majorUpgrade. Higher majors
+// require majorUpgrade because data rewritten by the new version may be unreadable
+// by the old version. If either major cannot be parsed, majorUpgrade permits the
+// change for any service, including Postgres. A nil error means this policy allows
+// the change, not that the engine supports the specific upgrade path.
+func CheckVersionChange(serviceType, running, next string, majorUpgrade bool) error {
+	if serviceType == "minio" || serviceType == "mailhog" || running == next {
+		return nil
+	}
+	from, fromOK := leadingMajor(running)
+	to, toOK := leadingMajor(next)
+	switch {
+	case fromOK && toOK && from == to:
+		return nil
+	case !fromOK || !toOK:
+		if majorUpgrade {
+			return nil
+		}
+		return fmt.Errorf("kip cannot tell whether %s %s is a different major version from %s. A major upgrade can permanently change the data format. "+
+			"Take a backup, then run the command again with --major-upgrade", serviceType, next, running)
+	case serviceType == "postgres":
+		return fmt.Errorf("postgres %d cannot read data written by postgres %d. %s", to, from, moveDataHint(serviceType, next))
+	case to < from:
+		return fmt.Errorf("%s cannot go back from version %d to %d on the same data, because %d cannot read data written by %d. %s",
+			serviceType, from, to, to, from, moveDataHint(serviceType, next))
+	case !majorUpgrade:
+		return fmt.Errorf("moving %s from version %d to %d rewrites its data, and %d cannot read it afterward. "+
+			"Take a backup, then run the command again with --major-upgrade%s", serviceType, from, to, from, majorUpgradeNotes[serviceType])
+	}
+	return nil
+}
+
+// moveDataHint recommends a recovery path when an in-place version change is
+// rejected. Only Postgres, MySQL, and MongoDB support kip service export and
+// import into a new service. Other engines need a backup taken before the upgrade
+// that includes the service's earlier version.
+func moveDataHint(serviceType, version string) string {
+	switch serviceType {
+	case "postgres", "mysql", "mongodb":
+		return fmt.Sprintf("Create a new service at version %s and move the data with 'kip service export' and 'kip service import'", version)
+	}
+	return "Restore a backup taken before the upgrade, which includes the service's earlier version"
+}
+
+// leadingMajor parses the leading decimal integer in a tag such as 16-alpine
+// or 8.0. It returns false if the tag has no leading digits or the integer overflows.
+func leadingMajor(tag string) (int, bool) {
+	end := 0
+	for end < len(tag) && tag[end] >= '0' && tag[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	major, err := strconv.Atoi(tag[:end])
+	return major, err == nil
 }
 
 // DefaultResources returns default CPU and memory requests as Kubernetes quantities.

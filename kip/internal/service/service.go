@@ -36,6 +36,7 @@ type Options struct {
 	MemoryLimit  string
 	CPULimit     string
 	ImageVersion string
+	MajorUpgrade bool
 }
 
 // Status holds summary info for a running service.
@@ -466,19 +467,27 @@ func (m *Manager) workloadIsKippers(ctx context.Context, namespace, name string)
 	return workload, nil
 }
 
-// UpdateResult describes what changed during an update.
+// UpdateResult describes what changed during an update. Version is the resolved
+// image tag when a version was requested, even if ImageChanged is false. It is
+// empty when no version was requested.
 type UpdateResult struct {
 	StorageExpanded  bool
 	StorageDeclared  bool
 	ResourcesChanged bool
 	ImageChanged     bool
 	NeedsRestart     bool
+	Version          string
 }
 
 // Update modifies a running service's resources, storage, or image version.
 // Storage changes update the declared size and expand claims other than local-path
 // claims without restarting the pod. StorageDeclared reports local-path claims,
-// whose requested size is left unchanged. Resource and image changes trigger a restart.
+// whose requested size is left unchanged. Resource and image changes are saved to
+// the Service CR for its reconciler to apply and restart the pod.
+// Numeric versions preserve the running image variant. Other tags are used as
+// given. Version changes must pass servicecatalog.CheckNewVersion and
+// servicecatalog.CheckVersionChange. Options.MajorUpgrade confirms higher major
+// versions or unparseable tags under that policy.
 // Invalid storage requests fail before any writes. Later failures may leave partial changes.
 func (m *Manager) Update(ctx context.Context, namespace, name string, opts Options) (*UpdateResult, error) {
 	result := &UpdateResult{}
@@ -508,19 +517,25 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 	container := &ss.Spec.Template.Spec.Containers[0]
 
 	if opts.ImageVersion != "" {
-		serviceType := ss.Labels[labels.ServiceType]
-		if err := servicecatalog.CheckNewVersion(serviceType, opts.ImageVersion); err != nil {
+		if err := servicecatalog.CheckNewVersion(ss.Labels[labels.ServiceType], opts.ImageVersion); err != nil {
 			return nil, err
 		}
-		spec, ok := catalog[serviceType]
-		if ok {
-			newImage := imageWithVersion(spec.Image, opts.ImageVersion)
-			if container.Image != newImage {
-				container.Image = newImage
-				result.ImageChanged = true
-				result.NeedsRestart = true
-			}
+		running := imageTag(container.Image)
+		tag := opts.ImageVersion
+		if bareVersion.MatchString(tag) {
+			// Preserve the running image's variant, such as -alpine, to keep the same base distribution.
+			tag = imageTag(imageWithVersion(container.Image, tag))
 		}
+		if err := servicecatalog.CheckVersionChange(ss.Labels[labels.ServiceType], running, tag, opts.MajorUpgrade); err != nil {
+			return nil, err
+		}
+		changed, err := m.setServiceVersion(ctx, namespace, name, tag, running)
+		if err != nil {
+			return nil, err
+		}
+		result.ImageChanged = changed
+		result.NeedsRestart = changed
+		result.Version = tag
 	}
 
 	// Save resource bounds on the Service CR for its reconciler to apply.
@@ -530,12 +545,6 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 		}
 		result.ResourcesChanged = true
 		result.NeedsRestart = true
-	}
-
-	if result.ImageChanged {
-		if _, err := m.Client.AppsV1().StatefulSets(namespace).Update(ctx, ss, metav1.UpdateOptions{}); err != nil {
-			return nil, fmt.Errorf("updating statefulset: %w", err)
-		}
 	}
 
 	if storage != nil {
@@ -1067,19 +1076,20 @@ func serviceLabels(name, serviceType string) map[string]string {
 
 func strPtr(s string) *string { return &s }
 
-// versionLedTag matches a default tag whose leading token is a bare version,
-// which is what makes the rest of it a variant rather than part of the version.
+// bareVersion matches a version without a variant, such as 16 or 8.0.
+var bareVersion = regexp.MustCompile(`^\d+(\.\d+)*$`)
+
+// versionLedTag identifies numeric version prefixes so the remaining suffix can
+// be preserved as an image variant.
 var versionLedTag = regexp.MustCompile(`^\d+(\.\d+)*-`)
 
-// imageWithVersion applies a user's --version to a catalog image, keeping the
-// variant the catalog chose.
+// imageWithVersion applies a user's --version to an image, preserving its variant.
 //
-// Most catalog entries name a version and a variant, so `--version 15` against
-// postgres:16-alpine has to produce postgres:15-alpine rather than postgres:15,
-// which is a different image. That only holds where the default tag leads with
-// a version: MinIO tags releases as RELEASE.2025-09-07T16-13-09Z, where the
-// hyphens are inside the timestamp, and splitting on the first one would append
-// half of the old date to the new tag.
+// Most catalog entries include a variant, so --version 15 changes postgres:16-alpine
+// to postgres:15-alpine to retain the Alpine image. Only tags starting with a
+// numeric version have their variant preserved. MinIO release tags such as
+// RELEASE.2025-09-07T16-13-09Z contain hyphens in the timestamp, so splitting at
+// the first hyphen would append part of the old date to the new tag.
 func imageWithVersion(image, version string) string {
 	base, tag, hasTag := strings.Cut(image, ":")
 	if !hasTag || !versionLedTag.MatchString(tag) {
@@ -1220,8 +1230,53 @@ func (m *Manager) setServiceStorage(ctx context.Context, namespace, name, size s
 	})
 }
 
-// setServiceResources writes fixed memory and CPU sizes to a Service CR. A
-// Service's values are always the user's.
+// setServiceVersion records the image tag on the Service CR for its reconciler
+// to apply to the StatefulSet, retrying update conflicts. It reports whether the
+// CR changed. An empty CR version is treated as running for this comparison.
+func (m *Manager) setServiceVersion(ctx context.Context, namespace, name, version, running string) (bool, error) {
+	services := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace)
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		svc, err := services.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("service %q not found", name)
+			}
+			return fmt.Errorf("getting service: %w", err)
+		}
+		// Compare with the CR so a request for the running version can cancel
+		// a pending change before the reconciler applies it.
+		current, _, _ := unstructured.NestedString(svc.Object, "spec", "version")
+		if current == "" {
+			current = running
+		}
+		if current == version {
+			changed = false
+			return nil
+		}
+		if err := unstructured.SetNestedField(svc.Object, version, "spec", "version"); err != nil {
+			return fmt.Errorf("setting version: %w", err)
+		}
+		if _, err := services.Update(ctx, svc, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	return changed, err
+}
+
+// imageTag returns the suffix after a colon in the final image path segment,
+// or "" if there is no colon. Callers must supply tag references rather than digests.
+func imageTag(image string) string {
+	if i := strings.LastIndex(image, ":"); i > strings.LastIndex(image, "/") {
+		return image[i+1:]
+	}
+	return ""
+}
+
+// setServiceResources records user-specified memory and CPU sizes on the Service
+// CR, setting each supplied size as both its request and limit.
 func (m *Manager) setServiceResources(ctx context.Context, namespace, name, memory, cpu string) error {
 	services := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {

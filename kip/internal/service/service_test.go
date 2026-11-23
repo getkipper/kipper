@@ -389,20 +389,67 @@ func TestInfoErrorsWhenNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
-func TestUpdateImageVersion(t *testing.T) {
-	client := fake.NewSimpleClientset() //nolint:staticcheck
-	mgr := &Manager{Client: client}
-	ctx := context.Background()
+func postgresServiceCR() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": manifest.ServiceGVR.GroupVersion().String(), "kind": "Service",
+		"metadata": map[string]interface{}{"name": "db", "namespace": "default"},
+		"spec":     map[string]interface{}{"type": "postgres"},
+	}}
+}
 
+// TestUpdateImageVersionWritesTheService guards against updating the StatefulSet
+// directly. The reconciler builds its image from the Service CR and would revert
+// a direct change on its next pass.
+func TestUpdateImageVersionWritesTheService(t *testing.T) {
+	ctx := context.Background()
+	mgr := managerWith(nil, postgresServiceCR())
 	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
 
-	result, err := mgr.Update(ctx, "default", "db", Options{ImageVersion: "15"})
+	result, err := mgr.Update(ctx, "default", "db", Options{ImageVersion: "16.6"})
 	require.NoError(t, err)
 	assert.True(t, result.ImageChanged)
 	assert.True(t, result.NeedsRestart)
+	assert.Equal(t, "16.6-alpine", result.Version)
 
-	ss, _ := client.AppsV1().StatefulSets("default").Get(ctx, "db", metav1.GetOptions{})
-	assert.Equal(t, "postgres:15-alpine", ss.Spec.Template.Spec.Containers[0].Image)
+	got, err := mgr.Dynamic.Resource(manifest.ServiceGVR).Namespace("default").Get(ctx, "db", metav1.GetOptions{})
+	require.NoError(t, err)
+	version, _, _ := unstructured.NestedString(got.Object, "spec", "version")
+	assert.Equal(t, "16.6-alpine", version)
+
+	ss, _ := mgr.Client.AppsV1().StatefulSets("default").Get(ctx, "db", metav1.GetOptions{})
+	assert.Equal(t, "postgres:16-alpine", ss.Spec.Template.Spec.Containers[0].Image,
+		"the StatefulSet's image is the reconciler's to write")
+}
+
+// TestUpdateImageVersionKeepsTheRunningVariant preserves the Debian image used
+// by kip service add --version 16 (postgres:16). Switching to Alpine changes the
+// C library used for libc-based collations, so updates preserve the running variant.
+func TestUpdateImageVersionKeepsTheRunningVariant(t *testing.T) {
+	ctx := context.Background()
+	mgr := managerWith(nil, postgresServiceCR())
+	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
+	ss, _ := mgr.Client.AppsV1().StatefulSets("default").Get(ctx, "db", metav1.GetOptions{})
+	ss.Spec.Template.Spec.Containers[0].Image = "postgres:16"
+	_, err := mgr.Client.AppsV1().StatefulSets("default").Update(ctx, ss, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	_, err = mgr.Update(ctx, "default", "db", Options{ImageVersion: "16.6"})
+	require.NoError(t, err)
+
+	got, _ := mgr.Dynamic.Resource(manifest.ServiceGVR).Namespace("default").Get(ctx, "db", metav1.GetOptions{})
+	version, _, _ := unstructured.NestedString(got.Object, "spec", "version")
+	assert.Equal(t, "16.6", version)
+}
+
+func TestUpdateImageVersionToTheRunningVersionChangesNothing(t *testing.T) {
+	ctx := context.Background()
+	mgr := managerWith(nil, postgresServiceCR())
+	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
+
+	result, err := mgr.Update(ctx, "default", "db", Options{ImageVersion: "16"})
+	require.NoError(t, err)
+	assert.False(t, result.ImageChanged)
+	assert.False(t, result.NeedsRestart)
 }
 
 // Resources land on the Service CR, whose reconciler is the only writer of
@@ -794,4 +841,63 @@ func TestEveryCatalogServiceHasAConnectionURL(t *testing.T) {
 		conn := ConnectionInfo{Type: name, Host: "svc", Port: spec.Port, Username: "app", Password: "pw", Database: "app"}
 		assert.NotEmpty(t, conn.formatURL(spec.URLFormat, name), name)
 	}
+}
+
+// TestUpdateImageVersionReplacesAPendingVersion checks that requesting the running
+// version cancels a pending CR update before the reconciler applies it.
+func TestUpdateImageVersionReplacesAPendingVersion(t *testing.T) {
+	ctx := context.Background()
+	cr := postgresServiceCR()
+	require.NoError(t, unstructured.SetNestedField(cr.Object, "17-alpine", "spec", "version"))
+	mgr := managerWith(nil, cr)
+	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
+
+	result, err := mgr.Update(ctx, "default", "db", Options{ImageVersion: "16"})
+	require.NoError(t, err)
+	assert.True(t, result.ImageChanged)
+
+	got, _ := mgr.Dynamic.Resource(manifest.ServiceGVR).Namespace("default").Get(ctx, "db", metav1.GetOptions{})
+	version, _, _ := unstructured.NestedString(got.Object, "spec", "version")
+	assert.Equal(t, "16-alpine", version)
+}
+
+func serviceVersion(t *testing.T, mgr *Manager) string {
+	t.Helper()
+	got, err := mgr.Dynamic.Resource(manifest.ServiceGVR).Namespace("default").Get(context.Background(), "db", metav1.GetOptions{})
+	require.NoError(t, err)
+	version, _, _ := unstructured.NestedString(got.Object, "spec", "version")
+	return version
+}
+
+// TestUpdateImageVersionKeepsAVersionThatNamesItsVariant checks that an explicit
+// variant is stored as given, so 16.6-bookworm keeps only the requested suffix.
+func TestUpdateImageVersionKeepsAVersionThatNamesItsVariant(t *testing.T) {
+	ctx := context.Background()
+	mgr := managerWith(nil, postgresServiceCR())
+	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
+
+	_, err := mgr.Update(ctx, "default", "db", Options{ImageVersion: "16.6-bookworm"})
+	require.NoError(t, err)
+	assert.Equal(t, "16.6-bookworm", serviceVersion(t, mgr))
+}
+
+// TestUpdateImageVersionRefusesAPostgresMajorChange checks that incompatible
+// data formats cause rejection before any writes, even with confirmation.
+func TestUpdateImageVersionRefusesAPostgresMajorChange(t *testing.T) {
+	ctx := context.Background()
+	mgr := managerWith(nil, postgresServiceCR())
+	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
+
+	_, err := mgr.Update(ctx, "default", "db", Options{ImageVersion: "17", MajorUpgrade: true})
+	require.ErrorContains(t, err, "kip service export")
+	assert.Equal(t, "", serviceVersion(t, mgr))
+}
+
+func TestUpdateImageVersionErrorsWithoutTheService(t *testing.T) {
+	ctx := context.Background()
+	mgr := managerWith(nil)
+	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
+
+	_, err := mgr.Update(ctx, "default", "db", Options{ImageVersion: "16.6"})
+	require.ErrorContains(t, err, `service "db" not found`)
 }
