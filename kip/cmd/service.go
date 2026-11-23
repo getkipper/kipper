@@ -92,6 +92,13 @@ var serviceUpdateCmd = &cobra.Command{
 
 Storage expansion is live (no restart needed).
 Memory, CPU, and version changes restart the service pod.
+A numeric version keeps the current image variant, such as -alpine.
+A version with an explicit variant is used as given. To protect data compatibility,
+kip rejects Postgres major version changes and major downgrades for engines that
+store data. MinIO accepts only the release Kipper builds. Major upgrades for MySQL,
+MongoDB, Redis, RabbitMQ, and OpenSearch require --major-upgrade because the new
+data format can prevent rollback. Tags whose major version cannot be determined
+also require --major-upgrade.
 Changing --copies converts the live volume: Longhorn builds the new copy
 first, and a reduction keeps the copy on the server. A reduction stops the
 service while Longhorn removes the extra copy and starts it again once the copy
@@ -105,7 +112,8 @@ blocked. Run it again once the reason clears.
 Examples:
   kip service update mydb --storage 20Gi
   kip service update mydb --memory 2Gi --cpu 2
-  kip service update mydb --version 17
+  kip service update mydb --version 16.6
+  kip service update cache --version 8 --major-upgrade
   kip service update mydb --copies 2 --wait`,
 	Args: cobra.ExactArgs(1),
 	RunE: runServiceUpdate,
@@ -168,6 +176,7 @@ func init() {
 	serviceUpdateCmd.Flags().String("memory", "", "new fixed memory size, request and limit alike (e.g. 1Gi)")
 	serviceUpdateCmd.Flags().String("cpu", "", "new fixed CPU size, request and limit alike (e.g. 1)")
 	serviceUpdateCmd.Flags().String("version", "", "new image version")
+	serviceUpdateCmd.Flags().Bool("major-upgrade", false, "With --version, confirm a major upgrade or an unrecognized version tag. Data format changes can prevent rollback.")
 	serviceUpdateCmd.Flags().String("tls", "", "Postgres only: required, on or off. The database restarts once to switch")
 	serviceUpdateCmd.Flags().Bool("consistent-backups", false, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable. Changing this setting restarts the database once.")
 	serviceUpdateCmd.Flags().Int32("copies", 0, copiesUpdateHelp)
@@ -586,6 +595,7 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	memory, _ := cmd.Flags().GetString("memory")
 	cpu, _ := cmd.Flags().GetString("cpu")
 	version, _ := cmd.Flags().GetString("version")
+	majorUpgrade, _ := cmd.Flags().GetBool("major-upgrade")
 	tls, _ := cmd.Flags().GetString("tls")
 
 	dumpSet := cmd.Flags().Changed("consistent-backups")
@@ -702,6 +712,7 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 		MemoryLimit:  memory,
 		CPULimit:     cpu,
 		ImageVersion: version,
+		MajorUpgrade: majorUpgrade,
 	})
 	if err != nil {
 		return err
@@ -728,7 +739,7 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 	if result.ImageChanged {
-		fmt.Printf("  ✔  Image version updated to %s\n", version)
+		fmt.Printf("  ✔  Version set to %s\n", result.Version)
 	}
 	if result.NeedsRestart {
 		fmt.Printf("  ⚠  Pod will restart to apply changes\n")
