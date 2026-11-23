@@ -183,7 +183,8 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Polling keeps copy status current because Longhorn replicas and nodes are not watched.
 	after = earliest(after, storageRequeue(svc.Status.Conditions))
 	after = earliest(after, dumpRetry)
-	// This controller does not watch pods, so deletion conflicts need a retry.
+	// Poll after deletion conflicts and during startup because pod changes
+	// do not trigger reconciliation.
 	if lookAgain && (after == 0 || after > pendingPodRetry) {
 		after = pendingPodRetry
 	}
@@ -811,13 +812,17 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 }
 
 // replaceStuckPod deletes an owned pod that is pending with no assigned node,
+// pending on a Ready, unfenced node with an image pull failure in the service or
+// an init container while the service container is not running,
 // or running on a Ready, unfenced node with both the pod and service container
 // unready, when its revision differs from the StatefulSet's non-empty update
 // revision and the StatefulSet status reflects its current generation.
 // Terminating pods are left alone.
 // This lets template changes, including restarts, reach a hung database whose
 // readiness blocks the StatefulSet rollout.
-// It returns lookAgain on a deletion conflict so the caller can retry.
+// It returns lookAgain on a deletion conflict or while a scheduled, pending pod
+// on an old revision is within startingPodWindow of creation and its service
+// container is not running, so the caller can retry.
 func (r *ServiceReconciler) replaceStuckPod(ctx context.Context, svc *kipperv1.Service) (lookAgain bool, err error) {
 	// Read fresh state and wait for the controller to observe the latest spec
 	// so an outdated revision cannot trigger deletion of an up-to-date pod.
@@ -851,10 +856,15 @@ func (r *ServiceReconciler) replaceStuckPod(ctx context.Context, svc *kipperv1.S
 	// still ready. Require the container to be unready too, so a node outage
 	// alone cannot trigger deletion and leave the pod waiting for termination.
 	unready := pod.Status.Phase == corev1.PodRunning && !podReady(&pod) && !containerReported(&pod, svc.Name)
-	if !unscheduled && !unready {
-		return false, nil
+	// A mistyped version can block readiness on an image pull failure, so
+	// replacing the pod lets the corrected template take effect.
+	imageless := pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName != "" && cannotPullImage(&pod, svc.Name)
+	if !unscheduled && !unready && !imageless {
+		// Poll during startup to catch image pull failures reported later by the
+		// kubelet because this controller does not watch pods.
+		return stillStarting(&pod, svc.Name, time.Now()), nil
 	}
-	if unready {
+	if unready || imageless {
 		// Leave recovery on lost or fenced nodes to the fencing workflow,
 		// which establishes that the old database has stopped before replacement.
 		healthy, err := r.nodeReady(ctx, pod.Spec.NodeName)
@@ -875,6 +885,24 @@ func (r *ServiceReconciler) replaceStuckPod(ctx context.Context, svc *kipperv1.S
 	return false, err
 }
 
+// startingPodWindow limits frequent polling for image pull failures to the pod's
+// initial startup period. Older pods wait for periodic reconciliation.
+const startingPodWindow = 2 * time.Minute
+
+// stillStarting reports whether a scheduled, pending pod is at most
+// startingPodWindow old and its named service container is not running.
+func stillStarting(pod *corev1.Pod, name string, now time.Time) bool {
+	if pod.Status.Phase != corev1.PodPending || pod.Spec.NodeName == "" || now.Sub(pod.CreationTimestamp.Time) > startingPodWindow {
+		return false
+	}
+	for _, c := range pod.Status.ContainerStatuses {
+		if c.Name == name && c.State.Running != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // nodeReady reports whether the named node exists, is Ready and is not fenced.
 func (r *ServiceReconciler) nodeReady(ctx context.Context, name string) (bool, error) {
 	var node corev1.Node
@@ -885,6 +913,37 @@ func (r *ServiceReconciler) nodeReady(ctx context.Context, name string) (bool, e
 		return false, err
 	}
 	return stranded.Ready(&node), nil
+}
+
+// cannotPullImage reports an image pull failure or invalid image name in the
+// named service container or any init container, unless the service container
+// is running. It ignores other regular containers because an injected sidecar
+// can keep a pod Pending while the database runs.
+func cannotPullImage(pod *corev1.Pod, name string) bool {
+	pullFailure := func(c corev1.ContainerStatus) bool {
+		if c.State.Waiting == nil {
+			return false
+		}
+		switch c.State.Waiting.Reason {
+		case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+			return true
+		}
+		return false
+	}
+	failed := false
+	for _, c := range pod.Status.ContainerStatuses {
+		if c.Name != name {
+			continue
+		}
+		if c.State.Running != nil {
+			return false
+		}
+		failed = pullFailure(c)
+	}
+	for _, c := range pod.Status.InitContainerStatuses {
+		failed = failed || pullFailure(c)
+	}
+	return failed
 }
 
 // containerReported reports whether the kubelet last reported the named
@@ -898,7 +957,8 @@ func containerReported(pod *corev1.Pod, name string) bool {
 	return false
 }
 
-// pendingPodRetry limits the delay before retrying a deletion conflict.
+// pendingPodRetry limits the delay before retrying a deletion conflict or
+// checking a starting pod for an image pull failure.
 const pendingPodRetry = 5 * time.Second
 
 // adopt gives the service the object it has just been shown to own, so deleting

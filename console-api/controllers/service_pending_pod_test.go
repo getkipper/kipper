@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"testing"
+	"time"
 
 	"github.com/getkipper/kipper/controller/pkg/stranded"
 
@@ -117,6 +118,60 @@ func TestReplaceStuckPodDeletesAWaitingPodOnAStaleRevision(t *testing.T) {
 	assert.True(t, errors.IsNotFound(err), "The pod must be deleted so the StatefulSet can recreate it from the updated template.")
 }
 
+func runningDatabase(pod *corev1.Pod) *corev1.Pod {
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "db", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+	return pod
+}
+
+// withSidecarPullFailure adds status for a simulated webhook-injected sidecar
+// whose image pull failure keeps the pod Pending.
+func withSidecarPullFailure(pod *corev1.Pod) *corev1.Pod {
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name: "log-shipper", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	})
+	return pod
+}
+
+func young(pod *corev1.Pod) *corev1.Pod {
+	return createdAgo(pod, 10*time.Second)
+}
+
+func createdAgo(pod *corev1.Pod, age time.Duration) *corev1.Pod {
+	pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-age))
+	return pod
+}
+
+// imageless replaces the pod's init or regular container statuses with an image
+// pull failure, as can happen after a mistyped service version.
+func imageless(pod *corev1.Pod, init bool) *corev1.Pod {
+	status := corev1.ContainerStatus{Name: "db", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}
+	if init {
+		status.Name = "tls-files"
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{status}
+		return pod
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{status}
+	return pod
+}
+
+// TestReplaceStuckPodDeletesAPodThatCannotPullItsImage covers recovery after a
+// mistyped version leaves a scheduled pod waiting for a nonexistent image.
+// Deleting the stale pod lets the StatefulSet use the corrected template.
+func TestReplaceStuckPodDeletesAPodThatCannotPullItsImage(t *testing.T) {
+	for name, init := range map[string]bool{"init container": true, "service container": false} {
+		t.Run(name, func(t *testing.T) {
+			svc := bareService("postgres")
+			r, base := pendingPodReconciler(svc, statefulSetAtRevision("rev2"), imageless(pendingServicePod("rev1", "server", stsUID), init), serverNode(corev1.ConditionTrue))
+
+			_, err := r.replaceStuckPod(context.Background(), svc)
+			require.NoError(t, err)
+
+			err = base.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-0"}, &corev1.Pod{})
+			assert.True(t, errors.IsNotFound(err), "The pod must be deleted so the StatefulSet can recreate it from the corrected template.")
+		})
+	}
+}
+
 // A database that runs but never answers its readiness probe blocks the
 // StatefulSet's rollout, so a restart must replace it.
 func TestReplaceStuckPodDeletesARunningPodThatIsNotReadyOnAStaleRevision(t *testing.T) {
@@ -136,20 +191,24 @@ func TestReplaceStuckPodLeavesOtherPodsAlone(t *testing.T) {
 		sts  *appsv1.StatefulSet
 		node *corev1.Node
 	}{
-		"a pod already on the new revision":                     {pendingServicePod("rev2", "", stsUID), statefulSetAtRevision("rev2"), nil},
-		"a scheduled pod that is still starting":                {pendingServicePod("rev1", "server", stsUID), statefulSetAtRevision("rev2"), nil},
-		"a StatefulSet with no revision computed":               {pendingServicePod("rev1", "", stsUID), statefulSetAtRevision(""), nil},
-		"a pod of the same name that belongs to something else": {pendingServicePod("rev1", "", "someone-else"), statefulSetAtRevision("rev2"), nil},
-		"a pod of the same name that nothing owns":              {pendingServicePod("rev1", "", ""), statefulSetAtRevision("rev2"), nil},
-		"a StatefulSet whose status predates its spec":          {pendingServicePod("rev2", "", stsUID), lagging(statefulSetAtRevision("rev1")), nil},
-		"a ready pod the StatefulSet rolls itself":              {runningServicePod("rev1", true), statefulSetAtRevision("rev2"), nil},
-		"a pod on the new revision that is not ready yet":       {runningServicePod("rev2", false), statefulSetAtRevision("rev2"), nil},
-		"a pod that is already terminating":                     {terminating(runningServicePod("rev1", false)), statefulSetAtRevision("rev2"), nil},
-		"a pod on a node that lost contact":                     {onLostNode(runningServicePod("rev1", true)), statefulSetAtRevision("rev2"), nil},
+		"a pod already on the new revision":                      {pendingServicePod("rev2", "", stsUID), statefulSetAtRevision("rev2"), nil},
+		"a scheduled pod that has been starting for minutes":     {createdAgo(pendingServicePod("rev1", "server", stsUID), startingPodWindow+time.Minute), statefulSetAtRevision("rev2"), nil},
+		"a new pod whose database runs beside a failing sidecar": {young(withSidecarPullFailure(runningDatabase(pendingServicePod("rev1", "server", stsUID)))), statefulSetAtRevision("rev2"), nil},
+		"a StatefulSet with no revision computed":                {pendingServicePod("rev1", "", stsUID), statefulSetAtRevision(""), nil},
+		"a pod of the same name that belongs to something else":  {pendingServicePod("rev1", "", "someone-else"), statefulSetAtRevision("rev2"), nil},
+		"a pod of the same name that nothing owns":               {pendingServicePod("rev1", "", ""), statefulSetAtRevision("rev2"), nil},
+		"a StatefulSet whose status predates its spec":           {pendingServicePod("rev2", "", stsUID), lagging(statefulSetAtRevision("rev1")), nil},
+		"a ready pod the StatefulSet rolls itself":               {runningServicePod("rev1", true), statefulSetAtRevision("rev2"), nil},
+		"a pod on the new revision that is not ready yet":        {runningServicePod("rev2", false), statefulSetAtRevision("rev2"), nil},
+		"a pod that is already terminating":                      {terminating(runningServicePod("rev1", false)), statefulSetAtRevision("rev2"), nil},
+		"a pod on a node that lost contact":                      {onLostNode(runningServicePod("rev1", true)), statefulSetAtRevision("rev2"), nil},
 		// A lost node may last have reported its container as unready too.
-		"an unready pod on a node that is not ready": {runningServicePod("rev1", false), statefulSetAtRevision("rev2"), serverNode(corev1.ConditionUnknown)},
-		"an unready pod on a fenced node":            {runningServicePod("rev1", false), statefulSetAtRevision("rev2"), serverNode(corev1.ConditionTrue, corev1.Taint{Key: stranded.TaintKey, Effect: corev1.TaintEffectNoExecute})},
-		"an unready pod on a node that is gone":      {runningServicePod("rev1", false), statefulSetAtRevision("rev2"), &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "other"}}},
+		"an unready pod on a node that is not ready":           {runningServicePod("rev1", false), statefulSetAtRevision("rev2"), serverNode(corev1.ConditionUnknown)},
+		"an unready pod on a fenced node":                      {runningServicePod("rev1", false), statefulSetAtRevision("rev2"), serverNode(corev1.ConditionTrue, corev1.Taint{Key: stranded.TaintKey, Effect: corev1.TaintEffectNoExecute})},
+		"an unready pod on a node that is gone":                {runningServicePod("rev1", false), statefulSetAtRevision("rev2"), &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "other"}}},
+		"a running database beside a sidecar that cannot pull": {withSidecarPullFailure(runningDatabase(pendingServicePod("rev1", "server", stsUID))), statefulSetAtRevision("rev2"), nil},
+		"an image pull failure on the new revision":            {imageless(pendingServicePod("rev2", "server", stsUID), false), statefulSetAtRevision("rev2"), nil},
+		"an image pull failure on a fenced node":               {imageless(pendingServicePod("rev1", "server", stsUID), true), statefulSetAtRevision("rev2"), serverNode(corev1.ConditionTrue, corev1.Taint{Key: stranded.TaintKey, Effect: corev1.TaintEffectNoExecute})},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -217,4 +276,15 @@ func TestReplaceStuckPodToleratesAServiceWithoutAWorkloadYet(t *testing.T) {
 	r, _ := pendingPodReconciler(svc)
 	_, err := r.replaceStuckPod(context.Background(), svc)
 	assert.NoError(t, err)
+}
+
+func TestReplaceStuckPodLooksAgainAtANewPodThatIsStillStarting(t *testing.T) {
+	svc := bareService("postgres")
+	r, base := pendingPodReconciler(svc, statefulSetAtRevision("rev2"), young(pendingServicePod("rev1", "server", stsUID)), serverNode(corev1.ConditionTrue))
+
+	lookAgain, err := r.replaceStuckPod(context.Background(), svc)
+
+	require.NoError(t, err)
+	assert.True(t, lookAgain, "The controller must poll for image pull failures the kubelet may report later because it does not watch pods.")
+	assert.NoError(t, base.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-0"}, &corev1.Pod{}), "The pod must be preserved.")
 }
