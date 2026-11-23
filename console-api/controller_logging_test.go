@@ -76,3 +76,36 @@ func TestMetricsOptions_AreServedRatherThanDisabled(t *testing.T) {
 		t.Fatalf("the manifest in kip/internal/installer targets 8081; BindAddress is %q", got)
 	}
 }
+
+// TestLogLevelFollowsLOG_LEVEL checks the documented command
+// "kip cluster env console-api LOG_LEVEL=debug", which enables debug logs,
+// including controllers' V(1) messages. Every setting keeps info-level API key,
+// plan, and credential audit events visible.
+func TestLogLevelFollowsLOG_LEVEL(t *testing.T) {
+	for value, want := range map[string]slog.Level{
+		"":        slog.LevelInfo,
+		"info":    slog.LevelInfo,
+		"debug":   slog.LevelDebug,
+		"DEBUG":   slog.LevelDebug,
+		"warn":    slog.LevelInfo,
+		"error":   slog.LevelInfo,
+		"verbose": slog.LevelInfo,
+	} {
+		if got := logLevel(value); got != want {
+			t.Errorf("logLevel(%q) = %v, want %v", value, got, want)
+		}
+	}
+}
+
+func TestControllerLogger_ShowsVerboseLinesAtDebugLevel(t *testing.T) {
+	var out bytes.Buffer
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&out, &slog.HandlerOptions{Level: logLevel("debug")})))
+
+	controllerLogger().V(1).Info("HelmChart not present. Skipping update.", "chart", "velero")
+
+	if !strings.Contains(out.String(), "HelmChart not present") {
+		t.Fatalf("a V(1) line was dropped at debug level. The handler saw %q", out.String())
+	}
+}
