@@ -329,8 +329,9 @@ type MoveCluster interface {
 	// and failures unrelated to the policy's denial return errors.
 	AdmissionRefuses(namespace, claim string) (bool, error)
 	// NamespaceDeleteRefused reports whether a dry-run delete of the namespace
-	// is refused by the namespace delete policy. A missing or non-enforcing
-	// binding and failures unrelated to the policy's denial return errors.
+	// is refused by the namespace delete policy or Kubernetes' built-in namespace
+	// protection. A missing or non-enforcing policy binding and failures unrelated
+	// to these refusals return errors.
 	NamespaceDeleteRefused(namespace string) (bool, error)
 	// NamespaceTerminating says whether the namespace, or a Project holding
 	// it, is being deleted.

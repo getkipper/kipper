@@ -846,7 +846,7 @@ var (
 )
 
 // requireEnforcingBinding checks that the binding named after the policy
-// targets that policy with the Deny action, so a refused probe proves enforcement.
+// targets that policy with the Deny action before probing admission.
 func (k KubectlMoveCluster) requireEnforcingBinding(name string) error {
 	var binding struct {
 		Spec struct {
@@ -895,6 +895,27 @@ func (k KubectlMoveCluster) AdmissionRefuses(namespace, claim string) (bool, err
 	}
 }
 
+// immortalNamespaces lists namespaces protected from deletion by the API server's
+// NamespaceLifecycle admission plugin.
+var immortalNamespaces = map[string]bool{"default": true, "kube-system": true, "kube-public": true}
+
+// protectedNamespace matches the API server's built-in deletion refusal for a
+// protected namespace. This refusal precedes validating admission policies and
+// replaces the move policy's denial. Matching a complete kubectl output line,
+// after trimming whitespace, excludes webhook denials that quote the refusal.
+func protectedNamespace(namespace, out string) bool {
+	if !immortalNamespaces[namespace] {
+		return false
+	}
+	want := fmt.Sprintf("Error from server (Forbidden): namespaces %q is forbidden: this namespace may not be deleted", namespace)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (k KubectlMoveCluster) NamespaceDeleteRefused(namespace string) (bool, error) {
 	if err := k.requireEnforcingBinding(platform.StorageMoveNamespacesPolicy); err != nil {
 		return false, err
@@ -903,7 +924,7 @@ func (k KubectlMoveCluster) NamespaceDeleteRefused(namespace string) (bool, erro
 	switch {
 	case err == nil:
 		return false, nil
-	case namespaceDenial.MatchString(out):
+	case namespaceDenial.MatchString(out), protectedNamespace(namespace, out):
 		return true, nil
 	default:
 		return false, fmt.Errorf("probing whether namespace %s can be deleted: %w: %s", namespace, err, strings.TrimSpace(out))

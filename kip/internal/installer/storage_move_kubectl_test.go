@@ -558,7 +558,7 @@ func TestKubectlMoveClusterProbesTheNamespaceDeleteGuard(t *testing.T) {
 	probe := func(binding, out string, err error) *routedRunner {
 		return &routedRunner{routes: []route{
 			{contains: "get validatingadmissionpolicybinding kipper-storage-move-namespaces", out: binding},
-			{contains: "delete namespace 'shop' --dry-run=server", out: out, err: err},
+			{contains: "--dry-run=server", out: out, err: err},
 		}}
 	}
 	refused := probe(namespacesBinding, `Error from server (Forbidden): namespaces "shop" is forbidden: ValidatingAdmissionPolicy 'kipper-storage-move-namespaces' with binding 'kipper-storage-move-namespaces' denied request: finish or roll back the move first`, errors.New("exit 1"))
@@ -570,6 +570,25 @@ func TestKubectlMoveClusterProbesTheNamespaceDeleteGuard(t *testing.T) {
 	ok, err = KubectlMoveCluster{Server: admitted}.NamespaceDeleteRefused("shop")
 	require.NoError(t, err)
 	assert.False(t, ok, "a dry run that went through is no refusal")
+
+	refusal := func(ns string) string {
+		return `Error from server (Forbidden): namespaces "` + ns + `" is forbidden: this namespace may not be deleted`
+	}
+	for _, ns := range []string{"default", "kube-system", "kube-public"} {
+		ok, err = KubectlMoveCluster{Server: probe(namespacesBinding, refusal(ns), errors.New("exit 1"))}.NamespaceDeleteRefused(ns)
+		require.NoError(t, err, ns)
+		assert.True(t, ok, "the API server never deletes %s, so it refuses before the policy runs", ns)
+	}
+	for ns, out := range map[string]string{
+		"shop":            refusal("shop"),
+		"kube-node-lease": refusal("kube-node-lease"),
+		"default":         `Error from server (Forbidden): admission webhook "example.test" denied the request: namespaces "default" is forbidden: this namespace may not be deleted`,
+	} {
+		_, err = KubectlMoveCluster{Server: probe(namespacesBinding, out, errors.New("exit 1"))}.NamespaceDeleteRefused(ns)
+		assert.Error(t, err, "only the API server's own refusal for a namespace it never deletes counts: %s", out)
+	}
+	_, err = KubectlMoveCluster{Server: probe(namespacesBinding, refusal("default"), errors.New("exit 1"))}.NamespaceDeleteRefused("shop")
+	assert.Error(t, err, "the refusal counts only for the namespace it names")
 
 	podsDenial := probe(namespacesBinding, `ValidatingAdmissionPolicy 'kipper-storage-move-pods' with binding 'kipper-storage-move-pods' denied request`, errors.New("exit 1"))
 	_, err = KubectlMoveCluster{Server: podsDenial}.NamespaceDeleteRefused("shop")
