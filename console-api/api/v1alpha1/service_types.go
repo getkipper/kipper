@@ -13,6 +13,7 @@ type ServiceSpec struct {
 	Type string `json:"type"`
 
 	// Version is the image tag for the service engine.
+	// +kubebuilder:validation:Pattern=`^\S*$`
 	// +optional
 	Version string `json:"version,omitempty"`
 
