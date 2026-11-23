@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/util/jsonpath"
 )
 
 // routedRunner answers each command with the reply of the first route whose
@@ -39,10 +41,34 @@ func (r *routedRunner) Run(command string) (string, error) {
 	r.commands = append(r.commands, command)
 	for _, rt := range r.routes {
 		if strings.Contains(command, rt.contains) {
+			if strings.Contains(command, `kubectl get statefulsets `) && strings.HasPrefix(strings.TrimSpace(rt.out), "{") {
+				return projectStatefulSets(rt.out), rt.err
+			}
 			return rt.out, rt.err
 		}
 	}
 	return "", nil
+}
+
+// projectStatefulSets converts stubbed kubectl JSON for one StatefulSet or a
+// list into the records returned by a projected StatefulSet read.
+func projectStatefulSets(objects string) string {
+	if !strings.Contains(objects, `"items"`) {
+		objects = `{"items":[` + objects + `]}`
+	}
+	var list any
+	if err := json.Unmarshal([]byte(objects), &list); err != nil {
+		panic(err)
+	}
+	jp := jsonpath.New("statefulsets").AllowMissingKeys(true)
+	if err := jp.Parse(statefulSetTemplate(testReadMarker)); err != nil {
+		panic(err)
+	}
+	var out bytes.Buffer
+	if err := jp.Execute(&out, list); err != nil {
+		panic(err)
+	}
+	return out.String()
 }
 
 func (r *routedRunner) RunStdin(command string, stdin io.Reader) (string, error) {

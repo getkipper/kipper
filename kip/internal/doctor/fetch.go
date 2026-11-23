@@ -91,7 +91,8 @@ const (
 // FetchOverSSH reads a Snapshot by running kubectl on the server, which works
 // even when the Kubernetes API rejects the operator's own login. It reads the
 // public certificate fields individually, keeping private keys out of the output.
-// Read failures are recorded in Missing while the remaining reads continue.
+// Read failures are recorded in Missing while reads of other parts continue.
+// A failed workload read skips the remaining workloads to avoid repeated timeouts.
 // Heartbeat contains at most 20 lines from the last 48 hours, oldest first.
 func FetchOverSSH(r Runner) Snapshot {
 	snap := Snapshot{Workloads: map[string]*appsv1.Deployment{}, Missing: map[Part]error{}}
@@ -103,18 +104,22 @@ func FetchOverSSH(r Runner) Snapshot {
 		snap.Nodes = nodes.Items
 	}
 
-	var deployments appsv1.DeploymentList
-	if err := runJSON(r, "kubectl get deployments -A -o json "+requestTimeout, &deployments); err != nil {
-		snap.Missing[PartWorkloads] = err
-	} else {
-		core := map[string]bool{}
-		for _, w := range CoreWorkloads {
-			core[w.Key()] = true
+	// Reading core Deployments by name keeps app environment variables out of the output.
+	for _, w := range CoreWorkloads {
+		if _, failed := snap.Missing[PartWorkloads]; failed {
+			break
 		}
-		for i := range deployments.Items {
-			d := &deployments.Items[i]
-			if key := d.Namespace + "/" + d.Name; core[key] {
-				snap.Workloads[key] = d
+		cmd := fmt.Sprintf("kubectl -n %s get deployment %s --ignore-not-found -o json %s", w.Namespace, w.Name, requestTimeout)
+		out, err := r.Run(cmd)
+		switch {
+		case err != nil:
+			snap.Missing[PartWorkloads] = commandError(out, err)
+		case withoutWarnings(out) != "":
+			var d appsv1.Deployment
+			if err := decodeJSON(out, cmd, &d); err != nil {
+				snap.Missing[PartWorkloads] = err
+			} else {
+				snap.Workloads[w.Key()] = &d
 			}
 		}
 	}
@@ -196,6 +201,12 @@ func runJSON(r Runner, command string, into any) error {
 	if err != nil {
 		return commandError(out, err)
 	}
+	return decodeJSON(out, command, into)
+}
+
+// decodeJSON decodes command output into the supplied destination, skipping
+// text before the first opening brace. Decode errors identify the command.
+func decodeJSON(out, command string, into any) error {
 	// kubectl can print warnings ahead of the document, and the runner merges them into the output.
 	if i := strings.IndexByte(out, '{'); i > 0 {
 		out = out[i:]

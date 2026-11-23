@@ -468,12 +468,7 @@ func (k KubectlMoveCluster) SetServiceStorage(namespace, name, size string) erro
 }
 
 func (k KubectlMoveCluster) readStatefulSet(namespace, name string) (*appsv1.StatefulSet, error) {
-	var sts appsv1.StatefulSet
-	found, err := k.getJSON("StatefulSet "+name, fmt.Sprintf("kubectl -n %s get statefulset %s", shellQuote(namespace), shellQuote(name)), &sts)
-	if err != nil || !found {
-		return nil, err
-	}
-	return &sts, nil
+	return readOneStatefulSet(k.Server, namespace, name)
 }
 
 func (k KubectlMoveCluster) ReadStatefulSet(namespace, name string) (*MoveStatefulSet, error) {

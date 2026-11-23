@@ -104,7 +104,8 @@ func TestKubectlMoveClusterStartsTheCountTheMoveRecorded(t *testing.T) {
 }
 
 func TestKubectlMoveClusterReportsAMissingStatefulSet(t *testing.T) {
-	host := &routedRunner{routes: []route{{contains: "get statefulset", out: `Error from server (NotFound): statefulsets.apps "db" not found`, err: errors.New("exit 1")}}}
+	// The read suppresses kubectl's "No resources found" stderr message on success.
+	host := &routedRunner{routes: []route{{contains: "get statefulsets", out: ""}}}
 	_, err := KubectlMoveCluster{Server: host}.StopStatefulSet("shop", "db", "kipper-storage-move-u", 2)
 	require.ErrorIs(t, err, errStatefulSetGone)
 	_, _, err = KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", 2)

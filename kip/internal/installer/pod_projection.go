@@ -44,8 +44,8 @@ func podTemplate(end string) string {
 // including the end marker.
 var podLineFields = map[string]int{"P": 20, "I": 4, "C": 4, "S": 4, "V": 3}
 
-// newReadMarker generates an unpredictable end marker for each pod read so
-// pod values cannot reliably forge output lines.
+// newReadMarker generates an unpredictable end marker for each projected read
+// so object values cannot reliably forge output lines.
 var newReadMarker = randomReadMarker
 
 func randomReadMarker() string {
@@ -73,12 +73,16 @@ func readPods(runner CommandRunner, what, args string) ([]corev1.Pod, error) {
 	return pods, nil
 }
 
-// podsCommand builds a pod read command that captures kubectl's stderr in a
-// temporary file and prints it only on failure. This keeps warnings from
-// corrupting records when the SSH runner merges stdout and stderr.
 func podsCommand(args, end string) string {
-	return fmt.Sprintf(`e=$(mktemp) || exit 1; kubectl get pods %s -o jsonpath='%s' 2>"$e"; rc=$?; [ "$rc" = 0 ] || cat "$e"; rm -f "$e"; exit "$rc"`,
-		args, podTemplate(end))
+	return projectedGetCommand("pods", args, podTemplate(end))
+}
+
+// projectedGetCommand builds a kubectl get command with a JSONPath template.
+// It captures stderr in a temporary file and prints it only on failure to keep
+// warnings out of successful reads when the SSH runner merges stdout and stderr.
+func projectedGetCommand(resource, args, template string) string {
+	return fmt.Sprintf(`e=$(mktemp) || exit 1; kubectl get %s %s -o jsonpath='%s' 2>"$e"; rc=$?; [ "$rc" = 0 ] || cat "$e"; rm -f "$e"; exit "$rc"`,
+		resource, args, template)
 }
 
 // parsePods rebuilds pods from podTemplate output using the supplied end marker.

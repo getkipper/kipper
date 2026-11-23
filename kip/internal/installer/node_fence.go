@@ -318,15 +318,15 @@ func ReadFenceView(master CommandRunner, node string) (FenceView, error) {
 	if err := kubectlJSON(master, "persistent volumes", "kubectl get pv -o json", &pvs); err != nil {
 		return FenceView{}, err
 	}
-	var sets appsv1.StatefulSetList
-	if err := kubectlJSON(master, "StatefulSets", "kubectl get statefulsets -A -o json", &sets); err != nil {
+	sets, err := readStatefulSets(master, "StatefulSets", "-A")
+	if err != nil {
 		return FenceView{}, err
 	}
 	replicas, err := ReadReplicas(master)
 	if err != nil {
 		return FenceView{}, err
 	}
-	view, err := buildFenceView(node, stranded.Find(node, pods, claims.Items, pvs.Items), pods, sets.Items, replicas)
+	view, err := buildFenceView(node, stranded.Find(node, pods, claims.Items, pvs.Items), pods, sets, replicas)
 	if err != nil {
 		return FenceView{}, err
 	}
@@ -674,10 +674,21 @@ type statefulSetHead struct {
 	} `json:"spec"`
 }
 
+// readStatefulSet reads the resource version, selected annotations, and replica
+// count needed for fence patches. A missing StatefulSet returns an error.
 func readStatefulSet(master CommandRunner, ns, name string) (statefulSetHead, error) {
 	var head statefulSetHead
-	err := kubectlJSON(master, "StatefulSet "+ns+"/"+name, fmt.Sprintf("kubectl -n %s get statefulset %s -o json", shellQuote(ns), shellQuote(name)), &head)
-	return head, err
+	s, err := readOneStatefulSet(master, ns, name)
+	if err != nil {
+		return head, err
+	}
+	if s == nil {
+		return head, fmt.Errorf("reading StatefulSet %s/%s: not found", ns, name)
+	}
+	head.Metadata.ResourceVersion = s.ResourceVersion
+	head.Metadata.Annotations = s.Annotations
+	head.Spec.Replicas = s.Spec.Replicas
+	return head, nil
 }
 
 func patchStatefulSet(master CommandRunner, ns, name string, patch map[string]any) error {

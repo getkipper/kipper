@@ -268,7 +268,7 @@ func TestSameStamps(t *testing.T) {
 }
 
 func TestStopForFenceRecordsTheCountInTheSamePatch(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"41"},"spec":{"replicas":2}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"41"},"spec":{"replicas":2}}`}}}
 	require.NoError(t, StopForFence(master, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale, Volumes: []string{"pvc-1"}}))
 	require.Len(t, master.stdins, 1)
 	var patch struct {
@@ -289,24 +289,24 @@ func TestStopForFenceRecordsTheCountInTheSamePatch(t *testing.T) {
 }
 
 func TestStopForFenceNeverOverwritesAnEarlierStop(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"42","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"42","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StopForFence(master, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale}))
 	assert.Empty(t, master.stdins, "a retry must not record 0 as the count to restore")
 }
 
 func TestStartAfterFenceRestoresTheCountAndDropsTheMark(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"stale\"}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"stale\"}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StartAfterFence(master, "shop", "db"))
 	require.Len(t, master.stdins, 1)
 	assert.JSONEq(t, `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":null}},"spec":{"replicas":2}}`, master.stdins[0])
 
-	untouched := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"44"},"spec":{"replicas":1}}`}}}
+	untouched := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"44"},"spec":{"replicas":1}}`}}}
 	require.NoError(t, StartAfterFence(untouched, "shop", "db"))
 	assert.Empty(t, untouched.stdins)
 }
 
 func TestMarkMayLackWritesKeepsTheRestOfTheMark(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"only-copy\",\"volumes\":[\"pvc-1\",\"pvc-2\"]}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"only-copy\",\"volumes\":[\"pvc-1\",\"pvc-2\"]}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, MarkMayLackWrites(master, "shop", "db"))
 	require.Len(t, master.stdins, 1)
 	var patch struct {
@@ -321,11 +321,11 @@ func TestMarkMayLackWritesKeepsTheRestOfTheMark(t *testing.T) {
 	assert.Nil(t, patch.Spec, "the replica count stays as the stop set it")
 	assert.JSONEq(t, `{"node":"worker-1","replicas":2,"reason":"only-copy","volumes":["pvc-1","pvc-2"],"mayLackWrites":true}`, patch.Metadata.Annotations[FenceStopAnnotation])
 
-	marked := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"44","annotations":{"kipper.run/fence-stop":"{\"reason\":\"stale\",\"mayLackWrites\":true}"}},"spec":{"replicas":0}}`}}}
+	marked := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"44","annotations":{"kipper.run/fence-stop":"{\"reason\":\"stale\",\"mayLackWrites\":true}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, MarkMayLackWrites(marked, "shop", "db"))
 	assert.Empty(t, marked.stdins, "a mark that already records the doubt is left alone")
 
-	started := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"45"},"spec":{"replicas":1}}`}}}
+	started := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"45"},"spec":{"replicas":1}}`}}}
 	assert.Error(t, MarkMayLackWrites(started, "shop", "db"), "a service started since the view was read cannot carry the doubt")
 }
 
@@ -508,7 +508,7 @@ func TestKubeletAnswersResolvesAHostnameOnTheServer(t *testing.T) {
 }
 
 func TestClearFenceStopDropsTheMarkAndKeepsTheServiceStopped(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, ClearFenceStop(master, "shop", "db"))
 	require.Len(t, master.stdins, 1)
 	assert.JSONEq(t, `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":null}}}`, master.stdins[0])
@@ -603,12 +603,12 @@ func TestReadFenceViewAddsTheServiceAMigrationMoverPaused(t *testing.T) {
 }
 
 func TestStopForFenceRecordsTheCountToRestoreForAPausedService(t *testing.T) {
-	paused := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
+	paused := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StopForFence(paused, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale, Replicas: 2}))
 	require.Len(t, paused.stdins, 1)
 	assert.Contains(t, paused.stdins[0], `\"replicas\":2`)
 
-	unknown := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
+	unknown := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StopForFence(unknown, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale}))
 	assert.Contains(t, unknown.stdins[0], `\"replicas\":1`, "every Kipper service is created with one replica")
 }

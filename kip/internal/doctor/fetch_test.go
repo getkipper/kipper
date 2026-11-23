@@ -34,10 +34,9 @@ func (r *routedRunner) Run(command string) (string, error) {
 
 const nodesJSON = `{"items":[{"metadata":{"name":"server-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`
 
-const deploymentsJSON = `{"items":[
- {"metadata":{"namespace":"traefik","name":"traefik"},"spec":{"replicas":1},"status":{"availableReplicas":1}},
- {"metadata":{"namespace":"kipper-system","name":"console-api"},"spec":{"replicas":1},"status":{"availableReplicas":0}},
- {"metadata":{"namespace":"default","name":"shop"},"spec":{"replicas":1},"status":{"availableReplicas":1}}]}`
+const traefikJSON = `{"metadata":{"namespace":"traefik","name":"traefik"},"spec":{"replicas":1},"status":{"availableReplicas":1}}`
+
+const consoleAPIJSON = `{"metadata":{"namespace":"kipper-system","name":"console-api"},"spec":{"replicas":1},"status":{"availableReplicas":0}}`
 
 const tlsStoresJSON = `{"items":[{"metadata":{"namespace":"kipper-system","name":"default"},"spec":{"defaultCertificate":{"secretName":"kipper-hop-cert"}}}]}`
 
@@ -45,7 +44,8 @@ func healthyRunner() *routedRunner {
 	return (&routedRunner{}).
 		on(`-n traefik get secret kipper-hop-cert`, "-----BEGIN CERTIFICATE-----\nCOPY\n-----END CERTIFICATE-----", nil).
 		on("get nodes", nodesJSON, nil).
-		on("get deployments", deploymentsJSON, nil).
+		on("-n traefik get deployment traefik ", traefikJSON, nil).
+		on("-n kipper-system get deployment console-api ", consoleAPIJSON, nil).
 		on(`{.data.tls\.crt}`, "-----BEGIN CERTIFICATE-----\nCURRENT\n-----END CERTIFICATE-----", nil).
 		on(`{.data.candidate\.crt}`, "", nil).
 		on("tlsstores", tlsStoresJSON, nil).
@@ -64,7 +64,7 @@ func TestFetchOverSSH_ReadsEveryPart(t *testing.T) {
 	require.Contains(t, snap.Workloads, "traefik/traefik")
 	assert.Equal(t, int32(1), snap.Workloads["traefik/traefik"].Status.AvailableReplicas)
 	assert.Contains(t, snap.Workloads, "kipper-system/console-api")
-	assert.NotContains(t, snap.Workloads, "default/shop", "only core workloads are kept")
+	assert.NotContains(t, snap.Workloads, "dex/dex", "a core workload that is not installed")
 	assert.Contains(t, snap.HopCert, "CURRENT")
 	assert.Empty(t, snap.HopCandidate)
 	assert.Contains(t, snap.TraefikCopyCert, "COPY")
@@ -142,7 +142,7 @@ func TestFetchOverSSH_KeepsAFailedReadsOutputOutOfTheReport(t *testing.T) {
 	const partial = `{"items":[{"spec":{"template":{"spec":{"containers":[{"env":[{"name":"TOKEN","value":"marker-61c4"}]}]}}}}`
 	for part, route := range map[Part]string{
 		PartNodes:     "get nodes",
-		PartWorkloads: "get deployments",
+		PartWorkloads: "get deployment traefik ",
 		PartHeartbeat: "logs deploy/console-api",
 		PartStorage:   "jsonpath='{.spec.storage}'",
 	} {
@@ -154,4 +154,40 @@ func TestFetchOverSSH_KeepsAFailedReadsOutputOutOfTheReport(t *testing.T) {
 		require.Contains(t, snap.Missing, part)
 		assert.NotContains(t, snap.Missing[part].Error(), "marker-61c4", route)
 	}
+}
+
+// An app's Deployment carries its environment, so only the platform's own
+// Deployments are read.
+func TestFetchOverSSH_ReadsOnlyTheCoreDeployments(t *testing.T) {
+	runner := healthyRunner()
+	FetchOverSSH(runner)
+
+	var reads []string
+	for _, cmd := range runner.commands {
+		if strings.Contains(cmd, "get deployment") {
+			reads = append(reads, cmd)
+		}
+	}
+	require.Len(t, reads, len(CoreWorkloads))
+	for i, w := range CoreWorkloads {
+		assert.Contains(t, reads[i], "kubectl -n "+w.Namespace+" get deployment "+w.Name+" --ignore-not-found ")
+	}
+}
+
+// TestFetchOverSSH_StopsReadingDeploymentsAfterAFailure limits workload reads
+// to one request timeout when the API server hangs.
+func TestFetchOverSSH_StopsReadingDeploymentsAfterAFailure(t *testing.T) {
+	runner := healthyRunner()
+	runner.routes = append([][3]any{{"get deployment", "", errors.New("exit status 1")}}, runner.routes...)
+
+	snap := FetchOverSSH(runner)
+
+	require.Contains(t, snap.Missing, PartWorkloads)
+	reads := 0
+	for _, cmd := range runner.commands {
+		if strings.Contains(cmd, "get deployment") {
+			reads++
+		}
+	}
+	assert.Equal(t, 1, reads)
 }
