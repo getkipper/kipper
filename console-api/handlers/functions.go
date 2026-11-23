@@ -101,7 +101,8 @@ func (f *Functions) List(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
-// Create creates a new function with a KEDA ScaledObject.
+// Create creates a Function resource for the controller to provision according to its triggers.
+// API server validation errors return HTTP 422 with the validation details.
 // POST /api/v1/projects/{name}/functions
 func (f *Functions) Create(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")
@@ -137,7 +138,6 @@ func (f *Functions) Create(w http.ResponseWriter, r *http.Request) {
 		{Type: req.Trigger, Schedule: req.Schedule},
 	}
 
-	// Populate trigger config from request fields
 	triggerConfig := make(map[string]string)
 	if req.IdleTimeout != 300 {
 		triggerConfig["idleTimeout"] = fmt.Sprintf("%d", req.IdleTimeout)
@@ -185,13 +185,17 @@ func (f *Functions) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := f.CRClient.Create(ctx, fn); err != nil {
-		// See Apps.Create: AlreadyExists proves the workload is there, so the
-		// reservation just made is its own first claim and must stand.
+		// AlreadyExists confirms that the function exists, so keep its name
+		// reservation even if this request created the function's first claim.
 		if !errors.IsAlreadyExists(err) {
 			release()
 		}
 		if errors.IsAlreadyExists(err) {
 			respondError(w, http.StatusConflict, fmt.Sprintf("function %q already exists", req.Name))
+			return
+		}
+		if errors.IsInvalid(err) {
+			respondError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create function: %v", err))
@@ -201,7 +205,7 @@ func (f *Functions) Create(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "created", "name": req.Name})
 }
 
-// Delete removes a function and its associated resources.
+// Delete requests deletion of a function. Its associated resources are cleaned up asynchronously.
 // DELETE /api/v1/projects/{name}/functions/{fn}
 func (f *Functions) Delete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")

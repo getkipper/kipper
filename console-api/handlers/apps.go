@@ -317,6 +317,10 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusConflict, fmt.Sprintf("app %q already exists", req.Name))
 			return
 		}
+		if errors.IsInvalid(err) {
+			respondError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to create app")
 		return
 	}
@@ -640,6 +644,10 @@ func (a *Apps) UpdateImage(w http.ResponseWriter, r *http.Request) {
 	app.Spec.Image = req.Image
 
 	if err := a.CRClient.Update(ctx, app); err != nil {
+		if errors.IsInvalid(err) {
+			respondError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to update image")
 		return
 	}
