@@ -1297,3 +1297,44 @@ func TestMapSizedHelmChart(t *testing.T) {
 	assert.Empty(t, mapSizedHelmChart(context.Background(), chart(helmChartNamespace, "coredns")), "a chart the reconciler does not size")
 	assert.Empty(t, mapSizedHelmChart(context.Background(), chart("default", "traefik")), "a same-named chart outside kube-system")
 }
+
+// TestPlatformConfigReconciler_LeavesADisabledChartThatIsAlreadyDeleting checks
+// that polling for Loki claim cleanup avoids repeated delete requests while
+// helm-controller holds the chart's finalizer until uninstall finishes.
+func TestPlatformConfigReconciler_LeavesADisabledChartThatIsAlreadyDeleting(t *testing.T) {
+	scheme := testScheme()
+	no := false
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec: kipperv1.PlatformConfigSpec{
+			Profile:    platform.ProfileMedium,
+			Components: []kipperv1.ComponentOverride{{Name: componentLoki, Enabled: &no}},
+		},
+	}
+	deleting := newHelmChart("loki", "singleBinary: {}\n")
+	deleting.SetFinalizers([]string{"wrangler.cattle.io/on-helm-chart-remove"})
+	now := metav1.Now()
+	deleting.SetDeletionTimestamp(&now)
+	chartDeletes := 0
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pc, deleting, nodeExporterCertSecret()).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == "loki" && obj.GetObjectKind().GroupVersionKind().Kind == helmChartGVK.Kind {
+					chartDeletes++
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+
+	for pass := 0; pass < 2; pass++ {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+		require.NoError(t, err)
+	}
+
+	assert.Zero(t, chartDeletes)
+}
