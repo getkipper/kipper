@@ -33,6 +33,7 @@ func backupDynamic(backup string) *dynamicfake.FakeDynamicClient {
 	}}
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		platformConfigsGVR: "PlatformConfigList", backupGVR: "BackupList", restoreGVR: "RestoreList", scheduleGVR: "ScheduleList",
+		deleteBackupRequestGVR: "DeleteBackupRequestList",
 	}, pc)
 }
 
