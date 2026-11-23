@@ -53,3 +53,28 @@ func TestADrillWithoutADumpSaysOnlyTheVolumeWasChecked(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "db-0: the backup contains no consistent dump, so the drill checked only the volume copy")
 }
+
+func TestADumpTooLargeForTheDrillCopyIsReportedNotFailed(t *testing.T) {
+	exec := func(_ context.Context, _ []string, _ io.Reader, stdout, _ io.Writer) error {
+		_, err := io.WriteString(stdout, "KIPPER_DUMP_SKIPPED\tapp\t1825361100 144703488\n")
+		return err
+	}
+	var err error
+	out := captureStdout(t, func() { err = checkConsistentDump(context.Background(), exec, "db-0") })
+
+	require.NoError(t, err)
+	assert.Contains(t, out, "db-0: dump of app: checksum matches and its table of contents is readable")
+	assert.Contains(t, out, "138 MiB free")
+	assert.Contains(t, out, "about 1.7 GiB")
+	assert.Contains(t, out, "⚠  db-0", "a skipped restore stands out from the checks that ran")
+	assert.NotContains(t, out, "kip service update", "growing the claim does nothing on local-path storage")
+}
+
+func TestParseDumpCheckRefusesAMalformedSkip(t *testing.T) {
+	for _, detail := range []string{"lots", "100 50 garbage", "-1 -2", "100", "50 100", "100 100", "99999999999999999999 1", " 100 50"} {
+		_, _, err := parseDumpCheck("KIPPER_DUMP_SKIPPED\tapp\t" + detail + "\n")
+		assert.Error(t, err, detail)
+	}
+	_, _, err := parseDumpCheck("KIPPER_DUMP_SKIPPED\t\t100 50\n")
+	assert.Error(t, err, "a skip names its database")
+}
