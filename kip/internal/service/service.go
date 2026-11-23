@@ -1105,8 +1105,11 @@ type storagePlan struct {
 	local bool
 }
 
-// planStorage validates a positive storage quantity and rejects shrinking any
-// claim outside the local-path storage class. It performs no writes.
+// planStorage validates a positive size for non-local-path claims without saving
+// changes. An unfinished expansion can be retried with a smaller request above
+// the reported capacity. Server-side dry runs check each planned update before
+// any writes, so admission errors such as Longhorn disk capacity limits surface
+// early. If a webhook rejects dry runs as unsupported, remaining checks are skipped.
 func (m *Manager) planStorage(ctx context.Context, namespace, name, storage string) (*storagePlan, error) {
 	size, err := resource.ParseQuantity(storage)
 	if err != nil || size.Sign() <= 0 {
@@ -1125,22 +1128,70 @@ func (m *Manager) planStorage(ctx context.Context, namespace, name, storage stri
 			plan.local = true
 			continue
 		}
-		if current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; size.Cmp(current) < 0 {
-			return nil, fmt.Errorf("volume %s is %s and can only grow. Use at least %s", pvc.Name, current.String(), current.String())
+		if err := allowedSize(pvc, size); err != nil {
+			return nil, err
 		}
 		plan.grow = append(plan.grow, pvc)
+	}
+	for _, pvc := range plan.grow {
+		trial := pvc.DeepCopy()
+		trial.Spec.Resources.Requests[corev1.ResourceStorage] = size
+		_, err := m.Client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, trial, metav1.UpdateOptions{DryRun: []string{metav1.DryRunAll}})
+		switch {
+		case errors.IsBadRequest(err) && strings.Contains(err.Error(), "does not support dry run"):
+			return plan, nil
+		case errors.IsForbidden(err):
+			return nil, fmt.Errorf("volume %s cannot grow to %s: %w%s", pvc.Name, size.String(), err, longhornRoomHint(err))
+		case err != nil:
+			return nil, fmt.Errorf("checking whether volume %s can grow to %s: %w", pvc.Name, size.String(), err)
+		}
 	}
 	return plan, nil
 }
 
+// allowedSize accepts sizes at or above the current request. A smaller request
+// is allowed during an unfinished expansion if it exceeds the reported capacity.
+func allowedSize(pvc *corev1.PersistentVolumeClaim, size resource.Quantity) error {
+	current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if size.Cmp(current) >= 0 {
+		return nil
+	}
+	capacity, known := pvc.Status.Capacity[corev1.ResourceStorage]
+	switch {
+	case !known || capacity.Cmp(current) >= 0:
+		return fmt.Errorf("volume %s is %s and can only grow. Use at least %s", pvc.Name, current.String(), current.String())
+	case size.Cmp(capacity) <= 0:
+		return fmt.Errorf("volume %s is %s and its expansion to %s has not finished. Use more than %s", pvc.Name, capacity.String(), current.String(), capacity.String())
+	}
+	return nil
+}
+
+// longhornRoomHint suggests making room for expansion because Longhorn can reject
+// growth beyond disk capacity. It matches the exact admission webhook name
+// "validator.longhorn.io" in the error text and returns an empty string otherwise.
+func longhornRoomHint(err error) string {
+	if !strings.Contains(err.Error(), `admission webhook "validator.longhorn.io"`) {
+		return ""
+	}
+	return ". Make room on the Longhorn disks first, for example with 'kip cluster storage --over-provisioning <percent>'"
+}
+
 // applyStorage updates the planned claims, then records the declared size on the
-// Service CR. A failure can leave earlier writes applied.
+// Service CR. If a claim update fails, earlier writes remain applied and the error
+// names the claims whose size requests were saved. The dry runs in planStorage
+// check each claim separately, so claims sharing a disk can still be refused here.
 func (m *Manager) applyStorage(ctx context.Context, namespace, name string, plan *storagePlan, result *UpdateResult) error {
+	var raised []string
 	for _, pvc := range plan.grow {
 		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = plan.size
 		if _, err := m.Client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("expanding storage: %w", err)
+			partial := ""
+			if len(raised) > 0 {
+				partial = fmt.Sprintf(". %s, and the service's declared size is unchanged. Run the command again once there is room", strings.Join(raised, ", "))
+			}
+			return fmt.Errorf("volume %s cannot grow to %s: %w%s%s", pvc.Name, plan.size.String(), err, longhornRoomHint(err), partial)
 		}
+		raised = append(raised, fmt.Sprintf("%s already requests %s", pvc.Name, plan.size.String()))
 		result.StorageExpanded = true
 	}
 	result.StorageDeclared = plan.local

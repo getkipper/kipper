@@ -7,6 +7,7 @@ import (
 // JobSpec defines the desired state of a scheduled or one-off job.
 type JobSpec struct {
 	// Image is the container image for the job.
+	// +kubebuilder:validation:Pattern=`^\S*$`
 	Image string `json:"image"`
 
 	// Schedule is a cron expression. If empty, the job is one-off.

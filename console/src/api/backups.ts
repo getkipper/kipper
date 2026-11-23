@@ -40,8 +40,15 @@ export async function restoreBackup(backupName: string, opts?: RestoreOptions): 
   await client.post(`/backups/${backupName}/restore`, opts || {})
 }
 
-export async function deleteBackup(name: string): Promise<void> {
-  await client.delete(`/backups/${name}`)
+/**
+ * Requests deletion of a backup and its stored data. `queued` is true when
+ * the server creates a Velero deletion request (HTTP 202), or false when it
+ * directly deletes a backup that never started (HTTP 204).
+ * Rejects with the client error if the request fails.
+ */
+export async function deleteBackup(name: string): Promise<{ queued: boolean }> {
+  const { status } = await client.delete(`/backups/${name}`)
+  return { queued: status === 202 }
 }
 
 export async function fetchSchedules(): Promise<BackupSchedule[]> {

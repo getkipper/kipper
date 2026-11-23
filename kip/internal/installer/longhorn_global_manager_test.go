@@ -30,8 +30,8 @@ func (r *globalLeaseRunner) Run(cmd string) (string, error) {
 		out := r.leases[min(r.reads, len(r.leases)-1)]
 		r.reads++
 		return out, nil
-	case globalManagerPodQuery:
-		return r.pods, nil
+	case podsQuery(globalManagerPodArgs):
+		return asProjected(r.pods), nil
 	}
 	return "", fmt.Errorf("unexpected command %q", cmd)
 }

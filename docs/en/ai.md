@@ -182,6 +182,8 @@ kip ai uninstall
 
 Re-running `kip ai install` afterwards starts fresh: a new admin must be created with `kip ai admin create`. To preserve data across an uninstall, take a blocking snapshot first with `kip ai backup --name pre-uninstall --wait` (see [AI Backup & Recovery](/en/ai-backups)). The bare `kip ai backup` command exits while the snapshot is still uploading, so always pair an uninstall with `--wait` or check `kip ai backup show` for `Completed` first.
 
+To troubleshoot a component, use `kip ai logs <component>` to view its logs. For example, run `kip ai logs ollama --follow` while a model downloads. The [CLI reference](./cli-reference#kip-ai-logs) lists the components.
+
 ## Upgrades
 
 Re-running `kip ai install` updates the existing bundle. Ollama uses a `Recreate` rollout: the old pod stops before the new one starts, allowing the replacement to use its memory and GPU. Chat is unavailable while the replacement starts and loads the model.
@@ -190,7 +192,7 @@ Re-running `kip ai install` updates the existing bundle. Ollama uses a `Recreate
 
 `kip ai install` and `kip ai rag install` report an error when Helm leaves a release failed, for example `helm left the "librechat" release in status failed at revision 2`. The next time a failed release's chart is applied, the Helm controller in k3s uninstalls the release and installs it again. The bundle marks its volumes for retention during a reinstall. A release that failed under an older kip version may lack those retention settings. Both commands therefore require existing releases to have deployed status before applying a chart.
 
-A release with pending status may still have a chart job running, so wait a few minutes and try again first. Otherwise, create a backup and wait for it to finish, then run the command again with `--reinstall-failed`:
+`kip ai logs <component> --chart` shows the Helm job's log to help diagnose an upgrade failure. A release with pending status may still have a chart job running, so wait a few minutes and try again first. Otherwise, create a backup and wait for it to finish, then run the command again with `--reinstall-failed`:
 
 ```bash
 kip ai backup --name before-reinstall --wait

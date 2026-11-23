@@ -65,6 +65,7 @@ spec:
                 type: object
               image:
                 description: Image is the container image for the function.
+                pattern: ^\S*$
                 type: string
               noSecurityHeaders:
                 description: NoSecurityHeaders disables the default security response

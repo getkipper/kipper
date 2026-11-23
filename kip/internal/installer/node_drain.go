@@ -308,10 +308,12 @@ const drainRound = 2 * time.Minute
 // DrainNode drains a node with a total kubectl timeout budget of timeout,
 // honoring pod disruption budgets. DaemonSet and mirror pods stay, and
 // unmanaged pods block the drain. Evicted pods lose their emptyDir data.
-// Each round has a timeout of at most two minutes. Only timeout failures
+// Each round has a timeout of at most two minutes. Only round timeout failures
 // are retried. A timeout below one second returns an error.
-// Drain failures include distinct error lines from the last round in their original order, with occurrence
-// counts for repeated lines, or the command error if no error lines are recognised.
+// Drain failures list recognized reasons from the last round in order of first
+// appearance, with attempt counts for repeated errors that include retry delays.
+// When the timeout budget is exhausted, the error ends with the total timeout.
+// Other failures wrap the command error if no reason is recognized.
 func DrainNode(master CommandRunner, node string, timeout time.Duration) error {
 	// kubectl reads a zero timeout as no limit.
 	if timeout < time.Second {
@@ -319,47 +321,128 @@ func DrainNode(master CommandRunner, node string, timeout time.Duration) error {
 	}
 	var out string
 	var err error
+	timedOut := false
 	for left := timeout; left > 0; left -= drainRound {
 		out, err = master.Run(fmt.Sprintf("kubectl drain %s --ignore-daemonsets --delete-emptydir-data --timeout=%s 2>&1", node, min(left, drainRound)))
 		if err == nil {
 			return nil
 		}
-		if !strings.Contains(out, "global timeout reached") && !strings.Contains(out, "drain did not complete within") {
+		timedOut = roundTimedOut(out)
+		if !timedOut {
 			break
 		}
 	}
-	reasons := drainFailureReasons(out)
-	if len(reasons) == 0 {
+	// Keep kubectl's lowercase errors in one sentence.
+	msg := strings.Join(drainFailureReasons(out), " and ")
+	switch {
+	case timedOut && msg == "":
+		msg = fmt.Sprintf("the drain did not finish within %s", timeout)
+	case timedOut:
+		msg += fmt.Sprintf(". The drain did not finish within %s", timeout)
+	case msg == "":
 		return fmt.Errorf("draining %s: %w", node, err)
 	}
-	return fmt.Errorf("draining %s: %s", node, strings.Join(reasons, ". "))
+	return fmt.Errorf("draining %s: %s", node, msg)
+}
+
+// roundTimedOut reports whether kubectl drain's output indicates a round timeout.
+// DrainNode reports the total timeout budget in place of kubectl's round timeout.
+func roundTimedOut(text string) bool {
+	return strings.Contains(text, "global timeout reached") || strings.Contains(text, "drain did not complete within") ||
+		strings.Contains(text, "to terminate: context deadline exceeded")
 }
 
 // drainRetryNote matches kubectl's retry delay so errors with different delays
 // can be counted together.
 var drainRetryNote = regexp.MustCompile(` \(will retry after [^)]*\)`)
 
-// drainFailureReasons groups kubectl drain errors by first occurrence, ignoring
-// retry delays and including occurrence counts for repeated lines. kubectl
-// repeats eviction errors every few seconds until timeout, so listing each
-// error once keeps the failure message readable.
+// drainSummary captures errors from kubectl's summaries, which can repeat
+// errors printed individually at the end of the output.
+var drainSummary = regexp.MustCompile(`^(?:unable to drain node "[^"]*" due to error: |There are pending pods in node "[^"]*" when an error occurred: )\[?(.*?)\]?(?:, continuing command\.\.\.)?$`)
+
+// drainRoundTimeout matches kubectl's timeout suffix for a pod whose eviction
+// was still pending when the round timed out.
+var drainRoundTimeout = regexp.MustCompile(`: global timeout reached: \S+$`)
+
+// withoutRoundTimeout removes a recognized round timeout suffix from line and
+// reports whether it found one. For a pod still terminating at the deadline,
+// kubectl appends "context deadline exceeded" after "to terminate". Other
+// occurrences are preserved because they can describe request timeouts.
+func withoutRoundTimeout(line string) (string, bool) {
+	if rest, ok := strings.CutSuffix(line, " to terminate: context deadline exceeded"); ok {
+		return rest + " to terminate", true
+	}
+	if loc := drainRoundTimeout.FindStringIndex(line); loc != nil {
+		return line[:loc[0]], true
+	}
+	return line, false
+}
+
+// drainPod matches the three ways kubectl names a pod in a drain error, with
+// the pod's name and namespace as submatches.
+var drainPod = regexp.MustCompile(`pods/"([^"]*)" -n "([^"]*)"|pod "([^"]*)" (?:from terminating namespace|in namespace) "([^"]*)"`)
+
+// drainPodName returns a drain error's pod as namespace/name, or "" when the
+// error has no recognized pod reference.
+func drainPodName(line string) string {
+	m := drainPod.FindStringSubmatch(line)
+	switch {
+	case m == nil:
+		return ""
+	case m[1] != "":
+		return m[2] + "/" + m[1]
+	default:
+		return m[4] + "/" + m[3]
+	}
+}
+
+// drainFailureReasons returns distinct recognized drain errors in order of
+// first appearance. kubectl repeats eviction errors at retry intervals, so lines
+// with retry delays count as attempts. Counts above one appear in the result.
+// Summaries provide a fallback when no individual error is recognized, since
+// kubectl can also print summary errors individually. Per-pod round timeout errors
+// retain the text before the timeout suffix so DrainNode can report the total
+// timeout. A round timeout error is omitted if an earlier error names the same pod.
 func drainFailureReasons(out string) []string {
 	var order []string
-	counts := map[string]int{}
+	attempts := map[string]int{}
+	seen := map[string]bool{}
+	named := map[string]bool{}
+	var summaries []string
 	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(strings.TrimSpace(line), "error: ")
+		if m := drainSummary.FindStringSubmatch(line); m != nil {
+			summaries = append(summaries, m[1])
+			continue
+		}
 		if !strings.HasPrefix(line, "error") && !strings.HasPrefix(line, "cannot delete") {
 			continue
 		}
-		line = drainRetryNote.ReplaceAllString(line, "")
-		if counts[line] == 0 {
+		if rest, ok := withoutRoundTimeout(line); ok {
+			if pod := drainPodName(line); pod != "" && named[pod] {
+				continue
+			}
+			line = rest
+		}
+		if pod := drainPodName(line); pod != "" {
+			named[pod] = true
+		}
+		retry := drainRetryNote.MatchString(line)
+		line = strings.TrimSuffix(drainRetryNote.ReplaceAllString(line, ""), ".")
+		if !seen[line] {
+			seen[line] = true
 			order = append(order, line)
 		}
-		counts[line]++
+		if retry {
+			attempts[line]++
+		}
+	}
+	if len(order) == 0 && len(summaries) > 0 {
+		return drainFailureReasons(strings.Join(summaries, "\n"))
 	}
 	reasons := make([]string, 0, len(order))
 	for _, line := range order {
-		if n := counts[line]; n > 1 {
+		if n := attempts[line]; n > 1 {
 			line = fmt.Sprintf("%s (%d attempts)", line, n)
 		}
 		reasons = append(reasons, line)

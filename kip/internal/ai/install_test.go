@@ -545,7 +545,9 @@ func TestWaitForModelLoadedFailsWhenJobFailed(t *testing.T) {
 	err := inst.waitForModelLoaded(context.Background(), "qwen2.5:3b-instruct-q4_K_M")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not load")
-	assert.Contains(t, err.Error(), "kubectl logs")
+	assert.Contains(t, err.Error(), "'kip ai logs ollama'")
+	assert.Contains(t, err.Error(), "'kip ai logs model-probe'")
+	assert.NotContains(t, err.Error(), "kubectl")
 }
 
 func TestWaitForModelLoadedRetrySafe(t *testing.T) {
@@ -886,7 +888,8 @@ func TestWaitForHelmChartJobReportsFailedJob(t *testing.T) {
 	err := inst.waitForHelmChartJob(context.Background(), "ollama", "", true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed")
-	assert.Contains(t, err.Error(), "kubectl logs")
+	assert.Contains(t, err.Error(), "'kip ai logs ollama --chart'")
+	assert.NotContains(t, err.Error(), "kubectl")
 }
 
 // TestLibreChatConfigHashRollsChartGeneration: changing the model

@@ -748,6 +748,21 @@ kip ai uninstall                          # remove the bundle and wipe its data
 | `-y, --yes` | install | `false` | Skip the auto-configure prompt |
 | `--reinstall-failed` | install | `false` | Apply the charts even when a Helm release is not deployed, which can reinstall it. See [When a chart upgrade fails](./ai#when-a-chart-upgrade-fails) |
 
+### kip ai logs {#kip-ai-logs}
+
+Show the logs of one AI bundle component: `ollama`, `librechat`, `mongodb`, `meilisearch`, `qdrant` or `anythingllm`. `model-probe` checks that the chat model is available, and `embedding-pull` downloads and checks the embedding model. For these two components, logs come from the newest existing job, and kip keeps a finished job for an hour. With `--chart`, the command shows logs from the Helm controller's job that installs or upgrades the component's chart.
+
+```bash
+kip ai logs ollama --follow               # watch a model download
+kip ai logs librechat --chart             # why a LibreChat chart upgrade failed
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--chart` | `false` | Show logs from the Helm job for the component's chart |
+| `-f, --follow` | `false` | Keep streaming new lines until all log streams end or you press Ctrl+C |
+| `--tail` | `100` | Lines to show from the end of each pod's log |
+
 ### AI bundle health on the Platform page {#ai-bundle-health-on-the-platform-page}
 
 The Platform page surfaces a drift check for each installed AI bundle. The check reads the `kipper-ai-bundle-state` and `kipper-rag-bundle-state` ConfigMaps in `kipper-ai` and confirms every expected workload (Ollama, LibreChat, AnythingLLM, Qdrant, plus their Ingresses) still exists.
@@ -1022,6 +1037,8 @@ kip service start mydb                       # start a service kip node fence le
 ```
 
 `kip service add --copies 2` keeps two copies of the service's data, each on a different node that can hold copies. It is refused on local storage, on a cluster that offers one copy (see [`kip cluster storage`](#kip-cluster-storage)), and when fewer than two nodes can hold copies. The default is one copy. On a cluster with in-cluster backups, kip warns once that a second copy does not replace external backups. `kip service update <name> --copies N [--wait]` changes the copies of an existing service, which needs the project owner role. Requesting two copies runs the same checks as creation, unless the volume already has at least two copies. If the cluster [switched to Longhorn](#kip-service-storage-longhorn) but the service's data is still on local storage, move that data to Longhorn before requesting two copies. kip saves the requested copy count. Lowering the copies stops the service: Kipper lowers the count only while the volume is attached on the server with nothing able to write to it, Longhorn removes the extra copy away from the server, and Kipper starts the service again once the copy is gone. A volume created without Longhorn's revision counter also stops the service once when its copies are raised, to switch the counter on, and the change says so while the service is stopped. Setting the copies back to `2` before Longhorn has removed the copy starts the service again at two copies. If Longhorn has placed the server copy for the change already, Kipper keeps it, and Longhorn removes one of the other copies first, so the volume ends at two. On a cluster that offers one copy, setting them back to `2` needs an admin. Without `--wait`, it waits up to 30 seconds to print the controller's first response. `--wait` follows the conversion until every copy is healthy, for up to three hours. While waiting, the command fails if another client changes the copy count or the object is deleted and created again. A blocked conversion exits non-zero with the reason. A wait for Kubernetes or Longhorn, such as for the volume to detach after the stop or for Longhorn to remove the extra copy, is reported as pending, and `--wait` keeps waiting through it until its limit. The copies cannot change again while Longhorn builds a copy, or while the service moves to Longhorn. See [Changing the copies of a running service](/en/worker-nodes#changing-the-copies-of-a-running-service).
+
+`kip service update <name> --storage <size>` grows the service's volumes while it runs. Volumes can only grow. For local-path storage, the command only records the declared size and leaves the claims unchanged. For other storage classes, kip first asks the API server to check each requested claim update without saving it. If Longhorn rejects an update because its disks lack capacity, the command stops with Longhorn's reason before any claim changes. Each claim is checked separately, so two claims that share a disk can both pass the checks, yet a later update can be refused when their combined requests exceed capacity. If a claim update fails, the command names any claims whose size requests it already saved and leaves the declared size unchanged. Make room first, for example by increasing scheduling capacity with `kip cluster storage --over-provisioning <percent>`. If a webhook reports that it cannot support these checks, kip skips the remaining checks and proceeds with the updates. When an earlier expansion is unfinished, kip allows a smaller request above the volume's reported capacity so you can retry the expansion. The API server still checks the new request.
 
 `kip service share` accepts `--project` and `--environment` to target a service outside the active project, `--expires` (up to 720h) for the link lifetime, and `--label` for a note in the listing. Use `--list` to see a service's links, `--revoke <id>` to kill one, and `--revoke-all` plus `--rotate-key` to contain a leak.
 

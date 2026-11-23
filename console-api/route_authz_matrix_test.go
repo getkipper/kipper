@@ -23,6 +23,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
@@ -370,7 +371,14 @@ func matrixRouter(t *testing.T, email, globalRole string, projectRole kipperv1.P
 
 	ctx, stopSweepers := context.WithCancel(context.Background())
 	t.Cleanup(stopSweepers)
-	router := buildRouter(ctx, clientset, dynfake.NewSimpleDynamicClient(scheme),
+	// Seed the backup named by {backup} so authorized requests reach the
+	// handler's remaining checks instead of returning 404.
+	backup := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "velero.io/v1", "kind": "Backup",
+		"metadata": map[string]any{"name": matrixParams["backup"], "namespace": "velero"},
+		"status":   map[string]any{"phase": "Completed"},
+	}}
+	router := buildRouter(ctx, clientset, dynfake.NewSimpleDynamicClient(scheme, backup),
 		&rest.Config{Host: "https://127.0.0.1:6443"}, crClient)
 
 	restore := func() {

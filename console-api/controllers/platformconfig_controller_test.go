@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1296,4 +1298,73 @@ func TestMapSizedHelmChart(t *testing.T) {
 	}
 	assert.Empty(t, mapSizedHelmChart(context.Background(), chart(helmChartNamespace, "coredns")), "a chart the reconciler does not size")
 	assert.Empty(t, mapSizedHelmChart(context.Background(), chart("default", "traefik")), "a same-named chart outside kube-system")
+}
+
+// TestPlatformConfigReconciler_LeavesADisabledChartThatIsAlreadyDeleting checks
+// that polling for Loki claim cleanup avoids repeated delete requests while
+// helm-controller holds the chart's finalizer until uninstall finishes.
+func TestPlatformConfigReconciler_LeavesADisabledChartThatIsAlreadyDeleting(t *testing.T) {
+	scheme := testScheme()
+	no := false
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec: kipperv1.PlatformConfigSpec{
+			Profile:    platform.ProfileMedium,
+			Components: []kipperv1.ComponentOverride{{Name: componentLoki, Enabled: &no}},
+		},
+	}
+	deleting := newHelmChart("loki", "singleBinary: {}\n")
+	deleting.SetFinalizers([]string{"wrangler.cattle.io/on-helm-chart-remove"})
+	now := metav1.Now()
+	deleting.SetDeletionTimestamp(&now)
+	chartDeletes := 0
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pc, deleting, nodeExporterCertSecret()).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == "loki" && obj.GetObjectKind().GroupVersionKind().Kind == helmChartGVK.Kind {
+					chartDeletes++
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+
+	for pass := 0; pass < 2; pass++ {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+		require.NoError(t, err)
+	}
+
+	assert.Zero(t, chartDeletes)
+}
+
+// TestPlatformConfigReconciler_KeepsAMissingChartOutOfTheDefaultLog verifies that
+// expected chart absences, such as Velero when kip installs without backups,
+// stay out of the default log. This avoids repeated messages during the
+// reconciler's five-second polling while waiting for chart deletion.
+func TestPlatformConfigReconciler_KeepsAMissingChartOutOfTheDefaultLog(t *testing.T) {
+	scheme := testScheme()
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec:       kipperv1.PlatformConfigSpec{Profile: platform.ProfileMedium},
+	}
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pc, nodeExporterCertSecret()).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+	var lines []string
+	logger := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: 0})
+	ctx := logr.NewContext(context.Background(), logger)
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+	require.NoError(t, err)
+
+	for _, line := range lines {
+		assert.NotContains(t, line, "HelmChart not present")
+	}
 }

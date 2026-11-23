@@ -281,7 +281,7 @@ func (r *PlatformConfigReconciler) reconcileComponentEnabled(ctx context.Context
 		}
 		logger.Info("HelmChart re-created after enable", "chart", chartName)
 
-	case !enabled && exists:
+	case !enabled && exists && chart.GetDeletionTimestamp() == nil:
 		if err := r.Delete(ctx, chart); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
@@ -506,7 +506,7 @@ func (r *PlatformConfigReconciler) patchHelmChart(ctx context.Context, name stri
 	chart.SetGroupVersionKind(helmChartGVK)
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: helmChartNamespace}, chart); err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("HelmChart not present; skipping", "chart", name)
+			logger.V(1).Info("HelmChart not present. Skipping update.", "chart", name)
 			return false, nil
 		}
 		return false, fmt.Errorf("getting HelmChart %s: %w", name, err)

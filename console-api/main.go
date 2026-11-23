@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -75,6 +76,16 @@ func configureControllerLogging() {
 	ctrl.SetLogger(controllerLogger())
 }
 
+// logLevel maps LOG_LEVEL to debug case-insensitively and defaults to info.
+// This keeps API key, plan, and credential audit events visible at info for
+// every setting.
+func logLevel(value string) slog.Level {
+	if strings.EqualFold(value, "debug") {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
 // version is the console-api build version, injected at build time via
 // -ldflags "-X main.version=...". It is surfaced on /health for the CLI's
 // version handshake.
@@ -98,7 +109,7 @@ func main() {
 
 	// API-key and plan mutations log a JSON audit event so Loki can parse the
 	// actor, action, and object.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel(os.Getenv("LOG_LEVEL"))})))
 	configureControllerLogging()
 
 	handlers.BuildVersion = version

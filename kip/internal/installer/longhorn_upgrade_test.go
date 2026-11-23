@@ -116,8 +116,8 @@ func (f *fakeLonghorn) Run(cmd string) (string, error) {
 		}
 		f.leaseRenewals++
 		return fmt.Sprintf(`{"spec":{"holderIdentity":"longhorn-global-manager-a","renewTime":"2026-11-09T18:00:%02d.000000Z"}}`, f.leaseRenewals%60), nil
-	case cmd == globalManagerPodQuery:
-		return `{"items":[{"metadata":{"name":"longhorn-global-manager-a"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}`, nil
+	case cmd == podsQuery(globalManagerPodArgs):
+		return asProjected(`{"items":[{"metadata":{"name":"longhorn-global-manager-a"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}`), nil
 	case cmd == longhornSettingQuery:
 		extra := ""
 		if f.imCPUSetting != "" {
@@ -128,8 +128,8 @@ func (f *fakeLonghorn) Run(cmd string) (string, error) {
 		return f.objects(), nil
 	case cmd == kubeNodeQuery:
 		return f.kubeNodes(), nil
-	case cmd == "kubectl get pods -A --request-timeout=30s -o json":
-		return `{"items":[` + strings.Join(f.pods, ",") + `]}`, nil
+	case cmd == podsQuery(cpuFactsPodArgs):
+		return asProjected(`{"items":[` + strings.Join(f.pods, ",") + `]}`), nil
 	case cmd == "kubectl get namespaces --request-timeout=30s -o json":
 		return `{"items":[` + strings.Join(f.namespaces, ",") + `]}`, nil
 	case strings.Contains(cmd, "kubectl get crd --request-timeout=30s -o json"):

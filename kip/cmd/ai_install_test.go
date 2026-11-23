@@ -417,3 +417,11 @@ func TestMinIOSizeForRoundsUpToWholeGiB(t *testing.T) {
 	assert.Equal(t, "30Gi", minioSizeFor(30*gib))
 	assert.Equal(t, "5Gi", minioSizeFor(9*gib/2))
 }
+
+func TestModelLoadedLinePointsAtKipForPullProgress(t *testing.T) {
+	assert.Equal(t, `✔  model "qwen2.5:0.5b" loaded`, modelLoadedLine("qwen2.5:0.5b", []string{"qwen2.5:0.5b"}))
+
+	line := modelLoadedLine("qwen2.5:0.5b", []string{"nomic-embed-text"})
+	assert.Contains(t, line, "kip ai logs ollama")
+	assert.NotContains(t, line, "kubectl")
+}

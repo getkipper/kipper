@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -335,22 +337,22 @@ func (b *Backups) Schedules(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
-// DeleteBackup removes a backup.
+var deleteBackupRequestGVR = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "deletebackuprequests"}
+
+// DeleteBackup asks Velero to delete a backup and its stored data, returning 202
+// when the request is created. Backups with an empty, New, or Queued phase are
+// deleted directly because data writes have not started, returning 204. It returns
+// 409 for AI bundle backups, other unfinished phases, or concurrent changes during
+// direct deletion. Requests to Velero also return 409 if its Deployment is missing
+// or scaled to zero, storage is read-only or has a phase other than Available,
+// or a deletion request for the backup is waiting for Velero to start.
 // DELETE /api/v1/backups/{backup}
 func (b *Backups) DeleteBackup(w http.ResponseWriter, r *http.Request) {
 	if b.refuseWithoutBackups(w, r) {
 		return
 	}
-	parts := strings.Split(r.URL.Path, "/")
-	backupName := ""
-	for i, p := range parts {
-		if p == "backups" && i+1 < len(parts) && parts[i+1] != "schedules" {
-			backupName = parts[i+1]
-			break
-		}
-	}
-
-	if backupName == "" {
+	name := chi.URLParam(r, "backup")
+	if name == "" {
 		respondError(w, http.StatusBadRequest, "backup name is required")
 		return
 	}
@@ -358,12 +360,122 @@ func (b *Backups) DeleteBackup(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	if err := b.Dynamic.Resource(backupGVR).Namespace("velero").Delete(ctx, backupName, metav1.DeleteOptions{}); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete backup: %v", err))
+	backups := b.Dynamic.Resource(backupGVR).Namespace("velero")
+	backup, err := backups.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("backup %q not found", name))
+		return
+	}
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("reading backup %q: %v", name, err))
+		return
+	}
+	if labels := backup.GetLabels(); labels["app.kubernetes.io/managed-by"] == "kipper" && labels["app.kubernetes.io/part-of"] == "kipper-ai" {
+		respondError(w, http.StatusConflict, fmt.Sprintf("Backup %s belongs to the AI bundle. Run 'kip ai backup delete --name %s', which deletes the bundle's paired backups together.", name, strings.TrimSuffix(name, "-aiconfig")))
+		return
+	}
+	phase, _, _ := unstructured.NestedString(backup.Object, "status", "phase")
+	switch {
+	case phase == "" || phase == "New" || phase == "Queued":
+		// Preconditions prevent deletion if Velero starts the backup after our read.
+		uid, version := backup.GetUID(), backup.GetResourceVersion()
+		err := backups.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}})
+		if apierrors.IsConflict(err) {
+			respondError(w, http.StatusConflict, fmt.Sprintf("Backup %s changed while it was being deleted, so Velero may have started it. Try again.", name))
+			return
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("deleting backup %q: %v", name, err))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case phase == "ReadyToStart":
+		respondError(w, http.StatusConflict, fmt.Sprintf("Velero is about to start backup %s. Delete it once it completes or fails.", name))
+		return
+	case backupscope.Unfinished(phase):
+		respondError(w, http.StatusConflict, fmt.Sprintf("Velero is still running backup %s (phase %s). Delete it once it completes or fails.", name, phase))
+		return
+	}
+	if reason, err := b.deletionRefused(ctx, backup); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if reason != "" {
+		respondError(w, http.StatusConflict, reason)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	requests := b.Dynamic.Resource(deleteBackupRequestGVR).Namespace("velero")
+	list, err := requests.List(ctx, metav1.ListOptions{})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("reading Velero's deletion requests: %v", err))
+		return
+	}
+	for _, req := range list.Items {
+		target, _, _ := unstructured.NestedString(req.Object, "spec", "backupName")
+		reqPhase, _, _ := unstructured.NestedString(req.Object, "status", "phase")
+		// Velero skips requests left InProgress after a restart and removes them
+		// when processing a new request. Only pending requests should block a retry.
+		if target == name && (reqPhase == "" || reqPhase == "New") {
+			respondError(w, http.StatusConflict, fmt.Sprintf("Velero received a request at %s to delete backup %s and has not started it yet. Try again in a minute.", req.GetCreationTimestamp().UTC().Format("2006-01-02 15:04 MST"), name))
+			return
+		}
+	}
+
+	// Let Velero add and shorten the backup-name label to match its selectors.
+	req := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "velero.io/v1",
+		"kind":       "DeleteBackupRequest",
+		"metadata": map[string]any{
+			"generateName": name + "-",
+			"namespace":    "velero",
+			"labels":       map[string]any{"velero.io/backup-uid": string(backup.GetUID())},
+		},
+		"spec": map[string]any{"backupName": name},
+	}}
+	if _, err := requests.Create(ctx, req, metav1.CreateOptions{}); err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("asking Velero to delete backup %q: %v", name, err))
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// deletionRefused returns a reason if Velero's Deployment is missing or scaled to
+// zero, or the backup's storage location is read-only or has a phase other than
+// Available. An empty reason and nil error allow deletion. Storage location read
+// errors are left for Velero to handle. Other Deployment read errors are returned.
+func (b *Backups) deletionRefused(ctx context.Context, backup *unstructured.Unstructured) (string, error) {
+	name := backup.GetName()
+	deploy, err := b.Client.AppsV1().Deployments("velero").Get(ctx, "velero", metav1.GetOptions{})
+	stopped := apierrors.IsNotFound(err)
+	if err != nil && !stopped {
+		return "", fmt.Errorf("reading the Velero Deployment: %w", err)
+	}
+	if !stopped && deploy.Spec.Replicas != nil {
+		stopped = *deploy.Spec.Replicas == 0
+	}
+	if stopped {
+		return fmt.Sprintf("Backup %s cannot be deleted now because Velero is not running. kip stops Velero while it moves the backup storage or resets the repository key. Try again once that finishes.", name), nil
+	}
+	location, _, _ := unstructured.NestedString(backup.Object, "spec", "storageLocation")
+	if location == "" {
+		location = "default"
+	}
+	bsl, err := b.Dynamic.Resource(backupStorageLocationGVR).Namespace("velero").Get(ctx, location, metav1.GetOptions{})
+	if err == nil {
+		if mode, _, _ := unstructured.NestedString(bsl.Object, "spec", "accessMode"); mode == "ReadOnly" {
+			return fmt.Sprintf("Backup %s is in backup storage location %s, which is read-only. Recovery installs use this mode. Velero cannot delete data from read-only storage.", name, location), nil
+		}
+		// Velero deletes only from a location it has validated as Available.
+		switch phase, _, _ := unstructured.NestedString(bsl.Object, "status", "phase"); phase {
+		case "Available":
+		case "":
+			return fmt.Sprintf("Velero has not checked backup storage location %s yet, so it would refuse to delete backup %s. Try again in a minute.", location, name), nil
+		default:
+			return fmt.Sprintf("Velero cannot reach backup storage location %s right now, so it would refuse to delete backup %s. Check the storage's address and credentials, then try again.", location, name), nil
+		}
+	}
+	return "", nil
 }
 
 // ToggleSchedule enables or disables a backup schedule.

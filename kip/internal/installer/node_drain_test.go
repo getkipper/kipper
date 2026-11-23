@@ -135,7 +135,8 @@ func TestDrainNodeNamesWhatCouldNotBeEvicted(t *testing.T) {
 	err := DrainNode(h, "worker-1", 20*time.Minute)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `instance-manager-abc`)
-	assert.Contains(t, err.Error(), "global timeout reached")
+	assert.Contains(t, err.Error(), "The drain did not finish within 20m0s")
+	assert.NotContains(t, err.Error(), "global timeout reached")
 	assert.NotContains(t, err.Error(), "already cordoned")
 }
 
@@ -167,7 +168,7 @@ func TestDrainNodeRunsInShortRoundsUpToTheTimeout(t *testing.T) {
 	h := &roundsHost{replies: []string{drainTimedOut, drainTimedOut, drainTimedOut, drainTimedOut}}
 	err := DrainNode(h, "worker-1", 5*time.Minute)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "global timeout reached")
+	assert.Equal(t, "draining worker-1: the drain did not finish within 5m0s", err.Error())
 	require.Len(t, h.commands, 3)
 	assert.Contains(t, h.commands[0], "--timeout=2m0s")
 	assert.Contains(t, h.commands[1], "--timeout=2m0s")
@@ -272,4 +273,120 @@ func TestDrainNodeSummarisesRepeatedEvictionErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "24 attempts")
 	assert.Contains(t, err.Error(), "disruption budget")
 	assert.Less(t, len(err.Error()), 600)
+}
+
+// drainBlockedByBudget shows kubectl drain output when a pod disruption budget
+// blocks eviction until the round times out.
+const drainBlockedByBudget = "evicting pod gate/drainme-0\n" +
+	"error when evicting pods/\"drainme-0\" -n \"gate\" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.\n" +
+	"error when evicting pods/\"drainme-0\" -n \"gate\" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.\n" +
+	"There are pending pods in node \"worker-1\" when an error occurred: error when evicting pods/\"drainme-0\" -n \"gate\": global timeout reached: 2m0s\n" +
+	"error: unable to drain node \"worker-1\" due to error: [error when evicting pods/\"drainme-0\" -n \"gate\": global timeout reached: 2m0s], continuing command...\n" +
+	"There are pending nodes to be drained:\n worker-1\n" +
+	"error: error when evicting pods/\"drainme-0\" -n \"gate\": global timeout reached: 2m0s\n"
+
+func TestDrainNodeStatesEachReasonOnceWithTheWholeTimeout(t *testing.T) {
+	h := &roundsHost{replies: []string{drainBlockedByBudget, drainBlockedByBudget}}
+
+	err := DrainNode(h, "worker-1", 4*time.Minute)
+
+	require.Error(t, err)
+	assert.Equal(t, `draining worker-1: error when evicting pods/"drainme-0" -n "gate": Cannot evict pod as it would violate the pod's disruption budget (2 attempts). The drain did not finish within 4m0s`, err.Error())
+}
+
+func TestDrainNodeKeepsAReasonOnlyKubectlsSummaryGives(t *testing.T) {
+	h := &roundsHost{replies: []string{"error: unable to drain node \"worker-1\" due to error: cannot delete Pods that declare no controller (use --force to override): default/bare, continuing command...\n" +
+		"There are pending nodes to be drained:\n worker-1\n" +
+		"error: cannot delete Pods that declare no controller (use --force to override): default/bare\n"}}
+
+	err := DrainNode(h, "worker-1", 30*time.Minute)
+
+	require.Error(t, err)
+	assert.Equal(t, "draining worker-1: cannot delete Pods that declare no controller (use --force to override): default/bare", err.Error())
+}
+
+func TestDrainNodeStatesEachFailureOfAnAggregateOnce(t *testing.T) {
+	h := &roundsHost{replies: []string{"evicting pod shop/a\nevicting pod shop/b\n" +
+		"There are pending pods in node \"worker-1\" when an error occurred: [error when evicting pods/\"a\" -n \"shop\": admission denied, error when evicting pods/\"b\" -n \"shop\": admission denied]\n" +
+		"error: unable to drain node \"worker-1\" due to error: [error when evicting pods/\"a\" -n \"shop\": admission denied, error when evicting pods/\"b\" -n \"shop\": admission denied], continuing command...\n" +
+		"There are pending nodes to be drained:\n worker-1\n" +
+		"error: error when evicting pods/\"a\" -n \"shop\": admission denied\n" +
+		"error: error when evicting pods/\"b\" -n \"shop\": admission denied\n"}}
+
+	err := DrainNode(h, "worker-1", 30*time.Minute)
+
+	require.Error(t, err)
+	assert.Equal(t, `draining worker-1: error when evicting pods/"a" -n "shop": admission denied and error when evicting pods/"b" -n "shop": admission denied`, err.Error())
+}
+
+func TestDrainNodeKeepsAWaitFailureBesideATimeout(t *testing.T) {
+	wait := `error when waiting for pod "a" in namespace "shop" to terminate: etcdserver: request timed out`
+	h := &roundsHost{replies: []string{"evicting pod shop/a\nevicting pod gate/drainme-0\n" +
+		"error when evicting pods/\"drainme-0\" -n \"gate\" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.\n" +
+		"There are pending pods in node \"worker-1\" when an error occurred: [" + wait + ", error when evicting pods/\"drainme-0\" -n \"gate\": global timeout reached: 2m0s]\n" +
+		"error: unable to drain node \"worker-1\" due to error: [" + wait + ", error when evicting pods/\"drainme-0\" -n \"gate\": global timeout reached: 2m0s], continuing command...\n" +
+		"There are pending nodes to be drained:\n worker-1\n" +
+		"error: " + wait + "\n" +
+		"error: error when evicting pods/\"drainme-0\" -n \"gate\": global timeout reached: 2m0s\n"}}
+
+	err := DrainNode(h, "worker-1", 2*time.Minute)
+
+	require.Error(t, err)
+	assert.Equal(t, `draining worker-1: error when evicting pods/"drainme-0" -n "gate": Cannot evict pod as it would violate the pod's disruption budget and `+wait+`. The drain did not finish within 2m0s`, err.Error())
+}
+
+func TestDrainNodeNamesAPodStillEvictingAtTheTimeout(t *testing.T) {
+	h := &roundsHost{replies: []string{"evicting pod shop/slow\n" +
+		"error: unable to drain node \"worker-1\" due to error: error when evicting pods/\"slow\" -n \"shop\": global timeout reached: 2m0s, continuing command...\n" +
+		"There are pending nodes to be drained:\n worker-1\n" +
+		"error: error when evicting pods/\"slow\" -n \"shop\": global timeout reached: 2m0s\n"}}
+
+	err := DrainNode(h, "worker-1", 2*time.Minute)
+
+	require.Error(t, err)
+	assert.Equal(t, `draining worker-1: error when evicting pods/"slow" -n "shop". The drain did not finish within 2m0s`, err.Error())
+}
+
+func TestDrainNodeKeepsWaitingForAPodStillTerminating(t *testing.T) {
+	terminating := "evicting pod shop/slow\npod/slow evicted\n" +
+		"There are pending pods in node \"worker-1\" when an error occurred: error when waiting for pod \"slow\" in namespace \"shop\" to terminate: context deadline exceeded\n" +
+		"error: unable to drain node \"worker-1\" due to error: error when waiting for pod \"slow\" in namespace \"shop\" to terminate: context deadline exceeded, continuing command...\n" +
+		"There are pending nodes to be drained:\n worker-1\n" +
+		"error: error when waiting for pod \"slow\" in namespace \"shop\" to terminate: context deadline exceeded\n"
+	h := &roundsHost{replies: []string{terminating, terminating}}
+
+	err := DrainNode(h, "worker-1", 4*time.Minute)
+
+	require.Error(t, err)
+	assert.Len(t, h.commands, 2, "a pod still terminating uses up the round, so the drain goes on")
+	assert.Equal(t, `draining worker-1: error when waiting for pod "slow" in namespace "shop" to terminate. The drain did not finish within 4m0s`, err.Error())
+}
+
+func TestDrainNodeNamesAPodInATerminatingNamespaceOnce(t *testing.T) {
+	h := &roundsHost{replies: []string{"evicting pod gone/web-0\n" +
+		"error when evicting pod \"web-0\" from terminating namespace \"gone\" (will retry after 5s): pods \"web-0\" is forbidden: unable to create new content in namespace gone because it is being terminated\n" +
+		"error when evicting pod \"web-0\" from terminating namespace \"gone\" (will retry after 5s): pods \"web-0\" is forbidden: unable to create new content in namespace gone because it is being terminated\n" +
+		"error: unable to drain node \"worker-1\" due to error: error when evicting pods/\"web-0\" -n \"gone\": global timeout reached: 2m0s, continuing command...\n" +
+		"There are pending nodes to be drained:\n worker-1\n" +
+		"error: error when evicting pods/\"web-0\" -n \"gone\": global timeout reached: 2m0s\n"}}
+
+	err := DrainNode(h, "worker-1", 2*time.Minute)
+
+	require.Error(t, err)
+	assert.Equal(t, `draining worker-1: error when evicting pod "web-0" from terminating namespace "gone": pods "web-0" is forbidden: unable to create new content in namespace gone because it is being terminated (2 attempts). The drain did not finish within 2m0s`, err.Error())
+}
+
+func TestDrainNodeKeepsAWebhookTimeoutAfterARetry(t *testing.T) {
+	webhook := `error when evicting pods/"a" -n "shop": Internal error occurred: failed calling webhook "eviction.example": failed to call webhook: Post "https://webhook.example/evict": context deadline exceeded`
+	h := &roundsHost{replies: []string{"evicting pod shop/a\n" +
+		"error when evicting pods/\"a\" -n \"shop\" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.\n" +
+		"error: unable to drain node \"worker-1\" due to error: " + webhook + ", continuing command...\n" +
+		"There are pending nodes to be drained:\n worker-1\n" +
+		"error: " + webhook + "\n"}}
+
+	err := DrainNode(h, "worker-1", 4*time.Minute)
+
+	require.Error(t, err)
+	assert.Len(t, h.commands, 1, "a webhook timeout is not the round running out")
+	assert.Equal(t, `draining worker-1: error when evicting pods/"a" -n "shop": Cannot evict pod as it would violate the pod's disruption budget and `+webhook, err.Error())
 }

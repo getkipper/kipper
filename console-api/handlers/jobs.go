@@ -214,6 +214,10 @@ func (j *Jobs) Create(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusConflict, fmt.Sprintf("job %q already exists", req.Name))
 			return
 		}
+		if errors.IsInvalid(err) {
+			respondError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to create job")
 		return
 	}

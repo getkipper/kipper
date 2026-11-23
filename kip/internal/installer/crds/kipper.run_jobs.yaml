@@ -71,6 +71,7 @@ spec:
                 type: object
               image:
                 description: Image is the container image for the job.
+                pattern: ^\S*$
                 type: string
               resources:
                 description: Resources configures CPU and memory for the job.

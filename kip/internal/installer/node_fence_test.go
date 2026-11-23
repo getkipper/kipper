@@ -113,7 +113,7 @@ const fenceReplicas = `{"items":[
 
 func fenceViewRunner() *routedRunner {
 	return &routedRunner{routes: []route{
-		{contains: "get pods", out: fencePods},
+		{contains: "get pods", out: asProjected(fencePods)},
 		{contains: "get pvc", out: fenceClaims},
 		{contains: "get pv ", out: fencePVs},
 		{contains: "get statefulsets", out: fenceSets},
@@ -268,7 +268,7 @@ func TestSameStamps(t *testing.T) {
 }
 
 func TestStopForFenceRecordsTheCountInTheSamePatch(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"41"},"spec":{"replicas":2}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"41"},"spec":{"replicas":2}}`}}}
 	require.NoError(t, StopForFence(master, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale, Volumes: []string{"pvc-1"}}))
 	require.Len(t, master.stdins, 1)
 	var patch struct {
@@ -289,24 +289,24 @@ func TestStopForFenceRecordsTheCountInTheSamePatch(t *testing.T) {
 }
 
 func TestStopForFenceNeverOverwritesAnEarlierStop(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"42","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"42","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StopForFence(master, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale}))
 	assert.Empty(t, master.stdins, "a retry must not record 0 as the count to restore")
 }
 
 func TestStartAfterFenceRestoresTheCountAndDropsTheMark(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"stale\"}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"stale\"}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StartAfterFence(master, "shop", "db"))
 	require.Len(t, master.stdins, 1)
 	assert.JSONEq(t, `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":null}},"spec":{"replicas":2}}`, master.stdins[0])
 
-	untouched := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"44"},"spec":{"replicas":1}}`}}}
+	untouched := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"44"},"spec":{"replicas":1}}`}}}
 	require.NoError(t, StartAfterFence(untouched, "shop", "db"))
 	assert.Empty(t, untouched.stdins)
 }
 
 func TestMarkMayLackWritesKeepsTheRestOfTheMark(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"only-copy\",\"volumes\":[\"pvc-1\",\"pvc-2\"]}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{\"node\":\"worker-1\",\"replicas\":2,\"reason\":\"only-copy\",\"volumes\":[\"pvc-1\",\"pvc-2\"]}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, MarkMayLackWrites(master, "shop", "db"))
 	require.Len(t, master.stdins, 1)
 	var patch struct {
@@ -321,11 +321,11 @@ func TestMarkMayLackWritesKeepsTheRestOfTheMark(t *testing.T) {
 	assert.Nil(t, patch.Spec, "the replica count stays as the stop set it")
 	assert.JSONEq(t, `{"node":"worker-1","replicas":2,"reason":"only-copy","volumes":["pvc-1","pvc-2"],"mayLackWrites":true}`, patch.Metadata.Annotations[FenceStopAnnotation])
 
-	marked := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"44","annotations":{"kipper.run/fence-stop":"{\"reason\":\"stale\",\"mayLackWrites\":true}"}},"spec":{"replicas":0}}`}}}
+	marked := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"44","annotations":{"kipper.run/fence-stop":"{\"reason\":\"stale\",\"mayLackWrites\":true}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, MarkMayLackWrites(marked, "shop", "db"))
 	assert.Empty(t, marked.stdins, "a mark that already records the doubt is left alone")
 
-	started := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"45"},"spec":{"replicas":1}}`}}}
+	started := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"45"},"spec":{"replicas":1}}`}}}
 	assert.Error(t, MarkMayLackWrites(started, "shop", "db"), "a service started since the view was read cannot carry the doubt")
 }
 
@@ -375,9 +375,9 @@ func TestForceDeletePodDeletesOnlyThePodItScanned(t *testing.T) {
 
 func TestPodsWithVolumesOnCarriesTheUIDAndThePersistentVolumeName(t *testing.T) {
 	master := &routedRunner{routes: []route{
-		{contains: "get pods -A", out: `{"items":[{"metadata":{"name":"db-0","namespace":"shop","uid":"uid-1","labels":{"app.kubernetes.io/managed-by":"kipper"},
+		{contains: "get pods -A", out: asProjected(`{"items":[{"metadata":{"name":"db-0","namespace":"shop","uid":"uid-1","labels":{"app.kubernetes.io/managed-by":"kipper"},
 		  "ownerReferences":[{"kind":"StatefulSet","name":"db","apiVersion":"apps/v1"}]},
-		  "spec":{"nodeName":"worker-1","volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-db-0"}}]}}]}`},
+		  "spec":{"nodeName":"worker-1","volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-db-0"}}]}}]}`)},
 		{contains: "get pvc -A", out: `{"items":[{"metadata":{"name":"data-db-0","namespace":"shop"},"spec":{"volumeName":"restored-db","accessModes":["ReadWriteOnce"]}}]}`},
 		{contains: "get pv ", out: `{"items":[{"metadata":{"name":"restored-db"},"spec":{"csi":{"driver":"driver.longhorn.io","volumeHandle":"pvc-1"}}}]}`},
 	}}
@@ -387,13 +387,13 @@ func TestPodsWithVolumesOnCarriesTheUIDAndThePersistentVolumeName(t *testing.T) 
 }
 
 func TestPodPlacement(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get pod 'db-0'", out: `{"metadata":{"name":"db-0"},"spec":{"nodeName":"server-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name=db-0", out: asProjected(`{"items":[{"metadata":{"name":"db-0"},"spec":{"nodeName":"server-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`)}}}
 	node, ready, err := PodPlacement(master, "shop", "db-0")
 	require.NoError(t, err)
 	assert.Equal(t, "server-1", node)
 	assert.True(t, ready)
 
-	terminating := &routedRunner{routes: []route{{contains: "get pod", out: `{"metadata":{"name":"db-0","deletionTimestamp":"2026-10-24T08:00:00Z"},"spec":{"nodeName":"worker-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}`}}}
+	terminating := &routedRunner{routes: []route{{contains: "get pod", out: projectedPod(`{"metadata":{"name":"db-0","deletionTimestamp":"2026-10-24T08:00:00Z"},"spec":{"nodeName":"worker-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}`)}}}
 	_, ready, err = PodPlacement(terminating, "shop", "db-0")
 	require.NoError(t, err)
 	assert.False(t, ready, "a pod being deleted is not serving")
@@ -451,7 +451,7 @@ func TestFenceReadsSkipKubectlWarnings(t *testing.T) {
 		{contains: "get node", out: warning + `{"metadata":{"name":"worker-1"}}` + "\nkip-server-now=1792800000\n"},
 		{contains: "get volumeattachments", out: warning + `{"items":[{"metadata":{"name":"csi-a"},"spec":{"attacher":"driver.longhorn.io","nodeName":"worker-1","source":{"persistentVolumeName":"pvc-1"}}}]}`},
 		{contains: "get replicas.longhorn.io", out: warning + `{"items":[]}`},
-		{contains: "get pod 'db-0'", out: warning + `{"metadata":{"name":"db-0"},"spec":{"nodeName":"server-1"}}`},
+		{contains: "metadata.name=db-0", out: asProjected(`{"items":[{"metadata":{"name":"db-0"},"spec":{"nodeName":"server-1"}}]}`)},
 	}}
 	n, err := ReadFenceNode(master, "worker-1")
 	require.NoError(t, err)
@@ -508,7 +508,7 @@ func TestKubeletAnswersResolvesAHostnameOnTheServer(t *testing.T) {
 }
 
 func TestClearFenceStopDropsTheMarkAndKeepsTheServiceStopped(t *testing.T) {
-	master := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{}"}},"spec":{"replicas":0}}`}}}
+	master := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":"{}"}},"spec":{"replicas":0}}`}}}
 	require.NoError(t, ClearFenceStop(master, "shop", "db"))
 	require.Len(t, master.stdins, 1)
 	assert.JSONEq(t, `{"metadata":{"resourceVersion":"43","annotations":{"kipper.run/fence-stop":null}}}`, master.stdins[0])
@@ -523,7 +523,7 @@ func TestReadLonghornVolumes(t *testing.T) {
 
 func TestReadFenceViewNamesWhatStartsEachUnownedPod(t *testing.T) {
 	r := fenceViewRunner()
-	r.routes[0] = route{contains: "get pods", out: `{"items":[
+	r.routes[0] = route{contains: "get pods", out: asProjected(`{"items":[
  {"metadata":{"name":"dt-move1-export","namespace":"shop","labels":{"app.kubernetes.io/managed-by":"kipper","kipper.run/resource-type":"datatransfer-mover"}},
   "spec":{"nodeName":"worker-1","volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"blob"}}]}},
  {"metadata":{"name":"report-abc","namespace":"shop","labels":{"app.kubernetes.io/managed-by":"kipper"},
@@ -532,7 +532,7 @@ func TestReadFenceViewNamesWhatStartsEachUnownedPod(t *testing.T) {
  {"metadata":{"name":"web-7f-x","namespace":"shop","labels":{"app.kubernetes.io/managed-by":"kipper"},
    "ownerReferences":[{"kind":"ReplicaSet","name":"web-7f","apiVersion":"apps/v1","controller":true}]},
   "spec":{"nodeName":"worker-1","volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"blob"}}]}}
-]}`}
+]}`)}
 	r.routes = append(r.routes, route{contains: "get datatransfers.kipper.run -A", out: `{"items":[]}`})
 	view, err := ReadFenceView(r, "worker-1")
 	require.NoError(t, err)
@@ -583,10 +583,10 @@ func TestOwnerExists(t *testing.T) {
 
 func TestReadFenceViewAddsTheServiceAMigrationMoverPaused(t *testing.T) {
 	r := fenceViewRunner()
-	r.routes[0] = route{contains: "get pods", out: `{"items":[
+	r.routes[0] = route{contains: "get pods", out: asProjected(`{"items":[
  {"metadata":{"name":"dt-move1-export","namespace":"shop","labels":{"app.kubernetes.io/managed-by":"kipper","kipper.run/resource-type":"datatransfer-mover"}},
   "spec":{"nodeName":"worker-1","volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-db-0","readOnly":true}}]}}
-]}`}
+]}`)}
 	r.routes[3] = route{contains: "get statefulsets", out: `{"items":[
  {"metadata":{"name":"db","namespace":"shop"},"spec":{"replicas":0,"volumeClaimTemplates":[{"metadata":{"name":"data"}}]}},
  {"metadata":{"name":"db","namespace":"other"},"spec":{"replicas":0,"volumeClaimTemplates":[{"metadata":{"name":"data"}}]}}
@@ -603,12 +603,12 @@ func TestReadFenceViewAddsTheServiceAMigrationMoverPaused(t *testing.T) {
 }
 
 func TestStopForFenceRecordsTheCountToRestoreForAPausedService(t *testing.T) {
-	paused := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
+	paused := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StopForFence(paused, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale, Replicas: 2}))
 	require.Len(t, paused.stdins, 1)
 	assert.Contains(t, paused.stdins[0], `\"replicas\":2`)
 
-	unknown := &routedRunner{routes: []route{{contains: "get statefulset 'db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
+	unknown := &routedRunner{routes: []route{{contains: "metadata.name='db'", out: `{"metadata":{"resourceVersion":"42"},"spec":{"replicas":0}}`}}}
 	require.NoError(t, StopForFence(unknown, "shop", "db", FenceStopMark{Node: "worker-1", Reason: FenceStopStale}))
 	assert.Contains(t, unknown.stdins[0], `\"replicas\":1`, "every Kipper service is created with one replica")
 }
@@ -664,13 +664,13 @@ func TestKubeletProbeTellsAClosedPortFromAProbeThatDidNotRun(t *testing.T) {
 
 func TestReadFenceViewListsUnmanagedPodsWithSingleNodeVolumes(t *testing.T) {
 	r := fenceViewRunner()
-	r.routes[0] = route{contains: "get pods", out: `{"items":[
+	r.routes[0] = route{contains: "get pods", out: asProjected(`{"items":[
  {"metadata":{"name":"cache-0","namespace":"tools"},
   "spec":{"nodeName":"worker-1","volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-db-0"}},{"name":"more","persistentVolumeClaim":{"claimName":"blob"}}]}},
  {"metadata":{"name":"elsewhere","namespace":"tools"},
   "spec":{"nodeName":"worker-2","volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"blob"}}]}},
  {"metadata":{"name":"plain","namespace":"tools"},"spec":{"nodeName":"worker-1"}}
-]}`}
+]}`)}
 	r.routes[1] = route{contains: "get pvc", out: `{"items":[
  {"metadata":{"name":"data-db-0","namespace":"tools"},"spec":{"volumeName":"pvc-1","accessModes":["ReadWriteOnce"]}},
  {"metadata":{"name":"blob","namespace":"tools"},"spec":{"volumeName":"pvc-2","accessModes":["ReadWriteOnce"]}}

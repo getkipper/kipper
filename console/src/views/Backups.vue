@@ -138,16 +138,17 @@ async function handleRestore() {
 function handleDeleteBackup(name: string) {
   modal.open(ConfirmDialog, {
     title: `Delete backup ${name}?`,
-    message: 'This permanently removes the backup. Restoring from it will no longer be possible. This cannot be undone.',
+    message: 'Velero deletes the backup and its data from backup storage. You will no longer be able to restore from it. This cannot be undone.',
     confirmLabel: 'Delete backup',
     onConfirm: async () => {
       modal.close()
       try {
-        await deleteBackup(name)
-        toast.success(`Backup ${name} deleted`)
+        const { queued } = await deleteBackup(name)
+        toast.success(queued ? `Velero is deleting backup ${name} and its data in the backup storage` : `Backup ${name} deleted`)
         await loadAll()
-      } catch {
-        toast.error(`Failed to delete ${name}`)
+      } catch (e) {
+        const detail = isAxiosError(e) ? e.response?.data?.error : null
+        toast.error(detail || `Failed to delete ${name}`)
       }
     },
   })

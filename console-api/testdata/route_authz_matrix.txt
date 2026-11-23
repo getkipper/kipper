@@ -41,7 +41,7 @@ GET /api/v1/alerts	anon=401 outsider=allow viewer=allow deployer=allow owner=all
 GET /api/v1/alerts/unread-count	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=allow cluster-viewer-owner=allow
 GET /api/v1/appearance	anon=allow outsider=allow viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=allow cluster-viewer-owner=allow
 GET /api/v1/auth/2fa/status	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=allow cluster-viewer-owner=allow
-GET /api/v1/backups	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=panic cluster-viewer=403 cluster-viewer-owner=403
+GET /api/v1/backups	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow cluster-viewer=403 cluster-viewer-owner=403
 GET /api/v1/backups/schedules	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=panic cluster-viewer=403 cluster-viewer-owner=403
 GET /api/v1/cluster/status	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow cluster-viewer=403 cluster-viewer-owner=403
 GET /api/v1/dashboard	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=allow cluster-viewer-owner=allow

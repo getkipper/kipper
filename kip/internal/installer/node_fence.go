@@ -283,6 +283,16 @@ func kubectlJSON(master CommandRunner, what, cmd string, into any) error {
 	return nil
 }
 
+// podsOnNodeArgs selects every pod bound to node.
+func podsOnNodeArgs(node string) string {
+	return "-A --field-selector " + shellQuote("spec.nodeName="+node)
+}
+
+// podByNameArgs selects one pod by name.
+func podByNameArgs(ns, name string) string {
+	return fmt.Sprintf("-n %s --field-selector %s", shellQuote(ns), shellQuote("metadata.name="+name))
+}
+
 // failedRead uses readfailure.Error to keep sensitive cluster output out of errors.
 func failedRead(what, out string, err error) error {
 	return readfailure.Error(what, out, err)
@@ -296,8 +306,8 @@ func failedRead(what, out string, err error) error {
 // single-node Longhorn claims, sorted by namespace and pod name.
 // It fails on read errors or unreadable fence stop annotations.
 func ReadFenceView(master CommandRunner, node string) (FenceView, error) {
-	var pods corev1.PodList
-	if err := kubectlJSON(master, "the pods on "+node, fmt.Sprintf("kubectl get pods -A --field-selector spec.nodeName=%s -o json", shellQuote(node)), &pods); err != nil {
+	pods, err := readPods(master, "the pods on "+node, podsOnNodeArgs(node))
+	if err != nil {
 		return FenceView{}, err
 	}
 	var claims corev1.PersistentVolumeClaimList
@@ -308,22 +318,22 @@ func ReadFenceView(master CommandRunner, node string) (FenceView, error) {
 	if err := kubectlJSON(master, "persistent volumes", "kubectl get pv -o json", &pvs); err != nil {
 		return FenceView{}, err
 	}
-	var sets appsv1.StatefulSetList
-	if err := kubectlJSON(master, "StatefulSets", "kubectl get statefulsets -A -o json", &sets); err != nil {
+	sets, err := readStatefulSets(master, "StatefulSets", "-A")
+	if err != nil {
 		return FenceView{}, err
 	}
 	replicas, err := ReadReplicas(master)
 	if err != nil {
 		return FenceView{}, err
 	}
-	view, err := buildFenceView(node, stranded.Find(node, pods.Items, claims.Items, pvs.Items), pods.Items, sets.Items, replicas)
+	view, err := buildFenceView(node, stranded.Find(node, pods, claims.Items, pvs.Items), pods, sets, replicas)
 	if err != nil {
 		return FenceView{}, err
 	}
 	if view.Copies, err = ReadVolumeCopies(master, replicas); err != nil {
 		return FenceView{}, err
 	}
-	for _, s := range stranded.FindUnmanaged(node, pods.Items, claims.Items, pvs.Items) {
+	for _, s := range stranded.FindUnmanaged(node, pods, claims.Items, pvs.Items) {
 		if s.ReadWriteOnce {
 			view.Unmanaged = appendUnique(view.Unmanaged, s.Namespace+"/"+s.Pod)
 		}
@@ -664,10 +674,21 @@ type statefulSetHead struct {
 	} `json:"spec"`
 }
 
+// readStatefulSet reads the resource version, selected annotations, and replica
+// count needed for fence patches. A missing StatefulSet returns an error.
 func readStatefulSet(master CommandRunner, ns, name string) (statefulSetHead, error) {
 	var head statefulSetHead
-	err := kubectlJSON(master, "StatefulSet "+ns+"/"+name, fmt.Sprintf("kubectl -n %s get statefulset %s -o json", shellQuote(ns), shellQuote(name)), &head)
-	return head, err
+	s, err := readOneStatefulSet(master, ns, name)
+	if err != nil {
+		return head, err
+	}
+	if s == nil {
+		return head, fmt.Errorf("reading StatefulSet %s/%s: not found", ns, name)
+	}
+	head.Metadata.ResourceVersion = s.ResourceVersion
+	head.Metadata.Annotations = s.Annotations
+	head.Spec.Replicas = s.Spec.Replicas
+	return head, nil
 }
 
 func patchStatefulSet(master CommandRunner, ns, name string, patch map[string]any) error {
@@ -888,8 +909,8 @@ type FencedPod struct {
 // PodsWithVolumesOn lists the Kipper pods on node that mount a Longhorn
 // volume, RWO or RWX.
 func PodsWithVolumesOn(master CommandRunner, node string) ([]FencedPod, error) {
-	var pods corev1.PodList
-	if err := kubectlJSON(master, "the pods on "+node, fmt.Sprintf("kubectl get pods -A --field-selector spec.nodeName=%s -o json", shellQuote(node)), &pods); err != nil {
+	pods, err := readPods(master, "the pods on "+node, podsOnNodeArgs(node))
+	if err != nil {
 		return nil, err
 	}
 	var claims corev1.PersistentVolumeClaimList
@@ -901,12 +922,12 @@ func PodsWithVolumesOn(master CommandRunner, node string) ([]FencedPod, error) {
 		return nil, err
 	}
 	uids := map[string]string{}
-	for _, p := range pods.Items {
+	for _, p := range pods {
 		uids[p.Namespace+"/"+p.Name] = string(p.UID)
 	}
 	var out []FencedPod
 	index := map[string]int{}
-	for _, s := range stranded.Find(node, pods.Items, claims.Items, pvs.Items) {
+	for _, s := range stranded.Find(node, pods, claims.Items, pvs.Items) {
 		key := s.Namespace + "/" + s.Pod
 		i, ok := index[key]
 		if !ok {
@@ -987,18 +1008,14 @@ func ForceDeletePod(master CommandRunner, ns, name, uid string) error {
 // A missing pod returns an empty node, false and no error. A deleting pod
 // always reports false, regardless of its Ready condition.
 func PodPlacement(master CommandRunner, ns, name string) (string, bool, error) {
-	out, err := master.Run(fmt.Sprintf("kubectl -n %s get pod %s --ignore-not-found -o json", shellQuote(ns), shellQuote(name)))
+	pods, err := readPods(master, fmt.Sprintf("pod %s/%s", ns, name), podByNameArgs(ns, name))
 	if err != nil {
-		return "", false, failedRead(fmt.Sprintf("reading pod %s/%s", ns, name), out, err)
+		return "", false, err
 	}
-	out = kubectlPayload(out)
-	if strings.TrimSpace(out) == "" {
+	if len(pods) == 0 {
 		return "", false, nil
 	}
-	var pod corev1.Pod
-	if err := json.Unmarshal([]byte(out), &pod); err != nil {
-		return "", false, fmt.Errorf("reading pod %s/%s: %w", ns, name, err)
-	}
+	pod := pods[0]
 	if pod.DeletionTimestamp != nil {
 		return pod.Spec.NodeName, false, nil
 	}

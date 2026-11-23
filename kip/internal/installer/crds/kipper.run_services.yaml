@@ -114,6 +114,7 @@ spec:
                 type: string
               version:
                 description: Version is the image tag for the service engine.
+                pattern: ^\S*$
                 type: string
             required:
             - type

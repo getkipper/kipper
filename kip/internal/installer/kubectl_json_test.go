@@ -218,7 +218,7 @@ func TestFailedLogReadsKeepTheirOutputOutOfTheResult(t *testing.T) {
 	})
 	t.Run("a copy pod's log", func(t *testing.T) {
 		server := &routedRunner{routes: []route{
-			{contains: "get pod", out: `{"metadata":{"uid":"u-1"},"status":{"phase":"Succeeded"}}`},
+			{contains: "get pod", out: projectedPod(`{"metadata":{"uid":"u-1"},"status":{"phase":"Succeeded"}}`)},
 			{contains: " logs ", out: partial, err: failed},
 		}}
 		result, err := KubectlMoveCluster{Server: server}.CopyResult("app", "kipper-move-copy")

@@ -207,7 +207,8 @@ A drill also restores shared volumes and project shared storage through their ho
 
 **AI assistant and bundle**
 - `kip ai configure --provider <claude|openai|ollama> [--key --model --ollama-url] | status` — wire an AI provider for log analysis and diagnosis (bring your own key).
-- `kip ai install` — deploy a private LLM (Ollama) + chat UI in-cluster. Also `kip ai admin create`, `kip ai rag install`, `kip ai backup [--name]` (with `list|show|delete|repair`), `kip ai restore --name <backup>`, `kip ai uninstall`.
+- `kip ai install` deploys a private LLM (Ollama) and chat UI in the cluster. Related commands include `kip ai admin create`, `kip ai rag install`, `kip ai backup [--name]` (with `list|show|delete|repair`), `kip ai restore --name <backup>`, and `kip ai uninstall`.
+- `kip ai logs <component> [--chart] [-f]` shows logs for ollama, librechat, mongodb, meilisearch, qdrant, anythingllm, model-probe, or embedding-pull. Use `--chart` to show logs from the Helm job for the component's chart.
 
 ## Common workflows
 

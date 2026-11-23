@@ -192,23 +192,28 @@ func checkLonghornCPU(server CommandRunner) error {
 	return longhornCPURefusal(nodes, pods, namespaces)
 }
 
+// cpuFactsPodArgs selects the pods whose requests count against a node's CPU.
+const cpuFactsPodArgs = "-A --request-timeout=30s"
+
 func readCPUFacts(server CommandRunner) ([]corev1.Node, []corev1.Pod, []corev1.Namespace, error) {
 	var nodes corev1.NodeList
-	var pods corev1.PodList
 	var namespaces corev1.NamespaceList
 	for _, l := range []struct {
 		what, command string
 		into          any
 	}{
 		{"the nodes", kubeNodeQuery, &nodes},
-		{"the pods", "kubectl get pods -A --request-timeout=30s -o json", &pods},
 		{"the namespaces", "kubectl get namespaces --request-timeout=30s -o json", &namespaces},
 	} {
 		if err := kubectlJSON(server, l.what, l.command, l.into); err != nil {
 			return nil, nil, nil, fmt.Errorf("measuring CPU for Longhorn: %w", err)
 		}
 	}
-	return nodes.Items, pods.Items, namespaces.Items, nil
+	pods, err := readPods(server, "the pods", cpuFactsPodArgs)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("measuring CPU for Longhorn: %w", err)
+	}
+	return nodes.Items, pods, namespaces.Items, nil
 }
 
 // longhornCPURefusal returns an error for the first node whose unrequested CPU

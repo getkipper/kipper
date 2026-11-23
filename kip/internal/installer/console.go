@@ -156,6 +156,10 @@ rules:
   - apiGroups: ["velero.io"]
     resources: ["schedules"]
     verbs: ["get", "list", "update"]
+  # Velero processes deletion requests to remove backups and their stored data.
+  - apiGroups: ["velero.io"]
+    resources: ["deletebackuprequests"]
+    verbs: ["list", "create"]
   # Allow the console to refuse backups on read-only storage before creating them.
   - apiGroups: ["velero.io"]
     resources: ["backupstoragelocations"]

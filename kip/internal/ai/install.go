@@ -445,7 +445,7 @@ func (i *Installer) waitForHelmChartJob(ctx context.Context, chartName string, p
 				return i.checkReleaseDeployed(ctx, chart)
 			}
 			if jobCondition(job, batchv1.JobFailed) {
-				return fmt.Errorf("helm-controller job %s for chart %s failed; check 'kubectl logs -n kube-system jobs/%s'", jobName, chartName, jobName)
+				return fmt.Errorf("the Helm job %s for chart %s failed. See its log with 'kip ai logs %s --chart'", jobName, chartName, chartName)
 			}
 		}
 
@@ -798,13 +798,11 @@ func (i *Installer) waitForModelLoaded(ctx context.Context, model string) error 
 				return nil
 			}
 			if got.Status.Failed > 0 {
-				return fmt.Errorf("model %q did not load; check ollama logs with 'kubectl logs -n %s deployment/ollama' and the probe with 'kubectl logs -n %s job/%s'",
-					model, Namespace, Namespace, jobName)
+				return fmt.Errorf("model %q did not load. See Ollama's log with 'kip ai logs ollama' and the model check's log with 'kip ai logs model-probe'", model)
 			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("model %q not ready within %s; check 'kubectl logs -n %s deployment/ollama' for pull progress",
-				model, i.timeout(), Namespace)
+			return fmt.Errorf("model %q was not ready within %s. See the download progress with 'kip ai logs ollama'", model, i.timeout())
 		}
 		select {
 		case <-ctx.Done():
@@ -820,7 +818,7 @@ func (i *Installer) waitForModelLoaded(ctx context.Context, model string) error 
 // timeout do not collide with a still-deleting predecessor.
 func buildModelProbeJob(model string) *batchv1.Job {
 	noBackoff := int32(0)
-	ttl := int32(60)
+	ttl := int32(oneShotJobTTL / time.Second)
 	deadline := int64(1800) // 30 minutes upper bound on the in-pod loop.
 
 	script := fmt.Sprintf(`set -eu

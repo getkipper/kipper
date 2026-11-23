@@ -802,6 +802,10 @@ func (c *Client) connectionArgs(multiplex, fresh bool, extra ...string) []string
 	}
 	if fresh {
 		args = append(args, "-o", "ControlMaster=no", "-o", "ControlPath=none")
+	} else {
+		// Keep SSH banners and host key notices out of command output. Fresh
+		// login probes retain SSH diagnostics to interpret authentication results.
+		args = append(args, "-o", "LogLevel=ERROR")
 	}
 	if multiplex {
 		// One connection carries every command. Without this an install

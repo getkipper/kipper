@@ -1,3 +1,5 @@
+//go:build !windows
+
 package installer
 
 import (
@@ -6,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -19,9 +20,6 @@ import (
 // verify pod's stat takes -c formats. Homebrew's coreutils provide one on macOS.
 func verifyTools(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the verify script runs in a Linux container")
-	}
 	path := os.Getenv("PATH")
 	for _, dir := range []string{"/opt/homebrew/opt/coreutils/libexec/gnubin", "/usr/local/opt/coreutils/libexec/gnubin"} {
 		if _, err := os.Stat(filepath.Join(dir, "stat")); err == nil {

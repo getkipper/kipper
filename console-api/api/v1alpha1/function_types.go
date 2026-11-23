@@ -8,6 +8,7 @@ import (
 type FunctionSpec struct {
 	// Image is the container image for the function.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^\S*$`
 	Image string `json:"image,omitempty"`
 
 	// Port is the container port the function listens on.

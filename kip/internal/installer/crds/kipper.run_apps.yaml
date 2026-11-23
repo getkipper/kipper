@@ -211,6 +211,7 @@ spec:
                   rule: self.type != 'none' || (!has(self.port) && !has(self.timeoutSeconds))
               image:
                 description: Image is the container image to deploy.
+                pattern: ^\S*$
                 type: string
               links:
                 description: |-

@@ -306,7 +306,7 @@ func gateRoutes(ready, backups, pvbs string) []route {
 		{contains: "get pv 'pvc-a'", out: moved},
 		{contains: "get pvc 'data-db-0'", out: `{"metadata":{"name":"data-db-0","uid":"c1"},"spec":{"storageClassName":"longhorn-single"},"status":{"phase":"Bound"}}`},
 		{contains: "get services.kipper.run 'db'", out: `{"metadata":{"uid":"s2"},"spec":{}}`},
-		{contains: "get pod 'db-0'", out: `{"metadata":{"name":"db-0"},"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-db-0"}}]},"status":{"phase":"Running","conditions":[` + ready + `]}}`},
+		{contains: "metadata.name=db-0", out: projectedPod(`{"metadata":{"name":"db-0"},"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-db-0"}}]},"status":{"phase":"Running","conditions":[` + ready + `]}}`)},
 		{contains: "get backups.velero.io", out: backups},
 		{contains: "get podvolumebackups.velero.io", out: pvbs},
 	}

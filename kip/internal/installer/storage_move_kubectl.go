@@ -148,6 +148,16 @@ func notFound(out string, err error) bool {
 	return strings.Contains(text, "(NotFound)")
 }
 
+// getPod reads one pod with only the fields in podTemplate. A missing pod
+// returns false and no error.
+func (k KubectlMoveCluster) getPod(what, namespace, name string) (corev1.Pod, bool, error) {
+	pods, err := readPods(k.Server, what, podByNameArgs(namespace, name))
+	if err != nil || len(pods) == 0 {
+		return corev1.Pod{}, false, err
+	}
+	return pods[0], true, nil
+}
+
 // getJSON decodes one object into the destination. It returns false with no
 // error for a missing object and an error for an unreadable response.
 func (k KubectlMoveCluster) getJSON(what, cmd string, into any) (bool, error) {
@@ -458,12 +468,7 @@ func (k KubectlMoveCluster) SetServiceStorage(namespace, name, size string) erro
 }
 
 func (k KubectlMoveCluster) readStatefulSet(namespace, name string) (*appsv1.StatefulSet, error) {
-	var sts appsv1.StatefulSet
-	found, err := k.getJSON("StatefulSet "+name, fmt.Sprintf("kubectl -n %s get statefulset %s", shellQuote(namespace), shellQuote(name)), &sts)
-	if err != nil || !found {
-		return nil, err
-	}
-	return &sts, nil
+	return readOneStatefulSet(k.Server, namespace, name)
 }
 
 func (k KubectlMoveCluster) ReadStatefulSet(namespace, name string) (*MoveStatefulSet, error) {
@@ -562,8 +567,7 @@ func (k KubectlMoveCluster) StartStatefulSet(namespace, name string, replicas in
 }
 
 func (k KubectlMoveCluster) ServiceReady(namespace, name string) (bool, string, error) {
-	var pod corev1.Pod
-	found, err := k.getJSON("pod "+name+"-0", fmt.Sprintf("kubectl -n %s get pod %s", shellQuote(namespace), shellQuote(name+"-0")), &pod)
+	pod, found, err := k.getPod("pod "+name+"-0", namespace, name+"-0")
 	if err != nil || !found {
 		return false, "", err
 	}
@@ -837,7 +841,7 @@ var (
 )
 
 // requireEnforcingBinding checks that the binding named after the policy
-// targets that policy with the Deny action, so a refused probe proves enforcement.
+// targets that policy with the Deny action before probing admission.
 func (k KubectlMoveCluster) requireEnforcingBinding(name string) error {
 	var binding struct {
 		Spec struct {
@@ -886,6 +890,27 @@ func (k KubectlMoveCluster) AdmissionRefuses(namespace, claim string) (bool, err
 	}
 }
 
+// immortalNamespaces lists namespaces protected from deletion by the API server's
+// NamespaceLifecycle admission plugin.
+var immortalNamespaces = map[string]bool{"default": true, "kube-system": true, "kube-public": true}
+
+// protectedNamespace matches the API server's built-in deletion refusal for a
+// protected namespace. This refusal precedes validating admission policies and
+// replaces the move policy's denial. Matching a complete kubectl output line,
+// after trimming whitespace, excludes webhook denials that quote the refusal.
+func protectedNamespace(namespace, out string) bool {
+	if !immortalNamespaces[namespace] {
+		return false
+	}
+	want := fmt.Sprintf("Error from server (Forbidden): namespaces %q is forbidden: this namespace may not be deleted", namespace)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (k KubectlMoveCluster) NamespaceDeleteRefused(namespace string) (bool, error) {
 	if err := k.requireEnforcingBinding(platform.StorageMoveNamespacesPolicy); err != nil {
 		return false, err
@@ -894,7 +919,7 @@ func (k KubectlMoveCluster) NamespaceDeleteRefused(namespace string) (bool, erro
 	switch {
 	case err == nil:
 		return false, nil
-	case namespaceDenial.MatchString(out):
+	case namespaceDenial.MatchString(out), protectedNamespace(namespace, out):
 		return true, nil
 	default:
 		return false, fmt.Errorf("probing whether namespace %s can be deleted: %w: %s", namespace, err, strings.TrimSpace(out))
@@ -951,15 +976,17 @@ func (k KubectlMoveCluster) NamespaceTerminating(namespace string) (NamespaceDel
 
 func (k KubectlMoveCluster) ResourceState(namespace string) (MoveResources, error) {
 	var nodes corev1.NodeList
-	var pods corev1.PodList
 	var quotas corev1.ResourceQuotaList
 	var classes schedulingv1.PriorityClassList
+	pods, err := readPods(k.Server, "the pods", "-A")
+	if err != nil {
+		return MoveResources{}, err
+	}
 	for _, l := range []struct {
 		what, cmd string
 		into      any
 	}{
 		{"the nodes", "kubectl get nodes -o json", &nodes},
-		{"the pods", "kubectl get pods -A -o json", &pods},
 		{"the quotas in " + namespace, fmt.Sprintf("kubectl -n %s get resourcequota -o json", shellQuote(namespace)), &quotas},
 		{"the priority classes", "kubectl get priorityclasses -o json", &classes},
 	} {
@@ -967,7 +994,7 @@ func (k KubectlMoveCluster) ResourceState(namespace string) (MoveResources, erro
 			return MoveResources{}, err
 		}
 	}
-	return MoveResources{Nodes: nodes.Items, Pods: pods.Items, Quotas: quotas.Items, DefaultPriorityClass: defaultPriorityClass(classes.Items)}, nil
+	return MoveResources{Nodes: nodes.Items, Pods: pods, Quotas: quotas.Items, DefaultPriorityClass: defaultPriorityClass(classes.Items)}, nil
 }
 
 // defaultPriorityClass returns the class the API server gives a pod that
@@ -999,12 +1026,12 @@ func (k KubectlMoveCluster) ClaimsLabeled(namespace, selector string) ([]MoveCla
 }
 
 func (k KubectlMoveCluster) PodsMounting(namespace string, claims []string) ([]MovePod, error) {
-	var pods corev1.PodList
-	if err := kubectlJSON(k.Server, "the pods in "+namespace, fmt.Sprintf("kubectl -n %s get pods -o json", shellQuote(namespace)), &pods); err != nil {
+	pods, err := readPods(k.Server, "the pods in "+namespace, "-n "+shellQuote(namespace))
+	if err != nil {
 		return nil, err
 	}
 	var out []MovePod
-	for _, p := range pods.Items {
+	for _, p := range pods {
 		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			continue
 		}
@@ -1127,8 +1154,7 @@ func (k KubectlMoveCluster) VerifyResult(namespace, name string) (CopyResult, er
 // helperResult reads a move pod's phase and, once it has ended, the last 40
 // lines of its log. Success needs both a Succeeded pod and marker in the log.
 func (k KubectlMoveCluster) helperResult(what, namespace, name, marker string) (CopyResult, error) {
-	var pod corev1.Pod
-	found, err := k.getJSON("the "+what+" pod", fmt.Sprintf("kubectl -n %s get pod %s", shellQuote(namespace), shellQuote(name)), &pod)
+	pod, found, err := k.getPod("the "+what+" pod", namespace, name)
 	if err != nil {
 		return CopyResult{}, err
 	}
@@ -1144,7 +1170,21 @@ func (k KubectlMoveCluster) helperResult(what, namespace, name, marker string) (
 		log = fmt.Sprintf("(%v)", failedRead("reading the "+what+" log", log, err))
 	}
 	succeeded := pod.Status.Phase == corev1.PodSucceeded && strings.Contains(log, marker)
+	if pod.Status.Phase == corev1.PodFailed && pod.Status.Reason != "" {
+		pod.Status.Message = k.podMessage(namespace, name)
+	}
 	return CopyResult{Finished: true, Succeeded: succeeded, UID: uid, Log: log, Reason: copyPodEnding(&pod)}, nil
+}
+
+// podMessage reads a pod's status message separately because its line breaks
+// could disrupt the podTemplate records. It trims surrounding whitespace and
+// returns "" if the message is empty or the read fails.
+func (k KubectlMoveCluster) podMessage(namespace, name string) string {
+	out, err := k.Server.Run(fmt.Sprintf("kubectl -n %s get pod %s -o jsonpath='{.status.message}' 2>/dev/null", shellQuote(namespace), shellQuote(name)))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 func (k KubectlMoveCluster) VolumeDetached(name string) (bool, error) {
@@ -1194,15 +1234,14 @@ func copyPodEnding(pod *corev1.Pod) string {
 }
 
 func (k KubectlMoveCluster) PodExists(namespace, name string) (bool, error) {
-	var pod corev1.Pod
-	return k.getJSON("pod "+name, fmt.Sprintf("kubectl -n %s get pod %s", shellQuote(namespace), shellQuote(name)), &pod)
+	_, found, err := k.getPod("pod "+name, namespace, name)
+	return found, err
 }
 
 func (k KubectlMoveCluster) DeletePod(namespace, name string) (bool, error) {
 	if out, err := k.Server.Run(fmt.Sprintf("kubectl -n %s delete pod %s --ignore-not-found --wait=false >/dev/null", shellQuote(namespace), shellQuote(name))); err != nil {
 		return false, fmt.Errorf("deleting pod %s: %w: %s", name, err, strings.TrimSpace(out))
 	}
-	var pod corev1.Pod
-	found, err := k.getJSON("pod "+name, fmt.Sprintf("kubectl -n %s get pod %s", shellQuote(namespace), shellQuote(name)), &pod)
+	_, found, err := k.getPod("pod "+name, namespace, name)
 	return !found, err
 }
