@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +58,20 @@ func openMySQLTestDB(t *testing.T) (*sql.DB, string) {
 			PRIMARY KEY (order_id, line),
 			CONSTRAINT order_lines_user_fk FOREIGN KEY (user_id) REFERENCES users (id)
 		)`,
+		`CREATE TABLE ` + schema + `.settings (
+			id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			label VARCHAR(50) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL DEFAULT 'none' COMMENT 'NOT NULL in a comment',
+			note VARCHAR(20) NULL COMMENT 'it''s optional',
+			code VARCHAR(5) CHARACTER SET latin1 NOT NULL DEFAULT '1',
+			updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			body TEXT,
+			doubled INT GENERATED ALWAYS AS (CHAR_LENGTH(label) * 2) VIRTUAL,
+			ts TIMESTAMP NULL,
+			loc POINT SRID 4326,
+			hidden INT NULL INVISIBLE COMMENT 'x',
+			` + "`we``ird`" + ` INT NULL DEFAULT 5
+		)`,
+		`CREATE TABLE ` + schema + `.nokey (id INT NULL, v INT)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
@@ -212,4 +227,359 @@ func hasIndex(indexes []indexInfo, name string, unique bool) bool {
 		}
 	}
 	return false
+}
+
+// buildMySQLAlter builds the DDL for ops the way AlterTable does, from the
+// table's current column definitions.
+func buildMySQLAlter(t *testing.T, db *sql.DB, schema, table string, ops []tableOp) ([]string, error) {
+	t.Helper()
+	ddl, _, err := planMySQLAlter(t, db, schema, table, ops)
+	return ddl, err
+}
+
+// planMySQLAlter builds DDL for ops as AlterTable does and returns the prepared
+// connection on which it must run. Test cleanup restores the session settings
+// and closes the connection.
+func planMySQLAlter(t *testing.T, db *sql.DB, schema, table string, ops []tableOp) ([]string, *sql.Conn, error) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols, restore, err := currentMySQLColumns(ctx, conn, "mysql", schema, table)
+	if err != nil {
+		_ = conn.Close()
+		t.Fatalf("read column definitions: %v", err)
+	}
+	t.Cleanup(func() {
+		restore()
+		_ = conn.Close()
+	})
+	ddl, err := buildAlterTable("mysql", schema, table, ops, cols)
+	return ddl, conn, err
+}
+
+// applyMySQLAlter builds and runs ops the way AlterTable does, then restores
+// the session.
+func applyMySQLAlter(t *testing.T, db *sql.DB, schema, table string, ops []tableOp) ([]string, error) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	cols, restore, err := currentMySQLColumns(ctx, conn, "mysql", schema, table)
+	if err != nil {
+		t.Fatalf("read column definitions: %v", err)
+	}
+	defer restore()
+	ddl, err := buildAlterTable("mysql", schema, table, ops, cols)
+	if err != nil {
+		return nil, err
+	}
+	return ddl, execInTx(ctx, conn, ddl)
+}
+
+type mysqlColumnState struct {
+	Type, Nullable, Default, Extra, Comment, Collation, SRID string
+}
+
+func mysqlColumnStates(t *testing.T, db *sql.DB, schema, table string) map[string]mysqlColumnState {
+	t.Helper()
+	rows, err := db.Query(`SELECT column_name, column_type, is_nullable, COALESCE(column_default, '<null>'),
+		extra, column_comment, COALESCE(collation_name, ''), COALESCE(CAST(srs_id AS CHAR), '')
+		FROM information_schema.columns WHERE table_schema = ? AND table_name = ?`, schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]mysqlColumnState{}
+	for rows.Next() {
+		var name string
+		var c mysqlColumnState
+		if err := rows.Scan(&name, &c.Type, &c.Nullable, &c.Default, &c.Extra, &c.Comment, &c.Collation, &c.SRID); err != nil {
+			t.Fatal(err)
+		}
+		out[name] = c
+	}
+	return out
+}
+
+// TestAlterColumnMySQLKeepsDefinition uses the designer's empty type for
+// set_nullable and checks that type and nullability changes preserve other
+// column attributes, except incompatible character sets, collations, and
+// NULL defaults.
+func TestAlterColumnMySQLKeepsDefinition(t *testing.T) {
+	db, schema := openMySQLTestDB(t)
+	ops := []tableOp{
+		{Op: "alter_column_type", Column: &columnSpec{Name: "id", Type: "bigint"}},
+		{Op: "alter_column_type", Column: &columnSpec{Name: "label", Type: "varchar(80)"}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "label", Nullable: true}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "note", Nullable: false}},
+		{Op: "rename_column", OldName: "note", NewName: "remark"},
+		{Op: "alter_column_type", Column: &columnSpec{Name: "remark", Type: "varchar(40)"}},
+		{Op: "rename_column", OldName: "code", NewName: "code1"},
+		{Op: "rename_column", OldName: "code1", NewName: "code2"},
+		{Op: "alter_column_type", Column: &columnSpec{Name: "code2", Type: "int"}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "updated_at", Nullable: false}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "body", Nullable: false}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "ts", Nullable: false}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "loc", Nullable: false}},
+		{Op: "alter_column_type", Column: &columnSpec{Name: "hidden", Type: "bigint"}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "we`ird", Nullable: false}},
+	}
+	ddl, err := applyMySQLAlter(t, db, schema, "settings", ops)
+	if err != nil {
+		t.Fatalf("alter: %v\n%s", err, strings.Join(ddl, "\n"))
+	}
+	assertMySQLSettingsAfterAlter(t, db, schema)
+}
+
+func assertMySQLSettingsAfterAlter(t *testing.T, db *sql.DB, schema string) {
+	t.Helper()
+	got := mysqlColumnStates(t, db, schema, "settings")
+	want := map[string]mysqlColumnState{
+		"id":         {Type: "bigint", Nullable: "NO", Default: "<null>", Extra: "auto_increment"},
+		"label":      {Type: "varchar(80)", Nullable: "YES", Default: "none", Comment: "NOT NULL in a comment", Collation: "latin1_bin"},
+		"remark":     {Type: "varchar(40)", Nullable: "NO", Default: "<null>", Comment: "it's optional", Collation: "utf8mb4_0900_ai_ci"},
+		"code2":      {Type: "int", Nullable: "NO", Default: "1"},
+		"updated_at": {Type: "datetime", Nullable: "NO", Default: "CURRENT_TIMESTAMP", Extra: "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"},
+		"body":       {Type: "text", Nullable: "NO", Default: "<null>", Collation: "utf8mb4_0900_ai_ci"},
+		"ts":         {Type: "timestamp", Nullable: "NO", Default: "<null>"},
+		"loc":        {Type: "point", Nullable: "NO", Default: "<null>", SRID: "4326"},
+		"hidden":     {Type: "bigint", Nullable: "YES", Default: "<null>", Extra: "INVISIBLE", Comment: "x"},
+		"we`ird":     {Type: "int", Nullable: "NO", Default: "5"},
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%s = %+v\nwant %+v", name, got[name], w)
+		}
+	}
+	for _, gone := range []string{"note", "code", "code1"} {
+		if _, ok := got[gone]; ok {
+			t.Errorf("%s should have been renamed", gone)
+		}
+	}
+}
+
+// TestAlterColumnMySQLTypeSynonyms changes a latin1 column to type synonyms.
+// CHARACTER keeps the column's character set, and the national types, which
+// fix their own character set, drop it.
+func TestAlterColumnMySQLTypeSynonyms(t *testing.T) {
+	for typ, want := range map[string]mysqlColumnState{
+		"character varying(90)": {Type: "varchar(90)", Nullable: "NO", Default: "none", Comment: "NOT NULL in a comment", Collation: "latin1_bin"},
+		"character(20)":         {Type: "char(20)", Nullable: "NO", Default: "none", Comment: "NOT NULL in a comment", Collation: "latin1_bin"},
+		"nvarchar(30)":          {Type: "varchar(30)", Nullable: "NO", Default: "none", Comment: "NOT NULL in a comment", Collation: "utf8mb3_general_ci"},
+		"national char(10)":     {Type: "char(10)", Nullable: "NO", Default: "none", Comment: "NOT NULL in a comment", Collation: "utf8mb3_general_ci"},
+	} {
+		t.Run(typ, func(t *testing.T) {
+			db, schema := openMySQLTestDB(t)
+			ops := []tableOp{{Op: "alter_column_type", Column: &columnSpec{Name: "label", Type: typ}}}
+			if ddl, err := applyMySQLAlter(t, db, schema, "settings", ops); err != nil {
+				t.Fatalf("alter: %v\n%s", err, strings.Join(ddl, "\n"))
+			}
+			if got := mysqlColumnStates(t, db, schema, "settings")["label"]; got != want {
+				t.Errorf("label = %+v\nwant %+v", got, want)
+			}
+		})
+	}
+}
+
+// TestAlterColumnMySQLQuotingModes runs the designer on connections whose
+// SHOW CREATE TABLE output uses double quotes or leaves identifiers bare.
+func TestAlterColumnMySQLQuotingModes(t *testing.T) {
+	for name, params := range map[string]string{
+		"ANSI_QUOTES":             "sql_mode=%27ANSI_QUOTES%27",
+		"ANSI":                    "sql_mode=%27ANSI%27",
+		"sql_quote_show_create=0": "sql_quote_show_create=0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, schema := openMySQLTestDB(t)
+			dsn := os.Getenv("KIPPER_TEST_MYSQL_DSN")
+			sep := "?"
+			if strings.Contains(dsn, "?") {
+				sep = "&"
+			}
+			db, err := sql.Open("mysql", dsn+sep+params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			ops := []tableOp{
+				{Op: "set_nullable", Column: &columnSpec{Name: "we`ird", Nullable: false}},
+				{Op: "alter_column_type", Column: &columnSpec{Name: "label", Type: "varchar(60)"}},
+			}
+			if ddl, err := applyMySQLAlter(t, db, schema, "settings", ops); err != nil {
+				t.Fatalf("alter: %v\n%s", err, strings.Join(ddl, "\n"))
+			}
+			got := mysqlColumnStates(t, db, schema, "settings")
+			if got["we`ird"].Nullable != "NO" || got["label"].Type != "varchar(60)" || got["label"].Default != "none" {
+				t.Errorf("we`ird = %+v, label = %+v", got["we`ird"], got["label"])
+			}
+			var showCreate int
+			if err := db.QueryRow("SELECT @@SESSION.sql_quote_show_create").Scan(&showCreate); err != nil {
+				t.Fatal(err)
+			}
+			if want := map[bool]int{true: 0, false: 1}[name == "sql_quote_show_create=0"]; showCreate != want {
+				t.Errorf("sql_quote_show_create = %d after the read, want the session's own %d", showCreate, want)
+			}
+		})
+	}
+}
+
+func TestStandardStringLiterals(t *testing.T) {
+	cases := []struct {
+		ansiQuotes bool
+		in, want   string
+	}{
+		{false, ` DEFAULT 'a\\b\'c' COMMENT 'x\\y'`, ` DEFAULT 'a\b''c' COMMENT 'x\y'`},
+		{false, ` DEFAULT 'l1\nl2\r\Z\0'`, " DEFAULT 'l1\nl2\r\x1a\x00'"},
+		{false, ` DEFAULT (concat(` + "`a\\'b``c`" + `, 'd\\'))`, ` DEFAULT (concat(` + "`a\\'b``c`" + `, 'd\'))`},
+		{true, ` DEFAULT (concat("it's\\", 'e\\'))`, ` DEFAULT (concat("it's\\", 'e\'))`},
+		// Expressions are printed with backticks even under ANSI_QUOTES.
+		{true, ` DEFAULT ((` + "`a'\\nb`" + ` + 1))`, ` DEFAULT ((` + "`a'\\nb`" + ` + 1))`},
+		{false, `enum('a\\b','it\'s')`, `enum('a\b','it''s')`},
+		{false, ` NOT NULL DEFAULT 'plain'`, ` NOT NULL DEFAULT 'plain'`},
+	}
+	for _, c := range cases {
+		if got := standardStringLiterals(c.in, c.ansiQuotes); got != c.want {
+			t.Errorf("standardStringLiterals(%q, %v)\n got %q\nwant %q", c.in, c.ansiQuotes, got, c.want)
+		}
+	}
+}
+
+// TestAlterColumnMySQLNoBackslashEscapes checks that changing a column preserves
+// backslashes in its default and comment under NO_BACKSLASH_ESCAPES. Escapes in
+// the copied SHOW CREATE TABLE definition must be converted for this mode.
+func TestAlterColumnMySQLNoBackslashEscapes(t *testing.T) {
+	_, schema := openMySQLTestDB(t)
+	dsn := os.Getenv("KIPPER_TEST_MYSQL_DSN")
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	db, err := sql.Open("mysql", dsn+sep+"sql_mode=%27NO_BACKSLASH_ESCAPES%27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	create := "CREATE TABLE " + quoteIdent("mysql", schema) + `.bs (v VARCHAR(20) DEFAULT 'a\b''c' COMMENT 'x\y')` //nolint:gosec // The schema is the test's own generated name.
+	if _, err := db.Exec(create); err != nil {
+		t.Fatal(err)
+	}
+	ops := []tableOp{{Op: "alter_column_type", Column: &columnSpec{Name: "v", Type: "varchar(30)"}}}
+	if ddl, err := applyMySQLAlter(t, db, schema, "bs", ops); err != nil {
+		t.Fatalf("alter: %v\n%s", err, strings.Join(ddl, "\n"))
+	}
+	var def, comment string
+	if err := db.QueryRow("SELECT HEX(column_default), column_comment FROM information_schema.columns WHERE table_schema = ? AND table_name = 'bs' AND column_name = 'v'", schema).Scan(&def, &comment); err != nil {
+		t.Fatal(err)
+	}
+	if def != "615C622763" || comment != `x\y` {
+		t.Errorf("default hex = %s, comment = %q, want 615C622763 (a\\b'c) and x\\y", def, comment)
+	}
+	var mode string
+	if err := db.QueryRow("SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "NO_BACKSLASH_ESCAPES" {
+		t.Errorf("sql_mode = %q after the alter, want the session's own NO_BACKSLASH_ESCAPES", mode)
+	}
+}
+
+// TestAlterColumnMySQLNoBackslashEscapesKeepsNewLiterals checks that a single
+// batch preserves backslashes in both copied definitions and new string literals
+// under NO_BACKSLASH_ESCAPES, matching the SQL editor's behavior.
+func TestAlterColumnMySQLNoBackslashEscapesKeepsNewLiterals(t *testing.T) {
+	_, schema := openMySQLTestDB(t)
+	dsn := os.Getenv("KIPPER_TEST_MYSQL_DSN")
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	db, err := sql.Open("mysql", dsn+sep+"sql_mode=%27NO_BACKSLASH_ESCAPES%27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	create := "CREATE TABLE " + quoteIdent("mysql", schema) + `.bs (v VARCHAR(20) DEFAULT 'a\b''c' COMMENT 'x\y', u VARCHAR(20) DEFAULT 'old', e ENUM('a\b','it''s') NULL)` //nolint:gosec // The schema is the test's own generated name.
+	if _, err := db.Exec(create); err != nil {
+		t.Fatal(err)
+	}
+	enumType := func() string {
+		var typ string
+		if err := db.QueryRow("SELECT HEX(column_type) FROM information_schema.columns WHERE table_schema = ? AND table_name = 'bs' AND column_name = 'e'", schema).Scan(&typ); err != nil {
+			t.Fatal(err)
+		}
+		return typ
+	}
+	enumBefore := enumType()
+	ops := []tableOp{
+		{Op: "alter_column_type", Column: &columnSpec{Name: "v", Type: "varchar(30)"}},
+		{Op: "set_nullable", Column: &columnSpec{Name: "e", Nullable: false}},
+		{Op: "set_default", Column: &columnSpec{Name: "u", Default: strPtr(`'a\nb'`)}},
+		{Op: "add_column", Column: &columnSpec{Name: "w", Type: "varchar(10)", Nullable: true, Default: strPtr(`'p\q'`)}},
+	}
+	if ddl, err := applyMySQLAlter(t, db, schema, "bs", ops); err != nil {
+		t.Fatalf("alter: %v\n%s", err, strings.Join(ddl, "\n"))
+	}
+	if got := enumType(); got != enumBefore {
+		t.Errorf("enum members changed: column_type hex %s, want %s", got, enumBefore)
+	}
+	want := map[string]string{"v": "615C622763", "u": "615C6E62", "w": "705C71"}
+	for col, hex := range want {
+		var got string
+		if err := db.QueryRow("SELECT HEX(column_default) FROM information_schema.columns WHERE table_schema = ? AND table_name = 'bs' AND column_name = ?", schema, col).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != hex {
+			t.Errorf("%s default hex = %s, want %s", col, got, hex)
+		}
+	}
+}
+
+// TestAlterColumnMySQLRefusesUnknownDefinitions checks that each batch is
+// refused while the statements are built, before anything runs.
+func TestAlterColumnMySQLRefusesUnknownDefinitions(t *testing.T) {
+	db, schema := openMySQLTestDB(t)
+	cases := map[string]struct {
+		table string
+		ops   []tableOp
+	}{
+		"generated column": {"settings", []tableOp{{Op: "set_nullable", Column: &columnSpec{Name: "doubled", Nullable: false}}}},
+		"column added in the same batch": {"settings", []tableOp{
+			{Op: "add_column", Column: &columnSpec{Name: "extra", Type: "int", Nullable: true}},
+			{Op: "set_nullable", Column: &columnSpec{Name: "extra", Nullable: false}},
+		}},
+		"dropped column": {"settings", []tableOp{
+			{Op: "drop_column", Name: "body"},
+			{Op: "alter_column_type", Column: &columnSpec{Name: "body", Type: "mediumtext"}},
+		}},
+		"unknown column": {"settings", []tableOp{{Op: "alter_column_type", Column: &columnSpec{Name: "missing", Type: "int"}}}},
+		"default changed in the same batch": {"settings", []tableOp{
+			{Op: "set_default", Column: &columnSpec{Name: "label", Default: strPtr("'other'")}},
+			{Op: "set_nullable", Column: &columnSpec{Name: "label", Nullable: true}},
+		}},
+		"default changed under another spelling": {"settings", []tableOp{
+			{Op: "set_default", Column: &columnSpec{Name: "LABEL", Default: strPtr("'other'")}},
+			{Op: "alter_column_type", Column: &columnSpec{Name: "label", Type: "varchar(80)"}},
+		}},
+		"column dropped under another spelling": {"settings", []tableOp{
+			{Op: "drop_column", Name: "Body"},
+			{Op: "alter_column_type", Column: &columnSpec{Name: "body", Type: "mediumtext"}},
+		}},
+		"primary key added in the same batch": {"nokey", []tableOp{
+			{Op: "add_constraint", Constraint: &constraintSpec{Type: "PRIMARY KEY", Columns: []string{"id"}}},
+			{Op: "alter_column_type", Column: &columnSpec{Name: "id", Type: "bigint"}},
+		}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if ddl, err := buildMySQLAlter(t, db, schema, c.table, c.ops); err == nil {
+				t.Errorf("expected the batch to be refused, got DDL %q", ddl)
+			}
+		})
+	}
 }

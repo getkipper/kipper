@@ -74,7 +74,7 @@ func TestBuildAlterTable_Postgres(t *testing.T) {
 		{Op: "set_default", Column: &columnSpec{Name: "status", Default: strPtr("'pending'")}},
 		{Op: "drop_constraint", ConstraintName: "old_check"},
 	}
-	got, err := buildAlterTable("pgx", "public", "domains", ops)
+	got, err := buildAlterTable("pgx", "public", "domains", ops, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestBuildAlterTable_Postgres(t *testing.T) {
 }
 
 func TestBuildAlterTable_RejectsUnknownOp(t *testing.T) {
-	_, err := buildAlterTable("pgx", "public", "t", []tableOp{{Op: "explode"}})
+	_, err := buildAlterTable("pgx", "public", "t", []tableOp{{Op: "explode"}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown op") {
 		t.Errorf("expected unknown op error, got %v", err)
 	}
@@ -223,6 +223,26 @@ func TestParsePgArray(t *testing.T) {
 			if got[i] != want[i] {
 				t.Errorf("parsePgArray(%q)[%d] = %q, want %q", in, i, got[i], want[i])
 			}
+		}
+	}
+}
+
+func TestBuildAlterTable_OpsAfterRenameTableUseTheNewName(t *testing.T) {
+	ops := []tableOp{
+		{Op: "rename_table", NewName: "accounts"},
+		{Op: "drop_column", Name: "legacy"},
+	}
+	for driver, want := range map[string]string{
+		"pgx":   `ALTER TABLE "public"."accounts" DROP COLUMN "legacy"`,
+		"mysql": "ALTER TABLE `app`.`accounts` DROP COLUMN `legacy`",
+	} {
+		schema := map[string]string{"pgx": "public", "mysql": "app"}[driver]
+		got, err := buildAlterTable(driver, schema, "users", ops, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", driver, err)
+		}
+		if got[1] != want {
+			t.Errorf("%s: got %q\nwant %q", driver, got[1], want)
 		}
 	}
 }

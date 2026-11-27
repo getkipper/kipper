@@ -141,7 +141,8 @@ func (d *Database) CreateTable(w http.ResponseWriter, r *http.Request) {
 }
 
 // AlterTable applies an ordered list of operations to a table inside
-// a single transaction. Returns the executed DDL list.
+// a single transaction and returns the executed DDL list. MySQL DDL can commit
+// implicitly, leaving earlier changes applied if a later statement fails.
 // PATCH /api/v1/services/{name}/db/tables/{schema}/{table}
 func (d *Database) AlterTable(w http.ResponseWriter, r *http.Request) {
 	svcName, namespace, ok := requireService(w, r)
@@ -170,13 +171,27 @@ func (d *Database) AlterTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ddl, err := buildAlterTable(info.driver, schemaName, table, req.Ops)
+	// The definitions are read and the DDL runs on one connection, so both see
+	// the same session settings.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	cols, restore, err := currentMySQLColumns(ctx, conn, info.driver, schemaName, table)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer restore()
+	ddl, err := buildAlterTable(info.driver, schemaName, table, req.Ops, cols)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if err := audited(r, svcName, ddl, func() error { return execInTx(ctx, db, ddl) }); err != nil {
+	if err := audited(r, svcName, ddl, func() error { return execInTx(ctx, conn, ddl) }); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -265,7 +280,8 @@ func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 // PreviewDDL accepts the same operations as the execution endpoints and
-// connects to the database to determine its dialect. It returns generated
+// connects to the database to determine its dialect and read current column
+// definitions for MySQL table alterations. It returns generated
 // SQL without executing it so users can review the DDL before clicking Apply.
 // POST /api/v1/services/{name}/db/ddl/preview
 func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +299,7 @@ func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	_, info, err := d.connect(ctx, svcName, namespace, r.URL.Query().Get("database"))
+	db, info, err := d.connect(ctx, svcName, namespace, r.URL.Query().Get("database"))
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
@@ -298,7 +314,19 @@ func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 	case req.AlterTable != nil:
-		ddl, err := buildAlterTable(info.driver, req.AlterTable.Schema, req.AlterTable.Table, req.AlterTable.Ops)
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		cols, restore, err := currentMySQLColumns(ctx, conn, info.driver, req.AlterTable.Schema, req.AlterTable.Table)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		defer restore()
+		ddl, err := buildAlterTable(info.driver, req.AlterTable.Schema, req.AlterTable.Table, req.AlterTable.Ops, cols)
 		if err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -336,7 +364,9 @@ func execDDL(ctx context.Context, db *sql.DB, ddl string, outsideTx bool) error 
 // execInTx executes nonblank statements in order within one transaction and
 // attempts a rollback if a statement fails, keeping supported changes atomic.
 // MySQL DDL can commit implicitly, leaving earlier changes applied on failure.
-func execInTx(ctx context.Context, db *sql.DB, stmts []string) error {
+func execInTx(ctx context.Context, db interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}, stmts []string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -345,7 +375,7 @@ func execInTx(ctx context.Context, db *sql.DB, stmts []string) error {
 		if strings.TrimSpace(s) == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, s); err != nil {
+		if _, err := tx.ExecContext(ctx, s); err != nil { //nolint:gosec // Designer DDL needs database.write, which already permits arbitrary SQL through the query endpoint.
 			_ = tx.Rollback()
 			return fmt.Errorf("exec %q: %w", truncate(s, 80), err)
 		}
@@ -387,7 +417,17 @@ func buildCreateTable(driver string, req createTableRequest) (string, error) {
 	), nil
 }
 
-func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, error) {
+// buildAlterTable returns one statement per operation, in order. MySQL type and
+// nullability changes require current definitions in cols because MODIFY COLUMN
+// replaces the whole column definition. It mutates cols to track added, dropped,
+// renamed, and modified columns, and a default change or a new primary key
+// marks the affected columns' definitions unknown for the rest of the batch.
+// Operations after rename_table address the new name. PostgreSQL callers can
+// pass nil for cols.
+func buildAlterTable(driver, schema, table string, ops []tableOp, cols mysqlColumns) ([]string, error) {
+	if driver == "mysql" && cols == nil {
+		cols = mysqlColumns{}
+	}
 	out := make([]string, 0, len(ops))
 	qual := qualified(driver, schema, table)
 	for _, op := range ops {
@@ -401,6 +441,9 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				return nil, err
 			}
 			out = append(out, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", qual, def))
+			if driver == "mysql" {
+				cols.add(op.Column.Name)
+			}
 		case "drop_column":
 			name := op.Name
 			if name == "" && op.Column != nil {
@@ -410,6 +453,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				return nil, fmt.Errorf("drop_column requires a column name")
 			}
 			out = append(out, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", qual, quoteIdent(driver, name)))
+			cols.drop(name)
 		case "rename_column":
 			if op.OldName == "" || op.NewName == "" {
 				return nil, fmt.Errorf("rename_column requires old_name and new_name")
@@ -417,6 +461,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 			// MySQL 8+ supports RENAME COLUMN, matching PG's syntax.
 			out = append(out, fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s",
 				qual, quoteIdent(driver, op.OldName), quoteIdent(driver, op.NewName)))
+			cols.rename(op.OldName, op.NewName)
 		case "alter_column_type":
 			if op.Column == nil {
 				return nil, fmt.Errorf("alter_column_type requires a column spec")
@@ -425,12 +470,17 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				out = append(out, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s",
 					qual, quoteIdent(driver, op.Column.Name), op.Column.Type))
 			} else {
-				// MySQL collapses several alter-column ops into MODIFY COLUMN.
-				def, err := buildColumnDef(driver, *op.Column)
+				c, err := cols.lookup(op.Column.Name)
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s", qual, def))
+				if op.Column.Type == "" {
+					return nil, fmt.Errorf("alter_column_type requires a type for column %q", op.Column.Name)
+				}
+				def := c.withType(op.Column.Type)
+				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s", qual, quoteIdent(driver, op.Column.Name), def))
+				c.rest = def[len(op.Column.Type):]
+				c.typ = op.Column.Type
 			}
 		case "set_nullable":
 			if op.Column == nil {
@@ -445,11 +495,12 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 						qual, quoteIdent(driver, op.Column.Name)))
 				}
 			} else {
-				def, err := buildColumnDef(driver, *op.Column)
+				c, err := cols.lookup(op.Column.Name)
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s", qual, def))
+				c.rest = c.withNullability(op.Column.Nullable)
+				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s%s", qual, quoteIdent(driver, op.Column.Name), c.typ, c.rest))
 			}
 		case "set_default":
 			if op.Column == nil {
@@ -462,6 +513,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				out = append(out, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s",
 					qual, quoteIdent(driver, op.Column.Name), *op.Column.Default))
 			}
+			cols.forget(op.Column.Name)
 		case "add_constraint":
 			if op.Constraint == nil {
 				return nil, fmt.Errorf("add_constraint requires a constraint spec")
@@ -471,6 +523,11 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				return nil, err
 			}
 			out = append(out, fmt.Sprintf("ALTER TABLE %s ADD %s", qual, clause))
+			if strings.EqualFold(op.Constraint.Type, "PRIMARY KEY") {
+				for _, name := range op.Constraint.Columns {
+					cols.forget(name)
+				}
+			}
 		case "drop_constraint":
 			if op.ConstraintName == "" {
 				return nil, fmt.Errorf("drop_constraint requires constraint_name")
@@ -488,6 +545,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				out = append(out, fmt.Sprintf("ALTER TABLE %s RENAME TO %s",
 					qual, quoteIdent(driver, op.NewName)))
 			}
+			qual = qualified(driver, schema, op.NewName)
 		default:
 			return nil, fmt.Errorf("unknown op %q", op.Op)
 		}
