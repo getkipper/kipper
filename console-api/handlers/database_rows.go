@@ -501,7 +501,7 @@ func readTableStructure(ctx context.Context, db *sql.DB, driver, schema, table s
 
 	const colQ = `
 SELECT column_name, data_type, is_nullable, COALESCE(column_default,''),
-       COALESCE(is_generated, ''), COALESCE(is_identity, '')
+       COALESCE(is_generated, ''), COALESCE(identity_generation, '')
 FROM information_schema.columns
 WHERE table_schema = $1 AND table_name = $2
 ORDER BY ordinal_position`
@@ -520,7 +520,7 @@ JOIN information_schema.key_column_usage kcu USING (constraint_schema, constrain
 JOIN information_schema.constraint_column_usage ccu USING (constraint_schema, constraint_name)
 WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_name = $2`
 
-	// MySQL has no is_generated, is_identity or constraint_column_usage,
+	// MySQL has no is_generated, identity_generation, or constraint_column_usage,
 	// and names every primary key PRIMARY, so a join on constraint name
 	// alone would mix in the keys of other tables in the schema.
 	const mysqlColQ = `
