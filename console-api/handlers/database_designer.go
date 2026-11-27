@@ -93,6 +93,7 @@ type previewRequest struct {
 	CreateIndex *indexRequest `json:"create_index,omitempty"`
 	DropIndex   *struct {
 		Schema     string `json:"schema"`
+		Table      string `json:"table"`
 		Name       string `json:"name"`
 		Concurrent bool   `json:"concurrent,omitempty"`
 	} `json:"drop_index,omitempty"`
@@ -227,7 +228,8 @@ func (d *Database) CreateIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 // DropIndex removes an index. On PostgreSQL, concurrent=true runs
-// DROP INDEX CONCURRENTLY outside a transaction.
+// DROP INDEX CONCURRENTLY outside a transaction. MySQL requires the index's
+// table name in the table query parameter.
 // DELETE /api/v1/services/{name}/db/indexes/{schema}/{indexName}
 func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 	svcName, namespace, ok := requireService(w, r)
@@ -247,7 +249,11 @@ func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ddl := buildDropIndex(info.driver, schemaName, indexName, concurrent)
+	ddl, err := buildDropIndex(info.driver, schemaName, r.URL.Query().Get("table"), indexName, concurrent)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if err := audited(r, svcName, []string{ddl}, func() error {
 		return execDDL(ctx, db, ddl, concurrent && info.driver == "pgx")
@@ -306,7 +312,11 @@ func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 	case req.DropIndex != nil:
-		ddl := buildDropIndex(info.driver, req.DropIndex.Schema, req.DropIndex.Name, req.DropIndex.Concurrent)
+		ddl, err := buildDropIndex(info.driver, req.DropIndex.Schema, req.DropIndex.Table, req.DropIndex.Name, req.DropIndex.Concurrent)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 	default:
 		respondError(w, http.StatusBadRequest, "exactly one of create_table, alter_table, create_index, drop_index is required")
@@ -584,18 +594,21 @@ func buildCreateIndex(driver string, req indexRequest) (string, error) {
 	), nil
 }
 
-func buildDropIndex(driver, schema, name string, concurrent bool) string {
+// buildDropIndex returns a dialect-specific DROP INDEX statement. MySQL
+// scopes index names to tables, so an empty table returns an error.
+// PostgreSQL ignores table and uses concurrent to select DROP INDEX CONCURRENTLY.
+func buildDropIndex(driver, schema, table, name string, concurrent bool) (string, error) {
 	if driver == "mysql" {
-		// MySQL needs the table name; users will hit DROP INDEX via ALTER TABLE
-		// in practice. Emit the simpler form and let the server return an
-		// actionable error if the dialect rejects it.
-		return fmt.Sprintf("DROP INDEX %s ON %s", quoteIdent(driver, name), quoteIdent(driver, schema))
+		if table == "" {
+			return "", fmt.Errorf("dropping a MySQL index requires the name of the table it belongs to")
+		}
+		return fmt.Sprintf("DROP INDEX %s ON %s", quoteIdent(driver, name), qualified(driver, schema, table)), nil
 	}
 	c := ""
 	if concurrent {
 		c = "CONCURRENTLY "
 	}
-	return fmt.Sprintf("DROP INDEX %s%s", c, qualified(driver, schema, name))
+	return fmt.Sprintf("DROP INDEX %s%s", c, qualified(driver, schema, name)), nil
 }
 
 func joinIdents(driver string, names []string) string {

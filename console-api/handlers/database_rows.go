@@ -146,7 +146,7 @@ func (d *Database) ListRows(w http.ResponseWriter, r *http.Request) {
 		dir = "ASC"
 	}
 
-	q := buildSelectRows(info.driver, schema, table, orderBy, dir, limit, offset, filterCol)
+	q := buildSelectRows(info.driver, schema, table, structure.Columns, orderBy, dir, limit, offset, filterCol)
 	cq := buildCountRows(info.driver, schema, table, filterCol)
 
 	queryCtx, queryCancel := context.WithTimeout(ctx, defaultQueryTimeout)
@@ -291,10 +291,8 @@ func (d *Database) InsertRow(w http.ResponseWriter, r *http.Request) {
 		// single-column auto-increment PK.
 		var inserted []interface{}
 		if id, err := res.LastInsertId(); err == nil && id > 0 && len(structure.PrimaryKey) == 1 {
-			selQ := fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", //nolint:gosec // identifiers validated against introspected schema; id passes as placeholder
-				qualified(info.driver, schema, table),
-				quoteIdent(info.driver, structure.PrimaryKey[0]))
-			row := db.QueryRowContext(queryCtx, selQ, id) //nolint:gosec // identifiers validated against introspected schema; id passes as placeholder
+			selQ := buildSelectRowByKey(info.driver, schema, table, structure.Columns, structure.PrimaryKey[0])
+			row := db.QueryRowContext(queryCtx, selQ, id) //nolint:gosec // Identifiers are validated against the introspected schema, and the ID uses a placeholder.
 			inserted, _ = scanSingleRow(row, structure)
 		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -494,8 +492,10 @@ func (d *Database) DeleteRows(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// readTableStructure pulls columns + PK + FKs in three queries and
-// returns a normalised structure regardless of driver.
+// readTableStructure returns a table's columns, primary key, indexes, and
+// foreign keys in a common structure for both drivers. Failed index or
+// foreign key queries leave the corresponding list empty so the table view
+// can still render. Foreign key scan errors are returned to the caller.
 func readTableStructure(ctx context.Context, db *sql.DB, driver, schema, table string) (tableStructure, error) {
 	out := tableStructure{Schema: schema, Name: table, Columns: []columnInfo{}, PrimaryKey: []string{}, ForeignKeys: []fkInfo{}, Indexes: []indexInfo{}}
 
@@ -520,11 +520,31 @@ JOIN information_schema.key_column_usage kcu USING (constraint_schema, constrain
 JOIN information_schema.constraint_column_usage ccu USING (constraint_schema, constraint_name)
 WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_name = $2`
 
+	// MySQL has no is_generated, is_identity or constraint_column_usage,
+	// and names every primary key PRIMARY, so a join on constraint name
+	// alone would mix in the keys of other tables in the schema.
+	const mysqlColQ = `
+SELECT column_name, column_type, is_nullable, COALESCE(column_default,''),
+       IF(extra LIKE '%VIRTUAL GENERATED%' OR extra LIKE '%STORED GENERATED%', 'ALWAYS', ''), ''
+FROM information_schema.columns
+WHERE table_schema = ? AND table_name = ?
+ORDER BY ordinal_position`
+
+	const mysqlPkQ = `
+SELECT column_name
+FROM information_schema.key_column_usage
+WHERE constraint_name = 'PRIMARY' AND table_schema = ? AND table_name = ?
+ORDER BY ordinal_position`
+
+	const mysqlFkQ = `
+SELECT column_name, referenced_table_schema, referenced_table_name, referenced_column_name
+FROM information_schema.key_column_usage
+WHERE table_schema = ? AND table_name = ? AND referenced_table_name IS NOT NULL
+ORDER BY constraint_name, ordinal_position`
+
 	cQ, pQ, fQ := colQ, pkQ, fkQ
 	if driver == "mysql" {
-		cQ = strings.ReplaceAll(strings.ReplaceAll(colQ, "$1", "?"), "$2", "?")
-		pQ = strings.ReplaceAll(strings.ReplaceAll(pkQ, "$1", "?"), "$2", "?")
-		fQ = strings.ReplaceAll(strings.ReplaceAll(fkQ, "$1", "?"), "$2", "?")
+		cQ, pQ, fQ = mysqlColQ, mysqlPkQ, mysqlFkQ
 	}
 
 	rows, err := db.QueryContext(ctx, cQ, schema, table)
@@ -561,10 +581,11 @@ WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_n
 	}
 	_ = pkRows.Close()
 
+	out.Indexes = readIndexes(ctx, db, driver, schema, table)
+
 	fkRows, err := db.QueryContext(ctx, fQ, schema, table)
 	if err != nil {
-		// FK info is best-effort — return what we have.
-		return out, nil //nolint:nilerr // intentional: FK introspection failure should not fail the whole structure read
+		return out, nil //nolint:nilerr // Preserve the available structure if the foreign key query fails.
 	}
 	for fkRows.Next() {
 		var fk fkInfo
@@ -575,15 +596,12 @@ WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_n
 		out.ForeignKeys = append(out.ForeignKeys, fk)
 	}
 	_ = fkRows.Close()
-
-	out.Indexes = readIndexes(ctx, db, driver, schema, table)
 	return out, nil
 }
 
-// readIndexes pulls index metadata via dialect-specific catalogs. It's
-// best-effort — failure returns an empty slice rather than failing the
-// whole structure call, because the table view should still render even
-// if index introspection breaks.
+// readIndexes reads index metadata from dialect-specific catalogs. Query
+// errors return an empty slice and scan errors skip individual rows so the
+// table view can still render when index introspection fails.
 func readIndexes(ctx context.Context, db *sql.DB, driver, schema, table string) []indexInfo {
 	switch driver {
 	case "pgx":
@@ -671,9 +689,18 @@ func parsePgArray(s string) []string {
 	return out
 }
 
+// mysqlCatalogUnescaper removes the extra escaping of single quotes and
+// backslashes in an expression stored in information_schema, which turns it
+// back into the SQL it was written as. Column names carry no such escaping.
+var mysqlCatalogUnescaper = strings.NewReplacer(`\'`, `'`, `\\`, `\`)
+
+// readMySQLIndexes returns indexes ordered by name, with key parts in index
+// order. Functional key parts use catalog expressions wrapped in parentheses
+// for CREATE INDEX syntax. Query errors return an empty slice, and scan errors
+// skip individual key parts.
 func readMySQLIndexes(ctx context.Context, db *sql.DB, schema, table string) []indexInfo {
 	const q = `
-SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, INDEX_TYPE, SEQ_IN_INDEX
+SELECT INDEX_NAME, COLUMN_NAME, EXPRESSION, NON_UNIQUE, INDEX_TYPE, SEQ_IN_INDEX
 FROM information_schema.statistics
 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 ORDER BY INDEX_NAME, SEQ_IN_INDEX`
@@ -686,10 +713,11 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX`
 	indexMap := map[string]*indexInfo{}
 	order := []string{}
 	for rows.Next() {
-		var name, col, method string
+		var name, method string
+		var col, expr sql.NullString
 		var nonUnique int
 		var seq int
-		if err := rows.Scan(&name, &col, &nonUnique, &method, &seq); err != nil {
+		if err := rows.Scan(&name, &col, &expr, &nonUnique, &method, &seq); err != nil {
 			continue
 		}
 		idx, ok := indexMap[name]
@@ -703,7 +731,11 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX`
 			indexMap[name] = idx
 			order = append(order, name)
 		}
-		idx.Columns = append(idx.Columns, col)
+		if col.Valid {
+			idx.Columns = append(idx.Columns, col.String)
+		} else {
+			idx.Columns = append(idx.Columns, "("+mysqlCatalogUnescaper.Replace(expr.String)+")")
+		}
 	}
 	out := make([]indexInfo, 0, len(order))
 	for _, name := range order {
@@ -805,9 +837,11 @@ func placeholders(driver string, n, startAt int) []string {
 	return out
 }
 
-func buildSelectRows(driver, schema, table, orderBy, dir string, limit, offset int, filterCol string) string {
+func buildSelectRows(driver, schema, table string, cols []columnInfo, orderBy, dir string, limit, offset int, filterCol string) string {
 	var b strings.Builder
-	b.WriteString("SELECT * FROM ")
+	b.WriteString("SELECT ")
+	b.WriteString(selectList(driver, cols))
+	b.WriteString(" FROM ")
 	b.WriteString(qualified(driver, schema, table))
 	if filterCol != "" {
 		ph := "?"
@@ -821,6 +855,23 @@ func buildSelectRows(driver, schema, table, orderBy, dir string, limit, offset i
 	}
 	fmt.Fprintf(&b, " LIMIT %d OFFSET %d", limit, offset)
 	return b.String()
+}
+
+// selectList names columns in structure order, including MySQL INVISIBLE
+// columns that SELECT * omits.
+func selectList(driver string, cols []columnInfo) string {
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = quoteIdent(driver, c.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// buildSelectRowByKey builds a query with one placeholder for a single-column
+// key's value.
+func buildSelectRowByKey(driver, schema, table string, cols []columnInfo, key string) string {
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
+		selectList(driver, cols), qualified(driver, schema, table), quoteIdent(driver, key), placeholders(driver, 1, 1)[0])
 }
 
 func buildCountRows(driver, schema, table, filterCol string) string {

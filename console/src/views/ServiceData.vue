@@ -18,6 +18,7 @@ import { keymap, EditorView } from '@codemirror/view'
 import { Prec } from '@codemirror/state'
 import { useToast } from '@/composables/useToast'
 import { useCapabilities } from '@/composables/useCapabilities'
+import { coerceCellValue } from '@/utils/cellValue'
 import {
   fetchDBDatabases,
   fetchDBSchema,
@@ -555,22 +556,12 @@ function cancelEdit() {
 
 function parseEditBuffer(buf: string, col: string): unknown {
   if (buf === '__null__' || buf === '') {
-    // Empty → if column is NOT NULL we leave as ""; user can opt into NULL via __null__ sentinel.
+    // The __null__ sentinel explicitly requests SQL NULL. Empty input stays an empty string.
     if (buf === '__null__') return null
   }
   const c = browseData.value?.structure.columns.find((x) => x.name === col)
   if (!c) return buf
-  // Numeric coercion for obvious cases — types like "integer", "bigint", "smallint", "numeric".
-  const lower = c.type.toLowerCase()
-  if (/(int|numeric|decimal|real|double|float)/.test(lower)) {
-    const n = Number(buf)
-    if (!Number.isNaN(n)) return n
-  }
-  if (/bool/.test(lower)) {
-    if (buf === 'true') return true
-    if (buf === 'false') return false
-  }
-  return buf
+  return coerceCellValue(c.type, buf)
 }
 
 function colIndex(name: string): number {
@@ -1503,7 +1494,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
     onConfirm: async () => {
       modal.close()
       try {
-        await dropDBIndex(serviceName.value, namespace.value, selectedRelation.value!.schema, idx.name, false, activeDatabase.value)
+        await dropDBIndex(serviceName.value, namespace.value, selectedRelation.value!.schema, selectedRelation.value!.name, idx.name, false, activeDatabase.value)
         toast.success(`Index ${idx.name} dropped`)
         await loadRows()
       } catch (e: unknown) {

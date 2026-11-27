@@ -69,6 +69,27 @@ jobs:
   test-console-api:
     name: Test console-api
     runs-on: ubuntu-latest
+    # The database console's integration tests run against the engines Kipper deploys.
+    services:
+      mysql:
+        image: mysql:8-oracle
+        env:
+          MYSQL_ROOT_PASSWORD: testpw
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptestpw"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: testpw
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      KIPPER_TEST_MYSQL_DSN: root:testpw@tcp(127.0.0.1:3306)/?parseTime=true
+      KIPPER_TEST_POSTGRES_DSN: postgres://postgres:testpw@127.0.0.1:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6

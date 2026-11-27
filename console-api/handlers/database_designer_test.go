@@ -157,15 +157,23 @@ func TestBuildCreateIndex(t *testing.T) {
 }
 
 func TestBuildDropIndex(t *testing.T) {
-	got := buildDropIndex("pgx", "public", "users_email_idx", true)
+	got, _ := buildDropIndex("pgx", "public", "users", "users_email_idx", true)
 	want := `DROP INDEX CONCURRENTLY "public"."users_email_idx"`
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
-	got = buildDropIndex("pgx", "public", "users_email_idx", false)
+	got, _ = buildDropIndex("pgx", "public", "", "users_email_idx", false)
 	want = `DROP INDEX "public"."users_email_idx"`
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
+	}
+	got, _ = buildDropIndex("mysql", "app", "users", "users_email_idx", false)
+	want = "DROP INDEX `users_email_idx` ON `app`.`users`"
+	if got != want {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+	if _, err := buildDropIndex("mysql", "app", "", "users_email_idx", false); err == nil {
+		t.Error("a MySQL drop without a table should fail")
 	}
 }
 

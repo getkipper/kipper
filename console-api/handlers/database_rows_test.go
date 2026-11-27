@@ -42,12 +42,13 @@ func TestPlaceholders(t *testing.T) {
 }
 
 func TestBuildSelectRows(t *testing.T) {
-	q := buildSelectRows("pgx", "public", "users", "id", "ASC", 50, 100, "")
-	want := `SELECT * FROM "public"."users" ORDER BY "id" ASC LIMIT 50 OFFSET 100`
+	cols := []columnInfo{{Name: "id"}, {Name: "email"}}
+	q := buildSelectRows("pgx", "public", "users", cols, "id", "ASC", 50, 100, "")
+	want := `SELECT "id", "email" FROM "public"."users" ORDER BY "id" ASC LIMIT 50 OFFSET 100`
 	if q != want {
 		t.Errorf("got %q\nwant %q", q, want)
 	}
-	q = buildSelectRows("mysql", "appdb", "orders", "created_at", "DESC", 10, 0, "status")
+	q = buildSelectRows("mysql", "appdb", "orders", cols, "created_at", "DESC", 10, 0, "status")
 	if !strings.Contains(q, "FROM `appdb`.`orders`") {
 		t.Errorf("missing qualified ident: %q", q)
 	}
