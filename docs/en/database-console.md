@@ -97,13 +97,13 @@ The Designer tab is the visual table editor. Two modes:
 Click a table in the sidebar, switch to Designer. Each column is a row showing Name, Type, Nullable, Default, and Actions:
 
 - **Rename:** the Name cell becomes an editable input. Enter applies; Esc cancels.
-- **Type…:** the Type cell becomes a grouped dropdown (Text / Numbers / Auto-increment / Boolean / Date/Time / JSON / UUID / Binary / Network / Search) with a **Custom…** option for parameterized types like `varchar(50)` or `numeric(10,2)`.
+- **Type…:** the Type cell becomes a grouped dropdown (Text / Numbers / Auto-increment / Boolean / Date/Time / JSON / UUID / Binary / Network / Search on Postgres, a smaller set of MySQL types on MySQL) with a **Custom…** option for parameterized types like `varchar(50)` or `numeric(10,2)`. On MySQL, type and nullability changes preserve the column's default, `AUTO_INCREMENT`, `ON UPDATE`, and comment. Type changes preserve the character set and collation when the new type supports them. Making a column NOT NULL removes a NULL default. Use the SQL editor to change generated columns. For columns added, given a new default, or included in a new primary key earlier in the same batch, apply the batch before changing their type or nullability.
 - **Toggle null:** queues a NOT NULL on/off change.
 - **Drop:** queues a DROP COLUMN. Asks for confirmation because data is lost.
 
 Each action queues an op into a pending list shown above the column rows. The **DDL preview** at the bottom regenerates server-side on every change, so you see the exact `ALTER TABLE` statements before applying.
 
-- **Apply N changes** submits the queued statements in a transaction. Check the database-specific limits under [DDL safety](#ddl-safety).
+- **Apply N changes** submits the queued statements. On Postgres they run in one transaction, and a failure leaves the table unchanged and the queue in place for a retry. MySQL commits each statement separately. If a later statement fails, earlier changes stay applied, so the console reloads the table and clears the queue. It also reloads and clears the queue when the committed count is unknown. When MySQL rejects the first statement, or the designer refuses the batch before running it, nothing was applied and the queue stays.
 - **Take a backup first** is currently a placeholder control. Create and verify a backup separately before destructive changes.
 - **Discard** clears the queue.
 
@@ -113,6 +113,8 @@ Click the `+` button at the top of the schema sidebar, or hit `New table` in the
 
 - `id bigserial NOT NULL` (primary key)
 - `created_at timestamptz NOT NULL DEFAULT now()`
+
+On MySQL, these are `id bigint unsigned auto_increment NOT NULL` and `created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP`, and the table goes into the database open in the picker.
 
 Both can be removed; new columns are added with `+ Add column`. Each row has Name, Type (same picker as the alter side), Nullable, Default, and a PK checkbox. Live DDL preview at the bottom updates as you type. Click **Create table** to commit; the new table is auto-selected so you can keep designing or open the row browser straight away.
 
@@ -125,10 +127,10 @@ Index list shows every index on the open table with method (btree / gin / gist /
 Click `+ Create index`. The form has:
 
 - **Name** (optional). Placeholder shows a sensible suggestion like `<table>_<col1>_<col2>_idx`. Leave blank to use it.
-- **Columns.** A chip-style picker. `+ Add column` lists every real column of the table with its type. Selected columns appear as numbered chips (`1.`, `2.`, …) with up/down arrows to reorder and an `×` to remove. Order matters because Postgres uses the leftmost prefix for query planning.
-- **Method.** btree (default), gin, gist, hash.
-- **WHERE clause.** Partial index predicate, Postgres only.
-- **Unique** and **Concurrent** toggles.
+- **Columns.** A chip-style picker. `+ Add column` lists every real column of the table with its type. Selected columns appear as numbered chips (`1.`, `2.`, …) with up/down arrows to reorder and an `×` to remove. Order matters because the database uses the leftmost columns for query planning.
+- **Method.** btree (default), gin, gist, hash on Postgres. MySQL offers btree and hash.
+- **WHERE clause.** Partial index predicate, shown for Postgres only.
+- **Unique** and **Concurrent** toggles. Concurrent is shown for Postgres only.
 
 DDL preview shows the `CREATE INDEX` statement live. **Concurrent** runs outside any transaction (Postgres forbids `CREATE INDEX CONCURRENTLY` inside one) so it doesn't lock the table on busy systems.
 

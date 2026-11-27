@@ -1,8 +1,13 @@
 package handlers
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 func strPtr(s string) *string { return &s }
@@ -143,6 +148,11 @@ func TestBuildCreateIndex(t *testing.T) {
 			indexRequest{Schema: "appdb", Table: "users", Name: "users_email_idx", Columns: []string{"email"}, Unique: true},
 			"CREATE UNIQUE INDEX `users_email_idx` ON `appdb`.`users` (`email`)",
 		},
+		{
+			"mysql",
+			indexRequest{Schema: "appdb", Table: "users", Name: "users_name_hash", Columns: []string{"first", "last"}, Method: "HASH"},
+			"CREATE INDEX `users_name_hash` ON `appdb`.`users` (`first`, `last`) USING HASH",
+		},
 	}
 	for _, c := range cases {
 		got, err := buildCreateIndex(c.driver, c.req)
@@ -152,6 +162,15 @@ func TestBuildCreateIndex(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("got %q\nwant %q", got, c.want)
+		}
+	}
+}
+
+func TestBuildCreateIndexRefusesMySQLMethodsItLacks(t *testing.T) {
+	for _, method := range []string{"gin", "gist", "btree) WHERE (1"} {
+		req := indexRequest{Schema: "appdb", Table: "events", Name: "events_payload_idx", Columns: []string{"payload"}, Method: method}
+		if got, err := buildCreateIndex("mysql", req); err == nil {
+			t.Errorf("method %q: expected an error, got %q", method, got)
 		}
 	}
 }
@@ -243,6 +262,26 @@ func TestBuildAlterTable_OpsAfterRenameTableUseTheNewName(t *testing.T) {
 		}
 		if got[1] != want {
 			t.Errorf("%s: got %q\nwant %q", driver, got[1], want)
+		}
+	}
+}
+
+func TestCommittedStatements(t *testing.T) {
+	rejected := &batchError{ran: 0, err: fmt.Errorf("exec: %w", &mysql.MySQLError{Number: 1091, Message: "Can't DROP 'x'"})}
+	if n, ok := committedStatements(rejected); !ok || n != 0 {
+		t.Errorf("a statement the server rejected: got %d, %v, want 0, true", n, ok)
+	}
+	partial := &batchError{ran: 2, err: fmt.Errorf("exec: %w", &mysql.MySQLError{Number: 1091})}
+	if n, ok := committedStatements(partial); !ok || n != 2 {
+		t.Errorf("a rejection after two statements: got %d, %v, want 2, true", n, ok)
+	}
+	for name, err := range map[string]error{
+		"deadline":      &batchError{ran: 0, err: fmt.Errorf("exec: %w", context.DeadlineExceeded)},
+		"lost response": &batchError{ran: 0, err: fmt.Errorf("exec: %w", mysql.ErrInvalidConn)},
+		"not a batch":   errors.New("begin: connection refused"),
+	} {
+		if n, ok := committedStatements(err); ok {
+			t.Errorf("%s: got %d committed, want an unknown count", name, n)
 		}
 	}
 }

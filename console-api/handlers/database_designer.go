@@ -9,12 +9,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-sql-driver/mysql"
 )
 
 // columnSpec is the input shape for column-level operations. Default
@@ -143,6 +145,9 @@ func (d *Database) CreateTable(w http.ResponseWriter, r *http.Request) {
 // AlterTable applies an ordered list of operations to a table inside
 // a single transaction and returns the executed DDL list. MySQL DDL can commit
 // implicitly, leaving earlier changes applied if a later statement fails.
+// A MySQL statement rejection includes the committed statement count in the
+// error response. Other errors omit the count, including connection and timeout
+// failures whose commit outcome may be unknown.
 // PATCH /api/v1/services/{name}/db/tables/{schema}/{table}
 func (d *Database) AlterTable(w http.ResponseWriter, r *http.Request) {
 	svcName, namespace, ok := requireService(w, r)
@@ -187,11 +192,21 @@ func (d *Database) AlterTable(w http.ResponseWriter, r *http.Request) {
 	defer restore()
 	ddl, err := buildAlterTable(info.driver, schemaName, table, req.Ops, cols)
 	if err != nil {
+		if info.driver == "mysql" {
+			// The batch was refused before any of its DDL ran.
+			respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error(), "committed": 0})
+			return
+		}
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	if err := audited(r, svcName, ddl, func() error { return execInTx(ctx, conn, ddl) }); err != nil {
+		if n, ok := committedStatements(err); ok && info.driver == "mysql" {
+			// MySQL commits each DDL statement, so the caller learns how many changes stayed applied.
+			respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error(), "committed": n})
+			return
+		}
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -361,9 +376,34 @@ func execDDL(ctx context.Context, db *sql.DB, ddl string, outsideTx bool) error 
 	return execInTx(ctx, db, []string{ddl})
 }
 
+// batchError wraps a failed statement and counts earlier successful statements
+// in the batch.
+type batchError struct {
+	ran int
+	err error
+}
+
+func (e *batchError) Error() string { return e.err.Error() }
+func (e *batchError) Unwrap() error { return e.err }
+
+// committedStatements returns how many statements of a failed MySQL batch stayed
+// applied. The count is known only when the server rejected the failing
+// statement. After a lost connection or a deadline the statement may have
+// committed, so ok is false.
+func committedStatements(err error) (n int, ok bool) {
+	var be *batchError
+	var rejected *mysql.MySQLError
+	if !errors.As(err, &be) || !errors.As(be.err, &rejected) {
+		return 0, false
+	}
+	return be.ran, true
+}
+
 // execInTx executes nonblank statements in order within one transaction and
 // attempts a rollback if a statement fails, keeping supported changes atomic.
 // MySQL DDL can commit implicitly, leaving earlier changes applied on failure.
+// A failing statement returns a *batchError that counts earlier successful,
+// nonblank statements.
 func execInTx(ctx context.Context, db interface {
 	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 }, stmts []string) error {
@@ -371,14 +411,16 @@ func execInTx(ctx context.Context, db interface {
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
+	ran := 0
 	for _, s := range stmts {
 		if strings.TrimSpace(s) == "" {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, s); err != nil { //nolint:gosec // Designer DDL needs database.write, which already permits arbitrary SQL through the query endpoint.
 			_ = tx.Rollback()
-			return fmt.Errorf("exec %q: %w", truncate(s, 80), err)
+			return &batchError{ran: ran, err: fmt.Errorf("exec %q: %w", truncate(s, 80), err)}
 		}
+		ran++
 	}
 	return tx.Commit()
 }
@@ -619,6 +661,9 @@ func buildConstraintClause(driver string, c constraintSpec) (string, error) {
 	}
 }
 
+// buildCreateIndex returns a dialect-specific CREATE INDEX statement. For MySQL,
+// it accepts only BTREE and HASH methods and ignores the PostgreSQL-only Where
+// and Concurrent options.
 func buildCreateIndex(driver string, req indexRequest) (string, error) {
 	if len(req.Columns) == 0 {
 		return "", fmt.Errorf("columns are required")
@@ -627,18 +672,28 @@ func buildCreateIndex(driver string, req indexRequest) (string, error) {
 	if req.Unique {
 		uniq = "UNIQUE "
 	}
+	if driver == "mysql" {
+		using := ""
+		if req.Method != "" {
+			m := strings.ToUpper(req.Method)
+			if m != "BTREE" && m != "HASH" {
+				return "", fmt.Errorf("MySQL supports the BTREE and HASH index methods, got %q", req.Method)
+			}
+			using = " USING " + m
+		}
+		return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)%s",
+			uniq, quoteIdent(driver, req.Name), qualified(driver, req.Schema, req.Table), joinIdents(driver, req.Columns), using), nil
+	}
 	concurrent := ""
-	if req.Concurrent && driver == "pgx" {
+	if req.Concurrent {
 		concurrent = "CONCURRENTLY "
 	}
 	method := ""
-	if req.Method != "" && driver == "pgx" {
-		method = " USING " + req.Method
-	} else if req.Method != "" && driver == "mysql" {
+	if req.Method != "" {
 		method = " USING " + req.Method
 	}
 	where := ""
-	if req.Where != "" && driver == "pgx" {
+	if req.Where != "" {
 		where = " WHERE " + req.Where
 	}
 	return fmt.Sprintf("CREATE %sINDEX %s%s ON %s%s (%s)%s",

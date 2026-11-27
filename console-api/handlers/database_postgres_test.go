@@ -215,3 +215,25 @@ func TestRowStatementsPostgres(t *testing.T) {
 		t.Fatalf("%s: %v", del, err)
 	}
 }
+
+func TestReadSchemaPostgres(t *testing.T) {
+	db, schema := openPostgresTestDB(t)
+	resp, err := readSchema(context.Background(), db, "pgx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Dialect != "postgres" {
+		t.Errorf("dialect = %q, want postgres", resp.Dialect)
+	}
+	found := false
+	for _, d := range resp.Databases {
+		for _, s := range d.Schemas {
+			if s.Name == schema {
+				found = len(s.Relations) > 0
+			}
+		}
+	}
+	if !found {
+		t.Errorf("schema %s with its tables is missing from %+v", schema, resp.Databases)
+	}
+}

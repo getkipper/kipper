@@ -200,6 +200,27 @@ func TestBrowseRowsMySQLIncludesInvisibleColumns(t *testing.T) {
 	}
 }
 
+func TestExecInTxMySQLCountsCommittedStatements(t *testing.T) {
+	db, schema := openMySQLTestDB(t)
+	ctx := context.Background()
+	add := fmt.Sprintf("ALTER TABLE %s ADD COLUMN extra int", qualified("mysql", schema, "users"))
+	bad := fmt.Sprintf("ALTER TABLE %s DROP COLUMN no_such_column", qualified("mysql", schema, "users"))
+	for name, tc := range map[string]struct {
+		stmts []string
+		ran   int
+	}{
+		"first statement fails":  {[]string{bad, add}, 0},
+		"second statement fails": {[]string{add, bad}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := execInTx(ctx, db, tc.stmts)
+			if n, ok := committedStatements(err); !ok || n != tc.ran {
+				t.Errorf("committed = %d, %v, want %d, true (error %v)", n, ok, tc.ran, err)
+			}
+		})
+	}
+}
+
 func TestDropIndexMySQL(t *testing.T) {
 	db, schema := openMySQLTestDB(t)
 	ctx := context.Background()
@@ -581,5 +602,90 @@ func TestAlterColumnMySQLRefusesUnknownDefinitions(t *testing.T) {
 				t.Errorf("expected the batch to be refused, got DDL %q", ddl)
 			}
 		})
+	}
+}
+
+func TestReadSchemaMySQL(t *testing.T) {
+	db, schema := openMySQLTestDB(t)
+	resp, err := readSchema(context.Background(), db, "mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Dialect != "mysql" {
+		t.Errorf("dialect = %q, want mysql", resp.Dialect)
+	}
+	found := false
+	for _, d := range resp.Databases {
+		for _, s := range d.Schemas {
+			if s.Name == schema {
+				found = len(s.Relations) > 0
+			}
+		}
+	}
+	if !found {
+		t.Errorf("schema %s with its tables is missing from %+v", schema, resp.Databases)
+	}
+}
+
+// TestCreateTableMySQLWithConsoleDefaults checks the designer's MySQL defaults
+// and preset types from console/src/utils/columnTypes.ts. The added integer
+// columns omit AUTO_INCREMENT because the table already has an auto-increment id.
+func TestCreateTableMySQLWithConsoleDefaults(t *testing.T) {
+	db, schema := openMySQLTestDB(t)
+	ctx := context.Background()
+	now := "CURRENT_TIMESTAMP"
+	ddl, err := buildCreateTable("mysql", createTableRequest{
+		Schema: schema,
+		Name:   "made",
+		Columns: []columnSpec{
+			{Name: "id", Type: "bigint unsigned auto_increment"},
+			{Name: "created_at", Type: "datetime", Default: &now},
+		},
+		Constraints: []constraintSpec{{Type: "PRIMARY KEY", Columns: []string{"id"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := execInTx(ctx, db, []string{ddl}); err != nil {
+		t.Fatalf("%s: %v", ddl, err)
+	}
+	presets := []string{
+		"varchar(255)", "text", "char(36)", "mediumtext", "longtext",
+		"int", "bigint", "smallint", "tinyint", "decimal(10,2)", "double", "float",
+		"int unsigned",
+		"boolean",
+		"datetime", "timestamp", "date", "time", "year",
+		"json",
+		"blob", "varbinary(255)", "binary(16)",
+	}
+	var ops []tableOp
+	for i, typ := range presets {
+		ops = append(ops, tableOp{Op: "add_column", Column: &columnSpec{Name: fmt.Sprintf("c%d", i), Type: typ, Nullable: true}})
+	}
+	if _, err := applyMySQLAlter(t, db, schema, "made", ops); err != nil {
+		t.Fatalf("add preset columns: %v", err)
+	}
+	got := mysqlColumnStates(t, db, schema, "made")
+	if c := got["id"]; c.Extra != "auto_increment" || c.Nullable != "NO" {
+		t.Errorf("id = %+v, want an auto-increment NOT NULL column", c)
+	}
+	if c := got["created_at"]; c.Default != "CURRENT_TIMESTAMP" {
+		t.Errorf("created_at = %+v, want DEFAULT CURRENT_TIMESTAMP", c)
+	}
+
+	ddl, err = buildCreateTable("mysql", createTableRequest{
+		Schema:      schema,
+		Name:        "made_small",
+		Columns:     []columnSpec{{Name: "id", Type: "int unsigned auto_increment"}},
+		Constraints: []constraintSpec{{Type: "PRIMARY KEY", Columns: []string{"id"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := execInTx(ctx, db, []string{ddl}); err != nil {
+		t.Fatalf("%s: %v", ddl, err)
+	}
+	if c := mysqlColumnStates(t, db, schema, "made_small")["id"]; c.Extra != "auto_increment" {
+		t.Errorf("made_small.id = %+v, want an auto-increment column", c)
 	}
 }

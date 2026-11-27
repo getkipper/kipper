@@ -76,6 +76,7 @@ export interface DBSchemaDatabase {
 }
 
 export interface DBSchema {
+  dialect: 'postgres' | 'mysql'
   databases: DBSchemaDatabase[]
 }
 
