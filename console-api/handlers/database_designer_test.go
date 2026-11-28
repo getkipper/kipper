@@ -1,8 +1,13 @@
 package handlers
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 func strPtr(s string) *string { return &s }
@@ -74,7 +79,7 @@ func TestBuildAlterTable_Postgres(t *testing.T) {
 		{Op: "set_default", Column: &columnSpec{Name: "status", Default: strPtr("'pending'")}},
 		{Op: "drop_constraint", ConstraintName: "old_check"},
 	}
-	got, err := buildAlterTable("pgx", "public", "domains", ops)
+	got, err := buildAlterTable("pgx", "public", "domains", ops, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -101,7 +106,7 @@ func TestBuildAlterTable_Postgres(t *testing.T) {
 }
 
 func TestBuildAlterTable_RejectsUnknownOp(t *testing.T) {
-	_, err := buildAlterTable("pgx", "public", "t", []tableOp{{Op: "explode"}})
+	_, err := buildAlterTable("pgx", "public", "t", []tableOp{{Op: "explode"}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown op") {
 		t.Errorf("expected unknown op error, got %v", err)
 	}
@@ -143,6 +148,11 @@ func TestBuildCreateIndex(t *testing.T) {
 			indexRequest{Schema: "appdb", Table: "users", Name: "users_email_idx", Columns: []string{"email"}, Unique: true},
 			"CREATE UNIQUE INDEX `users_email_idx` ON `appdb`.`users` (`email`)",
 		},
+		{
+			"mysql",
+			indexRequest{Schema: "appdb", Table: "users", Name: "users_name_hash", Columns: []string{"first", "last"}, Method: "HASH"},
+			"CREATE INDEX `users_name_hash` ON `appdb`.`users` (`first`, `last`) USING HASH",
+		},
 	}
 	for _, c := range cases {
 		got, err := buildCreateIndex(c.driver, c.req)
@@ -156,16 +166,33 @@ func TestBuildCreateIndex(t *testing.T) {
 	}
 }
 
+func TestBuildCreateIndexRefusesMySQLMethodsItLacks(t *testing.T) {
+	for _, method := range []string{"gin", "gist", "btree) WHERE (1"} {
+		req := indexRequest{Schema: "appdb", Table: "events", Name: "events_payload_idx", Columns: []string{"payload"}, Method: method}
+		if got, err := buildCreateIndex("mysql", req); err == nil {
+			t.Errorf("method %q: expected an error, got %q", method, got)
+		}
+	}
+}
+
 func TestBuildDropIndex(t *testing.T) {
-	got := buildDropIndex("pgx", "public", "users_email_idx", true)
+	got, _ := buildDropIndex("pgx", "public", "users", "users_email_idx", true)
 	want := `DROP INDEX CONCURRENTLY "public"."users_email_idx"`
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
-	got = buildDropIndex("pgx", "public", "users_email_idx", false)
+	got, _ = buildDropIndex("pgx", "public", "", "users_email_idx", false)
 	want = `DROP INDEX "public"."users_email_idx"`
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
+	}
+	got, _ = buildDropIndex("mysql", "app", "users", "users_email_idx", false)
+	want = "DROP INDEX `users_email_idx` ON `app`.`users`"
+	if got != want {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+	if _, err := buildDropIndex("mysql", "app", "", "users_email_idx", false); err == nil {
+		t.Error("a MySQL drop without a table should fail")
 	}
 }
 
@@ -215,6 +242,46 @@ func TestParsePgArray(t *testing.T) {
 			if got[i] != want[i] {
 				t.Errorf("parsePgArray(%q)[%d] = %q, want %q", in, i, got[i], want[i])
 			}
+		}
+	}
+}
+
+func TestBuildAlterTable_OpsAfterRenameTableUseTheNewName(t *testing.T) {
+	ops := []tableOp{
+		{Op: "rename_table", NewName: "accounts"},
+		{Op: "drop_column", Name: "legacy"},
+	}
+	for driver, want := range map[string]string{
+		"pgx":   `ALTER TABLE "public"."accounts" DROP COLUMN "legacy"`,
+		"mysql": "ALTER TABLE `app`.`accounts` DROP COLUMN `legacy`",
+	} {
+		schema := map[string]string{"pgx": "public", "mysql": "app"}[driver]
+		got, err := buildAlterTable(driver, schema, "users", ops, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", driver, err)
+		}
+		if got[1] != want {
+			t.Errorf("%s: got %q\nwant %q", driver, got[1], want)
+		}
+	}
+}
+
+func TestCommittedStatements(t *testing.T) {
+	rejected := &batchError{ran: 0, err: fmt.Errorf("exec: %w", &mysql.MySQLError{Number: 1091, Message: "Can't DROP 'x'"})}
+	if n, ok := committedStatements(rejected); !ok || n != 0 {
+		t.Errorf("a statement the server rejected: got %d, %v, want 0, true", n, ok)
+	}
+	partial := &batchError{ran: 2, err: fmt.Errorf("exec: %w", &mysql.MySQLError{Number: 1091})}
+	if n, ok := committedStatements(partial); !ok || n != 2 {
+		t.Errorf("a rejection after two statements: got %d, %v, want 2, true", n, ok)
+	}
+	for name, err := range map[string]error{
+		"deadline":      &batchError{ran: 0, err: fmt.Errorf("exec: %w", context.DeadlineExceeded)},
+		"lost response": &batchError{ran: 0, err: fmt.Errorf("exec: %w", mysql.ErrInvalidConn)},
+		"not a batch":   errors.New("begin: connection refused"),
+	} {
+		if n, ok := committedStatements(err); ok {
+			t.Errorf("%s: got %d committed, want an unknown count", name, n)
 		}
 	}
 }

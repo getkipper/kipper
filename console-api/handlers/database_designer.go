@@ -9,12 +9,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-sql-driver/mysql"
 )
 
 // columnSpec is the input shape for column-level operations. Default
@@ -93,6 +95,7 @@ type previewRequest struct {
 	CreateIndex *indexRequest `json:"create_index,omitempty"`
 	DropIndex   *struct {
 		Schema     string `json:"schema"`
+		Table      string `json:"table"`
 		Name       string `json:"name"`
 		Concurrent bool   `json:"concurrent,omitempty"`
 	} `json:"drop_index,omitempty"`
@@ -140,7 +143,11 @@ func (d *Database) CreateTable(w http.ResponseWriter, r *http.Request) {
 }
 
 // AlterTable applies an ordered list of operations to a table inside
-// a single transaction. Returns the executed DDL list.
+// a single transaction and returns the executed DDL list. MySQL DDL can commit
+// implicitly, leaving earlier changes applied if a later statement fails.
+// A MySQL statement rejection includes the committed statement count in the
+// error response. Other errors omit the count, including connection and timeout
+// failures whose commit outcome may be unknown.
 // PATCH /api/v1/services/{name}/db/tables/{schema}/{table}
 func (d *Database) AlterTable(w http.ResponseWriter, r *http.Request) {
 	svcName, namespace, ok := requireService(w, r)
@@ -169,13 +176,37 @@ func (d *Database) AlterTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ddl, err := buildAlterTable(info.driver, schemaName, table, req.Ops)
+	// The definitions are read and the DDL runs on one connection, so both see
+	// the same session settings.
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	defer func() { _ = conn.Close() }()
+	cols, restore, err := currentMySQLColumns(ctx, conn, info.driver, schemaName, table)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer restore()
+	ddl, err := buildAlterTable(info.driver, schemaName, table, req.Ops, cols)
+	if err != nil {
+		if info.driver == "mysql" {
+			// The batch was refused before any of its DDL ran.
+			respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error(), "committed": 0})
+			return
+		}
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	if err := audited(r, svcName, ddl, func() error { return execInTx(ctx, db, ddl) }); err != nil {
+	if err := audited(r, svcName, ddl, func() error { return execInTx(ctx, conn, ddl) }); err != nil {
+		if n, ok := committedStatements(err); ok && info.driver == "mysql" {
+			// MySQL commits each DDL statement, so the caller learns how many changes stayed applied.
+			respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error(), "committed": n})
+			return
+		}
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -227,7 +258,8 @@ func (d *Database) CreateIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 // DropIndex removes an index. On PostgreSQL, concurrent=true runs
-// DROP INDEX CONCURRENTLY outside a transaction.
+// DROP INDEX CONCURRENTLY outside a transaction. MySQL requires the index's
+// table name in the table query parameter.
 // DELETE /api/v1/services/{name}/db/indexes/{schema}/{indexName}
 func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 	svcName, namespace, ok := requireService(w, r)
@@ -247,7 +279,11 @@ func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ddl := buildDropIndex(info.driver, schemaName, indexName, concurrent)
+	ddl, err := buildDropIndex(info.driver, schemaName, r.URL.Query().Get("table"), indexName, concurrent)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if err := audited(r, svcName, []string{ddl}, func() error {
 		return execDDL(ctx, db, ddl, concurrent && info.driver == "pgx")
@@ -259,7 +295,8 @@ func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 // PreviewDDL accepts the same operations as the execution endpoints and
-// connects to the database to determine its dialect. It returns generated
+// connects to the database to determine its dialect and read current column
+// definitions for MySQL table alterations. It returns generated
 // SQL without executing it so users can review the DDL before clicking Apply.
 // POST /api/v1/services/{name}/db/ddl/preview
 func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +314,7 @@ func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	_, info, err := d.connect(ctx, svcName, namespace, r.URL.Query().Get("database"))
+	db, info, err := d.connect(ctx, svcName, namespace, r.URL.Query().Get("database"))
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
@@ -292,7 +329,19 @@ func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 	case req.AlterTable != nil:
-		ddl, err := buildAlterTable(info.driver, req.AlterTable.Schema, req.AlterTable.Table, req.AlterTable.Ops)
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		cols, restore, err := currentMySQLColumns(ctx, conn, info.driver, req.AlterTable.Schema, req.AlterTable.Table)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		defer restore()
+		ddl, err := buildAlterTable(info.driver, req.AlterTable.Schema, req.AlterTable.Table, req.AlterTable.Ops, cols)
 		if err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -306,7 +355,11 @@ func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 	case req.DropIndex != nil:
-		ddl := buildDropIndex(info.driver, req.DropIndex.Schema, req.DropIndex.Name, req.DropIndex.Concurrent)
+		ddl, err := buildDropIndex(info.driver, req.DropIndex.Schema, req.DropIndex.Table, req.DropIndex.Name, req.DropIndex.Concurrent)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 	default:
 		respondError(w, http.StatusBadRequest, "exactly one of create_table, alter_table, create_index, drop_index is required")
@@ -323,22 +376,51 @@ func execDDL(ctx context.Context, db *sql.DB, ddl string, outsideTx bool) error 
 	return execInTx(ctx, db, []string{ddl})
 }
 
+// batchError wraps a failed statement and counts earlier successful statements
+// in the batch.
+type batchError struct {
+	ran int
+	err error
+}
+
+func (e *batchError) Error() string { return e.err.Error() }
+func (e *batchError) Unwrap() error { return e.err }
+
+// committedStatements returns how many statements of a failed MySQL batch stayed
+// applied. The count is known only when the server rejected the failing
+// statement. After a lost connection or a deadline the statement may have
+// committed, so ok is false.
+func committedStatements(err error) (n int, ok bool) {
+	var be *batchError
+	var rejected *mysql.MySQLError
+	if !errors.As(err, &be) || !errors.As(be.err, &rejected) {
+		return 0, false
+	}
+	return be.ran, true
+}
+
 // execInTx executes nonblank statements in order within one transaction and
 // attempts a rollback if a statement fails, keeping supported changes atomic.
 // MySQL DDL can commit implicitly, leaving earlier changes applied on failure.
-func execInTx(ctx context.Context, db *sql.DB, stmts []string) error {
+// A failing statement returns a *batchError that counts earlier successful,
+// nonblank statements.
+func execInTx(ctx context.Context, db interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}, stmts []string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
+	ran := 0
 	for _, s := range stmts {
 		if strings.TrimSpace(s) == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, s); err != nil {
+		if _, err := tx.ExecContext(ctx, s); err != nil { //nolint:gosec // Designer DDL needs database.write, which already permits arbitrary SQL through the query endpoint.
 			_ = tx.Rollback()
-			return fmt.Errorf("exec %q: %w", truncate(s, 80), err)
+			return &batchError{ran: ran, err: fmt.Errorf("exec %q: %w", truncate(s, 80), err)}
 		}
+		ran++
 	}
 	return tx.Commit()
 }
@@ -377,7 +459,17 @@ func buildCreateTable(driver string, req createTableRequest) (string, error) {
 	), nil
 }
 
-func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, error) {
+// buildAlterTable returns one statement per operation, in order. MySQL type and
+// nullability changes require current definitions in cols because MODIFY COLUMN
+// replaces the whole column definition. It mutates cols to track added, dropped,
+// renamed, and modified columns, and a default change or a new primary key
+// marks the affected columns' definitions unknown for the rest of the batch.
+// Operations after rename_table address the new name. PostgreSQL callers can
+// pass nil for cols.
+func buildAlterTable(driver, schema, table string, ops []tableOp, cols mysqlColumns) ([]string, error) {
+	if driver == "mysql" && cols == nil {
+		cols = mysqlColumns{}
+	}
 	out := make([]string, 0, len(ops))
 	qual := qualified(driver, schema, table)
 	for _, op := range ops {
@@ -391,6 +483,9 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				return nil, err
 			}
 			out = append(out, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", qual, def))
+			if driver == "mysql" {
+				cols.add(op.Column.Name)
+			}
 		case "drop_column":
 			name := op.Name
 			if name == "" && op.Column != nil {
@@ -400,6 +495,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				return nil, fmt.Errorf("drop_column requires a column name")
 			}
 			out = append(out, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", qual, quoteIdent(driver, name)))
+			cols.drop(name)
 		case "rename_column":
 			if op.OldName == "" || op.NewName == "" {
 				return nil, fmt.Errorf("rename_column requires old_name and new_name")
@@ -407,6 +503,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 			// MySQL 8+ supports RENAME COLUMN, matching PG's syntax.
 			out = append(out, fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s",
 				qual, quoteIdent(driver, op.OldName), quoteIdent(driver, op.NewName)))
+			cols.rename(op.OldName, op.NewName)
 		case "alter_column_type":
 			if op.Column == nil {
 				return nil, fmt.Errorf("alter_column_type requires a column spec")
@@ -415,12 +512,17 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				out = append(out, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s",
 					qual, quoteIdent(driver, op.Column.Name), op.Column.Type))
 			} else {
-				// MySQL collapses several alter-column ops into MODIFY COLUMN.
-				def, err := buildColumnDef(driver, *op.Column)
+				c, err := cols.lookup(op.Column.Name)
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s", qual, def))
+				if op.Column.Type == "" {
+					return nil, fmt.Errorf("alter_column_type requires a type for column %q", op.Column.Name)
+				}
+				def := c.withType(op.Column.Type)
+				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s", qual, quoteIdent(driver, op.Column.Name), def))
+				c.rest = def[len(op.Column.Type):]
+				c.typ = op.Column.Type
 			}
 		case "set_nullable":
 			if op.Column == nil {
@@ -435,11 +537,12 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 						qual, quoteIdent(driver, op.Column.Name)))
 				}
 			} else {
-				def, err := buildColumnDef(driver, *op.Column)
+				c, err := cols.lookup(op.Column.Name)
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s", qual, def))
+				c.rest = c.withNullability(op.Column.Nullable)
+				out = append(out, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s%s", qual, quoteIdent(driver, op.Column.Name), c.typ, c.rest))
 			}
 		case "set_default":
 			if op.Column == nil {
@@ -452,6 +555,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				out = append(out, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s",
 					qual, quoteIdent(driver, op.Column.Name), *op.Column.Default))
 			}
+			cols.forget(op.Column.Name)
 		case "add_constraint":
 			if op.Constraint == nil {
 				return nil, fmt.Errorf("add_constraint requires a constraint spec")
@@ -461,6 +565,11 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				return nil, err
 			}
 			out = append(out, fmt.Sprintf("ALTER TABLE %s ADD %s", qual, clause))
+			if strings.EqualFold(op.Constraint.Type, "PRIMARY KEY") {
+				for _, name := range op.Constraint.Columns {
+					cols.forget(name)
+				}
+			}
 		case "drop_constraint":
 			if op.ConstraintName == "" {
 				return nil, fmt.Errorf("drop_constraint requires constraint_name")
@@ -478,6 +587,7 @@ func buildAlterTable(driver, schema, table string, ops []tableOp) ([]string, err
 				out = append(out, fmt.Sprintf("ALTER TABLE %s RENAME TO %s",
 					qual, quoteIdent(driver, op.NewName)))
 			}
+			qual = qualified(driver, schema, op.NewName)
 		default:
 			return nil, fmt.Errorf("unknown op %q", op.Op)
 		}
@@ -551,6 +661,9 @@ func buildConstraintClause(driver string, c constraintSpec) (string, error) {
 	}
 }
 
+// buildCreateIndex returns a dialect-specific CREATE INDEX statement. For MySQL,
+// it accepts only BTREE and HASH methods and ignores the PostgreSQL-only Where
+// and Concurrent options.
 func buildCreateIndex(driver string, req indexRequest) (string, error) {
 	if len(req.Columns) == 0 {
 		return "", fmt.Errorf("columns are required")
@@ -559,18 +672,28 @@ func buildCreateIndex(driver string, req indexRequest) (string, error) {
 	if req.Unique {
 		uniq = "UNIQUE "
 	}
+	if driver == "mysql" {
+		using := ""
+		if req.Method != "" {
+			m := strings.ToUpper(req.Method)
+			if m != "BTREE" && m != "HASH" {
+				return "", fmt.Errorf("MySQL supports the BTREE and HASH index methods, got %q", req.Method)
+			}
+			using = " USING " + m
+		}
+		return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)%s",
+			uniq, quoteIdent(driver, req.Name), qualified(driver, req.Schema, req.Table), joinIdents(driver, req.Columns), using), nil
+	}
 	concurrent := ""
-	if req.Concurrent && driver == "pgx" {
+	if req.Concurrent {
 		concurrent = "CONCURRENTLY "
 	}
 	method := ""
-	if req.Method != "" && driver == "pgx" {
-		method = " USING " + req.Method
-	} else if req.Method != "" && driver == "mysql" {
+	if req.Method != "" {
 		method = " USING " + req.Method
 	}
 	where := ""
-	if req.Where != "" && driver == "pgx" {
+	if req.Where != "" {
 		where = " WHERE " + req.Where
 	}
 	return fmt.Sprintf("CREATE %sINDEX %s%s ON %s%s (%s)%s",
@@ -584,18 +707,21 @@ func buildCreateIndex(driver string, req indexRequest) (string, error) {
 	), nil
 }
 
-func buildDropIndex(driver, schema, name string, concurrent bool) string {
+// buildDropIndex returns a dialect-specific DROP INDEX statement. MySQL
+// scopes index names to tables, so an empty table returns an error.
+// PostgreSQL ignores table and uses concurrent to select DROP INDEX CONCURRENTLY.
+func buildDropIndex(driver, schema, table, name string, concurrent bool) (string, error) {
 	if driver == "mysql" {
-		// MySQL needs the table name; users will hit DROP INDEX via ALTER TABLE
-		// in practice. Emit the simpler form and let the server return an
-		// actionable error if the dialect rejects it.
-		return fmt.Sprintf("DROP INDEX %s ON %s", quoteIdent(driver, name), quoteIdent(driver, schema))
+		if table == "" {
+			return "", fmt.Errorf("dropping a MySQL index requires the name of the table it belongs to")
+		}
+		return fmt.Sprintf("DROP INDEX %s ON %s", quoteIdent(driver, name), qualified(driver, schema, table)), nil
 	}
 	c := ""
 	if concurrent {
 		c = "CONCURRENTLY "
 	}
-	return fmt.Sprintf("DROP INDEX %s%s", c, qualified(driver, schema, name))
+	return fmt.Sprintf("DROP INDEX %s%s", c, qualified(driver, schema, name)), nil
 }
 
 func joinIdents(driver string, names []string) string {

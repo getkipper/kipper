@@ -18,6 +18,8 @@ import { keymap, EditorView } from '@codemirror/view'
 import { Prec } from '@codemirror/state'
 import { useToast } from '@/composables/useToast'
 import { useCapabilities } from '@/composables/useCapabilities'
+import { coerceCellValue } from '@/utils/cellValue'
+import { defaultNewTableColumns, typeGroupsFor } from '@/utils/columnTypes'
 import {
   fetchDBDatabases,
   fetchDBSchema,
@@ -116,8 +118,10 @@ const activeTab = ref<'browse' | 'sql' | 'designer' | 'indexes'>('sql')
 const selectedRelation = ref<{ schema: string; name: string } | null>(null)
 
 // --- Schema sidebar ---
-const schema = ref<DBSchema>({ databases: [] })
+const schema = ref<DBSchema>({ dialect: 'postgres', databases: [] })
 const schemaLoading = ref(false)
+const dialectKnown = ref(false)
+let schemaLoadSeq = 0
 const schemaError = ref<string | null>(null)
 const expandedDbs = ref<Record<string, boolean>>({})
 const expandedSchemas = ref<Record<string, boolean>>({})
@@ -155,10 +159,13 @@ async function loadAllTableColumns() {
 }
 
 async function loadSchema() {
+  const seq = ++schemaLoadSeq
   schemaLoading.value = true
   schemaError.value = null
   try {
     const raw = await fetchDBSchema(serviceName.value, namespace.value, activeDatabase.value)
+    // Keep older responses from overwriting the latest schema request's state.
+    if (seq !== schemaLoadSeq) return
     const dbs = (raw?.databases ?? []).map((db) => ({
       ...db,
       schemas: (db.schemas ?? []).map((sch) => ({
@@ -166,7 +173,8 @@ async function loadSchema() {
         relations: sch.relations ?? [],
       })),
     }))
-    schema.value = { databases: dbs }
+    schema.value = { dialect: raw?.dialect === 'mysql' ? 'mysql' : 'postgres', databases: dbs }
+    dialectKnown.value = true
     if (dbs.length === 1) {
       expandedDbs.value[dbs[0].name] = true
       if (dbs[0].schemas.length === 1) {
@@ -180,10 +188,11 @@ async function loadSchema() {
     // fall over.
     loadAllTableColumns()
   } catch (e: unknown) {
+    if (seq !== schemaLoadSeq) return
     const err = e as { response?: { data?: { error?: string } }; message?: string }
     schemaError.value = err.response?.data?.error || err.message || 'Failed to load schema'
   } finally {
-    schemaLoading.value = false
+    if (seq === schemaLoadSeq) schemaLoading.value = false
   }
 }
 
@@ -211,7 +220,7 @@ function insertRelation(schemaName: string, relName: string) {
   activeTab.value = 'sql'
 }
 
-// --- SQL Editor (G1) ---
+// --- SQL editor ---
 const sqlText = ref('')
 const runAsTransaction = ref(false)
 const noLimit = ref(false)
@@ -292,7 +301,7 @@ const sqlDomKeyHandler = EditorView.domEventHandlers({
 
 const editorExtensions = computed(() => [
   sql({
-    dialect: inferDialect() === 'mysql' ? MySQL : PostgreSQL,
+    dialect: sqlDialect() === 'mysql' ? MySQL : PostgreSQL,
     schema: sqlAutocompleteSchema.value,
     // When the user types unqualified column names, suggest from the
     // currently-open table by default. Falls back to no default if no
@@ -460,7 +469,7 @@ function csvEscape(v: unknown): string {
 // rather than a document-level listener — that lets CodeMirror consume
 // the event before its contentEditable inserts a newline.
 
-// --- Row browser (G2) ---
+// --- Row browser ---
 const browseData = ref<DBRowsResponse | null>(null)
 const browseLoading = ref(false)
 const browseError = ref<string | null>(null)
@@ -555,22 +564,12 @@ function cancelEdit() {
 
 function parseEditBuffer(buf: string, col: string): unknown {
   if (buf === '__null__' || buf === '') {
-    // Empty → if column is NOT NULL we leave as ""; user can opt into NULL via __null__ sentinel.
+    // The __null__ sentinel explicitly requests SQL NULL. Empty input stays an empty string.
     if (buf === '__null__') return null
   }
   const c = browseData.value?.structure.columns.find((x) => x.name === col)
   if (!c) return buf
-  // Numeric coercion for obvious cases — types like "integer", "bigint", "smallint", "numeric".
-  const lower = c.type.toLowerCase()
-  if (/(int|numeric|decimal|real|double|float)/.test(lower)) {
-    const n = Number(buf)
-    if (!Number.isNaN(n)) return n
-  }
-  if (/bool/.test(lower)) {
-    if (buf === 'true') return true
-    if (buf === 'false') return false
-  }
-  return buf
+  return coerceCellValue(c.type, buf)
 }
 
 function colIndex(name: string): number {
@@ -781,7 +780,13 @@ onMounted(() => {
   loadHistory()
 })
 
-watch(serviceName, () => {
+watch([serviceName, namespace], () => {
+  dialectKnown.value = false
+  schema.value = { dialect: 'postgres', databases: [] }
+  cancelCreateTable()
+  selectedRelation.value = null
+  browseData.value = null
+  tableColumnsCache.value = {}
   loadDatabases()
   loadSchema()
 })
@@ -818,7 +823,7 @@ function displayCell(v: unknown): string {
   return String(v)
 }
 
-// --- Snippets + history (G5) ---
+// --- Snippets and history ---
 const snippets = ref<DBSnippet[]>([])
 const history = ref<DBHistoryEntry[]>([])
 const sidebarMode = ref<'snippets' | 'history'>('snippets')
@@ -925,26 +930,12 @@ function relativeTime(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-// --- AI panel (G4) ---
+// --- AI panel ---
 const showAI = ref(false)
 const aiChatRef = ref<InstanceType<typeof AIChat> | null>(null)
 
-// Best-effort dialect inference. The schema endpoint doesn't tell us
-// the driver directly; for the common case we're on Postgres so
-// default to that. MySQL service rows on the list page route here too,
-// so we trust the URL-side type when it's available.
-function inferDialect(): 'postgres' | 'mysql' {
-  // The Services list passes service type via route state in some flows;
-  // for now we infer from the schema shape: Postgres exposes "public"
-  // by default, MySQL uses information_schema with no concept of
-  // schemas. If we have any database with a schema named "public" it's
-  // postgres; otherwise mysql.
-  for (const db of schema.value.databases) {
-    for (const sch of db.schemas) {
-      if (sch.name === 'public') return 'postgres'
-    }
-  }
-  return schema.value.databases.length > 0 ? 'mysql' : 'postgres'
+function sqlDialect(): 'postgres' | 'mysql' {
+  return schema.value.dialect
 }
 
 // Build the chat context from whatever schema we know about. If the
@@ -990,7 +981,7 @@ const aiSchemaContext = computed<ChatDBSchema>(() => {
       }
     }
   }
-  return { dialect: inferDialect(), tables }
+  return { dialect: sqlDialect(), tables }
 })
 
 function onAIApply(text: string) {
@@ -1020,20 +1011,20 @@ const newTableCols = ref<DBColumnSpec[]>([])
 const newTablePK = ref<string[]>([])
 const newTablePreview = ref<string[]>([])
 
-function defaultNewTableColumns(): DBColumnSpec[] {
-  return [
-    { name: 'id', type: 'bigserial', nullable: false, default: null },
-    { name: 'created_at', type: 'timestamptz', nullable: false, default: 'now()' },
-  ]
-}
-
 function startCreateTable() {
+  // Wait for the first schema response to replace the placeholder dialect
+  // so new tables use the correct column defaults.
+  if (!dialectKnown.value) return
   creatingTable.value = true
   selectedRelation.value = null
   activeTab.value = 'designer'
-  newTableSchema.value = (schema.value.databases[0]?.schemas[0]?.name) || 'public'
+  // A MySQL server lists each database as its own schema, so the open one is the target.
+  const open = sqlDialect() === 'mysql'
+    ? schema.value.databases.find((d) => d.name === activeDatabase.value)
+    : undefined
+  newTableSchema.value = ((open ?? schema.value.databases[0])?.schemas[0]?.name) || 'public'
   newTableName.value = ''
-  newTableCols.value = defaultNewTableColumns()
+  newTableCols.value = defaultNewTableColumns(sqlDialect())
   newTablePK.value = ['id']
 }
 
@@ -1113,9 +1104,8 @@ async function refreshNewTablePreview() {
 watch([newTableSchema, newTableName, newTableCols, newTablePK], scheduleNewTablePreview, { deep: true })
 
 async function applyCreateTable() {
-  // Flush any pending debounced preview first so the active inputs are
-  // committed before we read them. Important when the user types
-  // quickly and clicks Create before the 200ms debounce window expires.
+  // Cancel the pending preview when the user clicks Create within the 200ms
+  // debounce window. The request below reads the current inputs directly.
   if (newTablePreviewTimer) {
     clearTimeout(newTablePreviewTimer)
     newTablePreviewTimer = null
@@ -1174,42 +1164,23 @@ const showAddColumn = ref(false)
 const newCol = ref<DBColumnSpec>({ name: '', type: 'text', nullable: true })
 const runWithBackup = ref(false)
 
-// Grouped column-type options for the type picker. Postgres-flavoured;
-// MySQL accepts most of the same names. The "Custom..." sentinel
-// switches the row to a free-form text input so power users can pick
-// parameterised types like varchar(50), numeric(10,2), or extension
-// types like vector(384).
-interface TypeGroup {
-  label: string
-  types: string[]
-}
-
-const TYPE_GROUPS: TypeGroup[] = [
-  { label: 'Text', types: ['text', 'varchar', 'char(36)', 'citext'] },
-  { label: 'Numbers', types: ['integer', 'bigint', 'smallint', 'numeric', 'real', 'double precision'] },
-  { label: 'Auto-increment', types: ['bigserial', 'serial', 'smallserial'] },
-  { label: 'Boolean', types: ['boolean'] },
-  { label: 'Date/Time', types: ['timestamptz', 'timestamp', 'date', 'time', 'interval'] },
-  { label: 'JSON', types: ['jsonb', 'json'] },
-  { label: 'UUID', types: ['uuid'] },
-  { label: 'Binary', types: ['bytea'] },
-  { label: 'Network', types: ['inet', 'cidr', 'macaddr'] },
-  { label: 'Search', types: ['tsvector', 'tsquery'] },
-]
+// The picker groups presets by database dialect. Choosing "Custom…" reveals
+// a text input for parameterized types like varchar(50) or numeric(10,2)
+// and extension types like vector(384).
+const TYPE_GROUPS = computed(() => typeGroupsFor(sqlDialect()))
 
 const CUSTOM_SENTINEL = '__custom__'
 
-const ALL_PRESET_TYPES = new Set<string>(TYPE_GROUPS.flatMap((g) => g.types))
+const ALL_PRESET_TYPES = computed(() => new Set<string>(TYPE_GROUPS.value.flatMap((g) => g.types)))
 
 function isCustomType(t: string | undefined): boolean {
   if (!t) return false
-  return !ALL_PRESET_TYPES.has(t)
+  return !ALL_PRESET_TYPES.value.has(t)
 }
 
 function dialectTypeHints(): string[] {
-  // Flat list of every preset type, for datalists that take a flat
-  // array rather than the grouped TYPE_GROUPS.
-  return Array.from(ALL_PRESET_TYPES)
+  // Datalists need a flat array of all preset types.
+  return Array.from(ALL_PRESET_TYPES.value)
 }
 
 function hasOp(op: DBTableOp): boolean {
@@ -1312,14 +1283,24 @@ function queueToggleNullable(col: { name: string; nullable: boolean }) {
 let designerPreviewTimer: ReturnType<typeof setTimeout> | null = null
 let designerPreviewToken = 0
 
+// Keep queued changes tied to their original table.
+watch(
+  () => JSON.stringify(selectedRelation.value ? [selectedRelation.value.schema, selectedRelation.value.name] : null),
+  () => {
+    designerOps.value = []
+    designerPreview.value = []
+  },
+)
+
 watch(designerOps, () => {
   if (designerPreviewTimer) clearTimeout(designerPreviewTimer)
+  // Queue changes invalidate pending previews immediately, before the debounce.
+  const myToken = ++designerPreviewToken
   designerPreviewTimer = setTimeout(async () => {
     if (!selectedRelation.value || designerOps.value.length === 0) {
       designerPreview.value = []
       return
     }
-    const myToken = ++designerPreviewToken
     try {
       const res = await previewDBDDL(serviceName.value, namespace.value, {
         alter_table: {
@@ -1338,12 +1319,36 @@ watch(designerOps, () => {
   }, 200)
 }, { deep: true })
 
+/**
+ * Clears the designer queue and reloads the selected table after its structure
+ * may have changed. Clears cached columns, sorting, and filtering because
+ * referenced columns may have been removed.
+ */
+async function reloadAlteredTable() {
+  designerOps.value = []
+  designerPreview.value = []
+  if (selectedRelation.value) {
+    const key = `${selectedRelation.value.schema}.${selectedRelation.value.name}`
+    const next = { ...tableColumnsCache.value }
+    delete next[key]
+    tableColumnsCache.value = next
+  }
+  sortCol.value = ''
+  filterCol.value = ''
+  filterVal.value = ''
+  browseData.value = null
+  await loadRows()
+  await loadSchema()
+}
+
 function applyDesigner() {
   if (!selectedRelation.value || designerOps.value.length === 0) return
   const count = designerOps.value.length
   modal.open(ConfirmDialog, {
     title: `Apply ${count} change${count === 1 ? '' : 's'}?`,
-    message: 'The changes run as one transaction against the live table.',
+    message: sqlDialect() === 'mysql'
+      ? 'MySQL commits each change separately. If one fails, earlier changes remain applied.'
+      : 'The changes run as one transaction against the live table.',
     confirmLabel: 'Apply changes',
     onConfirm: async () => {
       modal.close()
@@ -1358,22 +1363,18 @@ function applyDesigner() {
           activeDatabase.value,
         )
         toast.success(`Applied ${res.ddl.length} statement${res.ddl.length === 1 ? '' : 's'}`)
-        designerOps.value = []
-        designerPreview.value = []
-        // Invalidate the cached column list for this table so the next
-        // autocomplete pass picks up the new shape.
-        if (selectedRelation.value) {
-          const key = `${selectedRelation.value.schema}.${selectedRelation.value.name}`
-          const next = { ...tableColumnsCache.value }
-          delete next[key]
-          tableColumnsCache.value = next
-        }
-        // Reload structure + rows so the user sees the new shape immediately.
-        await loadRows()
-        await loadSchema()
+        await reloadAlteredTable()
       } catch (e: unknown) {
-        const err = e as { response?: { data?: { error?: string } } }
-        toast.error(err.response?.data?.error || 'Apply failed')
+        const err = e as { response?: { data?: { error?: string; committed?: number } } }
+        const message = err.response?.data?.error || 'Apply failed'
+        if (sqlDialect() === 'mysql' && err.response?.data?.committed !== 0) {
+          // Earlier statements may have committed, so the queue may no longer
+          // match the table.
+          toast.error(`${message}. Earlier changes may already be applied, so the table is being reloaded.`)
+          await reloadAlteredTable()
+        } else {
+          toast.error(message)
+        }
       } finally {
         designerApplying.value = false
       }
@@ -1381,7 +1382,7 @@ function applyDesigner() {
   })
 }
 
-// --- Indexes (G3) ---
+// --- Indexes ---
 const showAddIndex = ref(false)
 const newIndex = ref<DBIndexPayload>({
   schema: '', table: '', name: '', columns: [], unique: false, method: '', where: '', concurrent: false,
@@ -1503,7 +1504,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
     onConfirm: async () => {
       modal.close()
       try {
-        await dropDBIndex(serviceName.value, namespace.value, selectedRelation.value!.schema, idx.name, false, activeDatabase.value)
+        await dropDBIndex(serviceName.value, namespace.value, selectedRelation.value!.schema, selectedRelation.value!.name, idx.name, false, activeDatabase.value)
         toast.success(`Index ${idx.name} dropped`)
         await loadRows()
       } catch (e: unknown) {
@@ -1584,8 +1585,9 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <div class="flex items-center gap-1">
             <button
               v-if="!schemaCollapsed && canWriteData"
-              class="p-1 rounded-sm hover:bg-slate-200 dark:hover:bg-slate-800 text-kipper-600"
+              class="p-1 rounded-sm hover:bg-slate-200 dark:hover:bg-slate-800 text-kipper-600 disabled:opacity-50"
               title="Create a new table"
+              :disabled="!dialectKnown"
               @click="startCreateTable"
             >
               <Plus class="w-3.5 h-3.5" />
@@ -1888,9 +1890,9 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           </template>
         </section>
 
-        <!-- Designer tab (G3) -->
+        <!-- Designer tab -->
         <section v-if="activeTab === 'designer'" class="flex-1 flex flex-col min-h-0">
-          <!-- Create-table form (G3.5b) -->
+          <!-- Create-table form -->
           <template v-if="creatingTable">
             <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-kipper-50 dark:bg-kipper-950/20">
               <Plus class="w-4 h-4 text-kipper-600" />
@@ -2008,7 +2010,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <div v-else-if="!selectedRelation || !browseData" class="flex-1 flex items-center justify-center text-sm text-slate-500 p-8">
             <div class="text-center">
               <p>Pick a table from the sidebar to design its schema.</p>
-              <button v-if="canWriteData" class="mt-3 inline-flex items-center gap-1 px-3 py-1.5 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="startCreateTable">
+              <button v-if="canWriteData" class="mt-3 inline-flex items-center gap-1 px-3 py-1.5 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50" :disabled="!dialectKnown" @click="startCreateTable">
                 <Plus class="w-4 h-4" /> New table
               </button>
             </div>
@@ -2194,13 +2196,13 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
 
             <!-- DDL preview -->
             <div v-if="designerPreview.length > 0" class="border-t border-slate-200 dark:border-slate-800">
-              <div class="px-4 py-1.5 text-[10px] uppercase tracking-wide text-slate-500 bg-slate-50 dark:bg-slate-950">DDL preview (one transaction)</div>
+              <div class="px-4 py-1.5 text-[10px] uppercase tracking-wide text-slate-500 bg-slate-50 dark:bg-slate-950">DDL preview ({{ sqlDialect() === 'mysql' ? 'each statement commits separately' : 'one transaction' }})</div>
               <pre class="text-xs font-mono p-3 bg-slate-950 text-slate-100 overflow-auto max-h-48">{{ designerPreview.join(';\n') + ';' }}</pre>
             </div>
           </template>
         </section>
 
-        <!-- Indexes tab (G3) -->
+        <!-- Indexes tab -->
         <section v-if="activeTab === 'indexes'" class="flex-1 flex flex-col min-h-0">
           <div v-if="!selectedRelation || !browseData" class="flex-1 flex items-center justify-center text-sm text-slate-500 p-8">
             Pick a table from the sidebar to manage its indexes.
@@ -2237,8 +2239,10 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                   <select v-model="newIndex.method" class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900">
                     <option value="">default (btree)</option>
                     <option value="btree">btree</option>
-                    <option value="gin">gin</option>
-                    <option value="gist">gist</option>
+                    <template v-if="sqlDialect() === 'postgres'">
+                      <option value="gin">gin</option>
+                      <option value="gist">gist</option>
+                    </template>
                     <option value="hash">hash</option>
                   </select>
                 </div>
@@ -2282,18 +2286,18 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                     <span v-else-if="!newIndex.columns.length" class="text-xs text-slate-400">No columns available. Open a table first.</span>
                   </div>
                   <p v-if="newIndex.columns.length > 1" class="mt-1 text-[10px] text-slate-500">
-                    Order matters: Postgres uses the leftmost prefix of a multi-column index for query planning.
+                    Order matters: the database uses the leftmost columns of a multi-column index for query planning.
                   </p>
                 </div>
-                <div class="md:col-span-2">
-                  <label class="text-[10px] uppercase tracking-wide text-slate-500 block">WHERE clause (partial index, Postgres only)</label>
+                <div v-if="sqlDialect() === 'postgres'" class="md:col-span-2">
+                  <label class="text-[10px] uppercase tracking-wide text-slate-500 block">WHERE clause (partial index)</label>
                   <input v-model="newIndex.where" placeholder="status = 'active'" class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" />
                 </div>
                 <div class="flex items-center gap-3">
                   <label class="inline-flex items-center gap-1 text-xs">
                     <input v-model="newIndex.unique" type="checkbox" class="accent-kipper-600" /> Unique
                   </label>
-                  <label class="inline-flex items-center gap-1 text-xs">
+                  <label v-if="sqlDialect() === 'postgres'" class="inline-flex items-center gap-1 text-xs">
                     <input v-model="newIndex.concurrent" type="checkbox" class="accent-kipper-600" /> Concurrent
                   </label>
                 </div>
@@ -2346,7 +2350,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           </template>
         </section>
 
-        <!-- SQL tab (G1 + G5 sidebar) -->
+        <!-- SQL tab with snippets and history sidebar -->
         <section v-else-if="activeTab === 'sql'" class="flex-1 flex min-h-0">
           <!-- Left rail: snippets / history. Narrower than the schema
                sidebar so the editor still gets the lion's share. -->

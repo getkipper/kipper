@@ -76,6 +76,7 @@ export interface DBSchemaDatabase {
 }
 
 export interface DBSchema {
+  dialect: 'postgres' | 'mysql'
   databases: DBSchemaDatabase[]
 }
 
@@ -253,7 +254,7 @@ export interface DBPreviewRequest {
   create_table?: DBCreateTablePayload
   alter_table?: { schema: string; table: string; ops: DBTableOp[] }
   create_index?: DBIndexPayload
-  drop_index?: { schema: string; name: string; concurrent?: boolean }
+  drop_index?: { schema: string; table: string; name: string; concurrent?: boolean }
 }
 
 export interface DBPreviewResponse {
@@ -298,15 +299,23 @@ export async function createDBIndex(service: string, namespace: string, payload:
   return data
 }
 
+/**
+ * Drops an index and returns the executed DDL. MySQL requires its table name.
+ * PostgreSQL ignores table and runs concurrent drops outside a transaction.
+ * An omitted database uses the service's default database. Request failures reject
+ * the promise.
+ */
 export async function dropDBIndex(
   service: string,
   namespace: string,
   schema: string,
+  table: string,
   name: string,
   concurrent = false,
   database?: string,
 ): Promise<DBPreviewResponse> {
   const params = dbParams(database)
+  params.set('table', table)
   if (concurrent) params.set('concurrent', 'true')
   const { data } = await client.delete<DBPreviewResponse>(
     `/services/${service}/db/indexes/${encodeURIComponent(schema)}/${encodeURIComponent(name)}${withNS(namespace, params)}`,

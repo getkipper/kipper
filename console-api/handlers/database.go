@@ -110,6 +110,7 @@ type columnMeta struct {
 // columns at the top level — those are fetched on table click via a
 // separate call so the sidebar load stays fast on big schemas.
 type schemaResponse struct {
+	Dialect   string           `json:"dialect,omitempty"`
 	Databases []schemaDatabase `json:"databases"`
 }
 
@@ -277,15 +278,7 @@ func (d *Database) Schema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var resp schemaResponse
-	switch info.driver {
-	case "pgx":
-		resp, err = readPostgresSchema(ctx, db)
-	case "mysql":
-		resp, err = readMySQLSchema(ctx, db)
-	default:
-		err = fmt.Errorf("unsupported driver %q", info.driver)
-	}
+	resp, err := readSchema(ctx, db, info.driver)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("schema read failed: %v", err))
 		return
@@ -639,6 +632,24 @@ ORDER BY table_catalog, table_schema, table_name`
 		return schemaResponse{}, err
 	}
 	return groupSchema(rels, normalisePostgresKind), nil
+}
+
+// readSchema returns the schema tree and the SQL dialect used by the console's
+// syntax highlighting and assistant. It returns an error for unsupported drivers.
+func readSchema(ctx context.Context, db *sql.DB, driver string) (schemaResponse, error) {
+	var resp schemaResponse
+	var err error
+	switch driver {
+	case "pgx":
+		resp, err = readPostgresSchema(ctx, db)
+		resp.Dialect = "postgres"
+	case "mysql":
+		resp, err = readMySQLSchema(ctx, db)
+		resp.Dialect = "mysql"
+	default:
+		err = fmt.Errorf("unsupported driver %q", driver)
+	}
+	return resp, err
 }
 
 // readSchemasOnly returns one schemaRow per visible schema with
