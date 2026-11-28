@@ -784,6 +784,9 @@ watch([serviceName, namespace], () => {
   dialectKnown.value = false
   schema.value = { dialect: 'postgres', databases: [] }
   cancelCreateTable()
+  selectedRelation.value = null
+  browseData.value = null
+  tableColumnsCache.value = {}
   loadDatabases()
   loadSchema()
 })
@@ -1280,14 +1283,24 @@ function queueToggleNullable(col: { name: string; nullable: boolean }) {
 let designerPreviewTimer: ReturnType<typeof setTimeout> | null = null
 let designerPreviewToken = 0
 
+// Keep queued changes tied to their original table.
+watch(
+  () => JSON.stringify(selectedRelation.value ? [selectedRelation.value.schema, selectedRelation.value.name] : null),
+  () => {
+    designerOps.value = []
+    designerPreview.value = []
+  },
+)
+
 watch(designerOps, () => {
   if (designerPreviewTimer) clearTimeout(designerPreviewTimer)
+  // Queue changes invalidate pending previews immediately, before the debounce.
+  const myToken = ++designerPreviewToken
   designerPreviewTimer = setTimeout(async () => {
     if (!selectedRelation.value || designerOps.value.length === 0) {
       designerPreview.value = []
       return
     }
-    const myToken = ++designerPreviewToken
     try {
       const res = await previewDBDDL(serviceName.value, namespace.value, {
         alter_table: {

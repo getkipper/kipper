@@ -101,7 +101,7 @@ Click a table in the sidebar, switch to Designer. Each column is a row showing N
 - **Toggle null:** queues a NOT NULL on/off change.
 - **Drop:** queues a DROP COLUMN. Asks for confirmation because data is lost.
 
-Each action queues an op into a pending list shown above the column rows. The **DDL preview** at the bottom regenerates server-side on every change, so you see the exact `ALTER TABLE` statements before applying.
+Each action adds an operation to the pending list above the column rows. The queue belongs to the open table and is cleared when you open another table or service. The **DDL preview** at the bottom regenerates server-side on every change, so you see the exact `ALTER TABLE` statements before applying.
 
 - **Apply N changes** submits the queued statements. On Postgres they run in one transaction, and a failure leaves the table unchanged and the queue in place for a retry. MySQL commits each statement separately. If a later statement fails, earlier changes stay applied, so the console reloads the table and clears the queue. It also reloads and clears the queue when the committed count is unknown. When MySQL rejects the first statement, or the designer refuses the batch before running it, nothing was applied and the queue stays.
 - **Take a backup first** is currently a placeholder control. Create and verify a backup separately before destructive changes.
